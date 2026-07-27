@@ -34,12 +34,63 @@ const NODE_R_MAX = 19;
 // Second, each record also carries the LAST value written for every field, so
 // a frame where nothing changed costs zero DOM writes. On a settled board that
 // is most frames — the numbers only move when growth crosses an integer.
-const LIVE = { stat: Object.create(null), terr: Object.create(null), writes: 0 };
+const LIVE = {
+  stat: Object.create(null), terr: Object.create(null),
+  label: [],          // territory labels, counter-scaled with the stations
+  symK: null,         // last symbol scale written into a transform
+  writes: 0,
+};
 
 function resetLiveIndex() {
   LIVE.stat = Object.create(null);
   LIVE.terr = Object.create(null);
+  LIVE.label = [];
+  LIVE.symK = null;
   LIVE.writes = 0;
+}
+
+// ── symbol counter-scale ────────────────────────────────────────────────
+//
+// render/camera.js zooms by narrowing the viewBox, which magnifies geography
+// and symbols alike — at 4x the Ruhr was four times bigger and exactly as
+// tangled. Stations, their garrison numbers, their name and ×1.4 labels and the
+// territory captions are counter-scaled by 1/scale about their own anchors, so
+// they hold a constant on-screen size and zooming actually separates a cluster.
+//
+// Territory FILLS, borders and links are deliberately NOT counter-scaled: those
+// are geography and must scale with the map.
+//
+// The exponent lives in camera.js and nowhere else; this only asks for the
+// number. Guarded because renderBoard() can run before initCamera().
+function mapSymbolScale() {
+  return (typeof cameraSymbolScale === 'function') ? cameraSymbolScale() : 1;
+}
+
+function mapSymbolTransform(x, y, k) {
+  return (k === 1)
+    ? 'translate(' + x + ',' + y + ')'
+    : 'translate(' + x + ',' + y + ') scale(' + (Math.round(k * 100000) / 100000) + ')';
+}
+
+// Rewrite every symbol transform for a new camera scale. Called from the camera
+// change notification AND as a cheap guard at the top of renderLive() — a zoom
+// while the game is paused produces no frames, and a board drawn before
+// initCamera() has to pick the scale up on its first frame. Both paths return
+// immediately when the scale has not moved, so the per-frame cost of the safety
+// net is one float comparison.
+function mapApplySymbolScale(force) {
+  const k = mapSymbolScale();
+  if (!force && k === LIVE.symK) return 0;
+  LIVE.symK = k;
+  const before = LIVE.writes;
+  for (const sid in LIVE.stat) {
+    const rec = LIVE.stat[sid];
+    if (rec.pos) setAttr(rec.g, 'transform', mapSymbolTransform(rec.pos[0], rec.pos[1], k));
+  }
+  for (const rec of LIVE.label) {
+    setAttr(rec.node, 'transform', mapSymbolTransform(rec.x, rec.y, k));
+  }
+  return LIVE.writes - before;
 }
 
 // Every DOM write in this file goes through here so the per-frame cost is a
@@ -218,6 +269,105 @@ function stationShape(type, r) {
   return el('circle', 'station-shape', { r: r });
 }
 
+// The four silhouettes do not have the same outer extent for a given `r`: the
+// square's corners reach r*1.24 while the circle, shield and star stop at r.
+// Anything drawn as a concentric ring has to clear the widest of them or it
+// slices through the producer nodes.
+function mapOuterExtent(type, r) {
+  return (type === 'producer') ? r * 1.25 : r;
+}
+
+// ── fullness ring — how full is this station, as a proportion ───────────
+//
+// Measured on the real map: neutral stations hold 441 units at tick 0 and 1804
+// by tick 3000, with all 59 sitting above 90% of capacity. Neutral ground is
+// cheap early and expensive forever after, and that clock was completely
+// invisible — a two-station country that falls to one volley at the opening is
+// a wall of full garrisons five sim-minutes later, and nothing on the board
+// said so.
+//
+// §8 rules out the two obvious encodings: **colour carries ownership only**, so
+// fullness may not tint a node; **shape encodes type**, so it may not deform
+// one either. What is left is length, weight and opacity of a secondary mark.
+//
+// Chosen: an ARC around the node — a faint full-circle track with a brighter
+// arc swept over it, arc length = garrison / capacity. It is honest about being
+// a proportion (the track is the denominator, drawn even at 0%), it is
+// achromatic so it claims no hue and cannot be mistaken for ownership, it does
+// not touch the silhouette, and it reads as "nearly closed" vs "barely started"
+// across sixty nodes at once without anyone reading a number. Cost is one
+// `stroke-dasharray` write per node per *bucket* change, which on a settled
+// board is almost never.
+//
+// Applied to EVERY station, not only neutrals. The same question — "75% of
+// what, and is it worth spending?" — is what makes the `send 75%` control hard
+// to reason about on your own cities, and §2 turns on it directly: full
+// stations have stopped paying dividends and should be spent. Restricting the
+// ring to neutrals would also make its presence a second ownership channel,
+// which is exactly the thing §8 forbids.
+//
+// pathLength=100 normalises the dash units, so the arc is written as a literal
+// percentage and the ring's radius is free to vary with node size.
+const RING_GAP = 3;
+const RING_BUCKETS = 40;      // 2.5% steps — finer than the eye resolves at 9px
+
+// ── battle legibility ───────────────────────────────────────────────────
+//
+// The complaint this answers, in the player's words: *"60 units attacking a
+// station of 10 often lose with making no noticeable impact"* — followed by the
+// realisation that they had in fact won, they just could not see it happening.
+// The sim was right the whole time. A 6:1 fight takes atanh(1/r)/COMBAT_RATE ≈
+// 76 ticks, several wall-clock seconds at 1x, and for every one of those the
+// node rendered the DEFENDER's garrison and nothing else. The attacking stack is
+// sitting right there in state.stations[sid].attackers and was never drawn, so
+// "I am winning this" and "my army evaporated" looked identical.
+//
+// Three questions have to be answerable without a click:
+//
+//   1. is this station fighting?      -> a complete ring appears where a
+//                                        peaceful node has only the faint
+//                                        achromatic fullness arc
+//   2. how much is mine vs theirs?    -> a SECOND number under the node, in the
+//                                        attacker's ownership colour, against
+//                                        the garrison number in the middle
+//   3. am I winning?                  -> the ring is split by POWER share, one
+//                                        arc per power, in ownership colours,
+//                                        with a notch at the 50% mark
+//
+// §8 is not bent to do this. Colour still carries ownership ONLY: the arcs and
+// the second number are drawn in the participants' own power colours, which
+// reinforces the rule rather than competing with it. The garrison number is not
+// moved, resized or recoloured — everything here is secondary to it, and all of
+// it is `display:none` on a node that is not fighting, so a peaceful board is
+// byte-identical to before.
+//
+// POWER, not unit count. 60 infantry walking into a 3.0-defense fortress are
+// nowhere near 6:1, and a ring drawn from unit totals would lie at exactly the
+// moment the player is asking it a question. stationPower() already folds in
+// defense, terrain, matchup and the artillery-stripped fort block, and it is a
+// pure read (sim/combat.js — it allocates locals and touches nothing), so the
+// renderer may call it.
+//
+// The DEFENDER's arc is the `.station-battle` circle that already existed: it is
+// already at the right radius, already revealed by `.is-fighting`, already
+// pointer-events:none. Only the attacker arcs, the notch and the second number
+// are new, and those are built lazily on a station's first battle.
+const MAP_MOM_GAP = 3;        // momentum ring sits this far outside the fill ring
+const MAP_MOM_ATK = 2;        // attacker arcs built; a 3rd+ power folds into the last
+const MAP_MOM_BUCKETS = 100;  // 1% steps — same "rewrite on a visible change" rule
+const MAP_MOM_NEUTRAL = '#8b94a4';
+
+function mapUnitTotal(u) {
+  if (!u) return 0;
+  return (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
+}
+
+function mapRingFraction(units, capacity) {
+  const cap = Number(capacity);
+  if (!isFinite(cap) || cap <= 0) return 0;
+  return clamp(units / cap, 0, 1);
+}
+
 function stationRadius(capacity, capMin, capMax) {
   const cap = Number(capacity);
   if (!isFinite(cap) || capMax <= capMin) return (NODE_R_MIN + NODE_R_MAX) / 2;
@@ -363,18 +513,47 @@ function drawStations(D, layer, state) {
     }
     const r = stationRadius(st.capacity, capMin, capMax);
 
+    // translate(pos) scale(1/cameraScale): everything inside the group —
+    // circles, garrison number, fullness ring, cut marks, name and ×N label —
+    // is positioned relative to this origin, so the counter-scale comes free
+    // and is applied about the node's own centre rather than sliding it.
     const g = el('g', 'station', {
-      transform: 'translate(' + st.pos[0] + ',' + st.pos[1] + ')',
+      transform: mapSymbolTransform(st.pos[0], st.pos[1], mapSymbolScale()),
       'data-station': sid,
       'data-type': st.type || 'holding',
       'data-owner': 'neutral',
     });
 
+    const outer = mapOuterExtent(st.type, r);
+
     // Battle ring, created once and revealed by class. A fight is the most
     // time-critical thing on the board (§5) so it gets an animated ring rather
     // than a static mark — the animation is CSS, which costs the renderer
-    // nothing per frame.
-    g.appendChild(el('circle', 'station-battle', { r: r + 5 }));
+    // nothing per frame. Sits outside the fullness ring so the two never
+    // overlap on a square node.
+    // Doubles as the DEFENDER's arc once a fight starts — see the battle
+    // section above. Kept as one circle with pathLength=100 so the arc is
+    // written as a literal percentage, exactly like the fullness ring.
+    const momR = outer + RING_GAP + MAP_MOM_GAP;
+    // rotate(90) starts the sweep at 6 o'clock rather than 12. The 50% mark
+    // then lands at the TOP of the ring, which is the only part of the node's
+    // surround that nothing else claims — the attacker's number hangs below and
+    // a notch at 6 o'clock landed straight on it.
+    const battleRing = el('circle', 'station-battle', {
+      r: momR, pathLength: 100, 'stroke-dasharray': '100 0',
+      'stroke-dashoffset': 0, transform: 'rotate(90)',
+    });
+    g.appendChild(battleRing);
+
+    // Fullness ring: faint track (the denominator) + swept arc (the value).
+    // Both are built once; only the arc's dasharray is ever written again.
+    const ringR = outer + RING_GAP;
+    g.appendChild(el('circle', 'station-fill-track', { r: ringR }));
+    const fillArc = el('circle', 'station-fill', {
+      r: ringR, pathLength: 100, 'stroke-dasharray': '0 100',
+      transform: 'rotate(-90)',      // start the sweep at 12 o'clock
+    });
+    g.appendChild(fillArc);
 
     const shape = stationShape(st.type, r);
     shape.setAttribute('fill', '#252c37');
@@ -404,8 +583,21 @@ function drawStations(D, layer, state) {
     // frame for 108 stations is the other way to do this and it is slower and
     // fragile — select.js inserts its own children into these same <g>s.
     LIVE.stat[sid] = {
-      g: g, shape: shape, num: num,
+      g: g, shape: shape, num: num, fillArc: fillArc,
+      pos: [st.pos[0], st.pos[1]],
+      capacity: Number(st.capacity) || 0,
       owner: undefined, garrison: undefined, cut: undefined, fight: undefined,
+      fillBucket: undefined,
+      // battle readout: geometry now, DOM on this station's first fight
+      ring: battleRing,
+      momR: momR,
+      attY: momR + 9,
+      // Near-peer with the garrison number, not a footnote: in a battle "how
+      // many of mine" and "how many of theirs" are the same question asked
+      // twice, and a caption-sized second number was unreadable against the
+      // neighbouring nodes at 1x.
+      attSize: Number(clamp(r * 0.95, 9.5, 16).toFixed(1)),
+      bat: null,
     };
 
     // Modifiers labelled in place, next to the node (§8).
@@ -440,8 +632,17 @@ function drawTerritoryLabels(D, layer) {
       if (!pts) continue;
       at = centroid(pts);
     }
-    layer.appendChild(el('text', 'territory-label',
-      { x: at[0], y: at[1], text: t.name }));
+    // Position lives in the TRANSFORM, not in x/y, so the counter-scale
+    // shrinks the caption toward its own anchor instead of sliding it across
+    // the country. With x/y set, scale(k) would multiply the position too and
+    // "GERMANY" would drift off toward the origin as you zoomed.
+    const node = el('text', 'territory-label', {
+      x: 0, y: 0,
+      transform: mapSymbolTransform(at[0], at[1], mapSymbolScale()),
+      text: t.name,
+    });
+    layer.appendChild(node);
+    LIVE.label.push({ node: node, x: at[0], y: at[1] });
     drawn++;
   }
   return drawn;
@@ -491,6 +692,189 @@ function stationContested(state, sid) {
   return false;
 }
 
+// Built on a station's FIRST battle, never in renderBoard(). A board that has
+// not seen a fight has exactly the DOM it had before this feature existed,
+// which is what makes "a peaceful node renders identically" checkable rather
+// than asserted. One insert per station per game; after that it is reused.
+function mapBattleNodes(rec) {
+  if (rec.bat) return rec.bat;
+  const g = el('g', 'station-battlegroup');
+
+  const arcs = [rec.ring];
+  const cache = [{ len: null, off: null, color: null }];
+  for (let i = 0; i < MAP_MOM_ATK; i++) {
+    arcs.push(g.appendChild(el('circle', 'station-mom', {
+      r: rec.momR, pathLength: 100, transform: 'rotate(90)',
+      'stroke-dasharray': '0 100', 'stroke-dashoffset': 0,
+    })));
+    cache.push({ len: null, off: null, color: null });
+  }
+
+  // The 50% mark, cut into the top of the ring. The defender's arc starts at 6
+  // o'clock and sweeps clockwise, so its boundary reaching past this notch
+  // means the defender holds more than half the Power in play. Without it the
+  // player has to judge two arc lengths against each other; with it, "past the
+  // notch" is the whole read. Static, so it costs nothing per frame.
+  g.appendChild(el('line', 'station-mom-half', {
+    x1: 0, y1: -(rec.momR - 3.4), x2: 0, y2: -(rec.momR + 3.4),
+  }));
+
+  const num = el('text', 'station-attackers', {
+    y: rec.attY, 'font-size': rec.attSize, text: '',
+  });
+  g.appendChild(num);
+
+  rec.g.appendChild(g);
+  rec.bat = { arcs: arcs, cache: cache, num: num, text: null, color: null, tick: -1 };
+  return rec.bat;
+}
+
+// One arc write, diffed three ways. Stroke goes in as an INLINE STYLE, not as a
+// presentation attribute: `.station-battle { stroke: var(--warn) }` is a
+// stylesheet rule and a stylesheet rule silently outranks a presentation
+// attribute (docs/testing/known-issues.md #15). Inline style outranks the
+// stylesheet, so this is the direction that actually lands.
+function mapBattleArc(node, c, len, off, color) {
+  if (color !== c.color) {
+    c.color = color;
+    node.style.stroke = color;
+    LIVE.writes++;
+  }
+  if (len !== c.len) {
+    c.len = len;
+    setAttr(node, 'stroke-dasharray', len + ' ' + (100 - len));
+  }
+  if (off !== c.off) {
+    c.off = off;
+    setAttr(node, 'stroke-dashoffset', off);
+  }
+}
+
+// Everyone with forces at this station and their share of the Power in play,
+// defender first, attackers strongest-first.
+//
+// state.stations[sid].attackers is keyed by power id and MORE THAN ONE power
+// can be attacking the same station at once — a three-way fight over Belgrade
+// is a normal thing for this board to produce. That case is not special-cased,
+// it is the general case: one arc per participant. Only the arc BUDGET is
+// finite, and the tail folds into the last arc rather than being dropped.
+function mapBattleParts(D, state, sid) {
+  const st = state.stations[sid];
+  const hasPower = (typeof stationPower === 'function');
+  const defP = hasPower ? Number(stationPower(state, sid, 'defender')) : mapUnitTotal(st.units);
+  const def = {
+    color: powerColor(D, st.owner) || MAP_MOM_NEUTRAL,
+    p: (isFinite(defP) && defP > 0) ? defP : 0,
+    units: mapUnitTotal(st.units),
+    pid: st.owner || 'neutral',
+  };
+
+  const atk = [];
+  const bag = st.attackers;
+  if (bag) {
+    for (const pid in bag) {
+      const units = mapUnitTotal(bag[pid]);
+      if (units <= 1e-6) continue;
+      const p = hasPower ? Number(stationPower(state, sid, pid)) : units;
+      atk.push({
+        color: powerColor(D, pid) || MAP_MOM_NEUTRAL,
+        p: (isFinite(p) && p > 0) ? p : 0,
+        units: units, pid: pid,
+      });
+    }
+  }
+  // Strongest first so the fold keeps the two loudest claims intact, and by pid
+  // on a tie so the ring does not reshuffle between frames on equal stacks.
+  atk.sort(function (a, b) { return (b.p - a.p) || (a.pid < b.pid ? -1 : 1); });
+  return { def: def, atk: atk };
+}
+
+// Per-tick, per-fighting-station update. Everything else on the node is already
+// diffed against its last written value; this is the same discipline one level
+// down.
+function mapBattleLive(D, state, sid, rec) {
+  const bat = mapBattleNodes(rec);
+  // Power only moves when the sim moves. renderLive() runs per FRAME — up to
+  // six frames per tick at 1x — so gating on the tick collapses the whole
+  // battle readout to one evaluation per tick per fighting station, and
+  // stationPower() (which allocates) is not called sixty times a second.
+  if (bat.tick === state.tick) return;
+  bat.tick = state.tick;
+
+  const parts = mapBattleParts(D, state, sid);
+  const def = parts.def;
+  const atk = parts.atk;
+
+  // Fold power N+1.. into the last arc, coloured by the strongest of them, so
+  // a four-way fight renders as "defender / biggest / everyone else" instead of
+  // silently dropping two armies off the ring.
+  const slices = [def];
+  for (let i = 0; i < MAP_MOM_ATK && i < atk.length; i++) slices.push(atk[i]);
+  if (atk.length > MAP_MOM_ATK) {
+    const last = slices[slices.length - 1];
+    let extra = 0;
+    for (let i = MAP_MOM_ATK; i < atk.length; i++) extra += atk[i].p;
+    slices[slices.length - 1] = { color: last.color, p: last.p + extra, units: last.units, pid: last.pid };
+  }
+
+  let total = 0;
+  for (const s of slices) total += s.p;
+
+  // Nothing to divide by: a garrison of zero being walked into, or a battle
+  // record that outlived its units. Draw the ring as pure attacker rather than
+  // as NaN.
+  let acc = 0;
+  for (let i = 0; i < bat.arcs.length; i++) {
+    const s = slices[i];
+    let len = 0;
+    if (s && total > 0) {
+      len = Math.round((s.p / total) * MAP_MOM_BUCKETS) * (100 / MAP_MOM_BUCKETS);
+    } else if (s && i === 1 && total <= 0) {
+      len = 100;                       // attacker present, defender annihilated
+    }
+    mapBattleArc(bat.arcs[i], bat.cache[i], len, -acc,
+      (s && s.color) || MAP_MOM_NEUTRAL);
+    acc += len;
+  }
+
+  // The second number. Prefer the HUMAN's own stack when the human is one of
+  // the attackers — "how much of mine is there" is the question that started
+  // this — and otherwise the largest, which is the one that decides the fight.
+  // Colour says whose it is either way, so the number is never ambiguous.
+  let pick = null;
+  const me = (typeof PLAYER === 'string') ? PLAYER : null;
+  for (const a of atk) if (a.pid === me) { pick = a; break; }
+  if (!pick) pick = atk[0] || null;
+
+  // Trailing '+' when other powers are also attacking, so a multi-party fight
+  // never reads as a straight duel.
+  const text = pick ? (formatNum(Math.floor(pick.units)) + (atk.length > 1 ? '+' : '')) : '';
+  if (text !== bat.text) {
+    bat.text = text;
+    setText(bat.num, text);
+  }
+  // Lifted toward white before it is painted. The saturated ownership colours
+  // are tuned to be read as a 2px outline around a node, and at text weight on
+  // the dark board they came out dim enough that the territory caption behind
+  // them competed — measured on the real map, not guessed. Same hue, so it
+  // still says whose it is; enough luminance to be read at a glance, which is
+  // the entire point of the number.
+  const color = pick ? mixHex(pick.color, '#ffffff', 0.4) : MAP_MOM_NEUTRAL;
+  if (color !== bat.color) {
+    bat.color = color;
+    bat.num.style.fill = color;
+    LIVE.writes++;
+  }
+}
+
+// A fight ended. The group is hidden by CSS the moment `.is-fighting` comes off
+// the <g>, so nothing has to be unwritten — only the tick gate is released so
+// the next battle at this station recomputes from scratch instead of being
+// skipped as "already done this tick".
+function mapBattleEnd(rec) {
+  if (rec.bat) rec.bat.tick = -1;
+}
+
 function liveStations(D, state) {
   if (!state || !state.stations) return;
   for (const sid in LIVE.stat) {
@@ -519,10 +903,26 @@ function liveStations(D, state) {
     // rounds to zero on integers) — floored here and nowhere else, which is
     // also why this only writes on the frames where the integer actually moved.
     const u = st.units;
-    const n = Math.floor((u.infantry || 0) + (u.artillery || 0) + (u.armour || 0));
+    const total = (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
+    const n = Math.floor(total);
     if (n !== rec.garrison) {
       rec.garrison = n;
       setText(rec.num, formatNum(n));
+    }
+
+    // Fullness arc. Bucketed so a garrison drifting up by 0.03 units a tick
+    // does not produce a DOM write every frame — the ring only moves when it
+    // would move by a visible amount.
+    if (rec.fillArc && rec.capacity > 0) {
+      const bucket = Math.round(mapRingFraction(total, rec.capacity) * RING_BUCKETS);
+      if (bucket !== rec.fillBucket) {
+        rec.fillBucket = bucket;
+        const pct = (bucket * 100 / RING_BUCKETS).toFixed(1);
+        setAttr(rec.fillArc, 'stroke-dasharray', pct + ' 100');
+        // Binary "this one is done growing" read, for scanning the board at a
+        // glance rather than comparing arc lengths. Class only — no colour.
+        rec.fillArc.classList.toggle('is-full', bucket >= RING_BUCKETS - 1);
+      }
     }
 
     // Cut off from its capital: not growing, actively decaying (§5).
@@ -538,7 +938,21 @@ function liveStations(D, state) {
       rec.fight = fight;
       rec.g.classList.toggle('is-fighting', fight);
       LIVE.writes++;
+      if (!fight) mapBattleEnd(rec);
+      // A fighting node paints above its neighbours. Station <g>s are appended
+      // in sorted id order, so on the real map "Zurich" sat on top of the fight
+      // at Verdun 33 units away and ate the attacker's number — measured, not
+      // hypothetical. SVG has no z-index; sibling order IS z-order, so the node
+      // is moved to the end of #g-stations. Once when a battle opens, never per
+      // frame, and the <g> takes its own children with it, so nothing another
+      // file appended into it is disturbed. It cannot swallow a click either:
+      // everything this file adds is pointer-events:none, so the raised node's
+      // hit area is still exactly its own silhouette and numbers.
+      if (fight && rec.g.parentNode) rec.g.parentNode.appendChild(rec.g);
     }
+    // Only fighting stations pay for any of this; on a quiet board the cost of
+    // the whole battle readout is the boolean above, which was already here.
+    if (fight) mapBattleLive(D, state, sid, rec);
   }
 }
 
@@ -574,6 +988,11 @@ function renderLive(state) {
   if (!state || !state.stations) return 0;
   const D = readGlobals();
   const before = LIVE.writes;
+  // One float comparison on the frames where the camera has not moved. This is
+  // the safety net for a board drawn before initCamera(); the primary path is
+  // the onCameraChange subscription at the bottom of this file, which fires
+  // even when the loop is paused and producing no frames at all.
+  mapApplySymbolScale(false);
   liveStations(D, state);
   liveTerritories(D, state);
   return LIVE.writes - before;
@@ -649,6 +1068,10 @@ function renderBoard() {
     labels: drawTerritoryLabels(D, gLab),
   };
   drawPowerLegend(D);
+  // Stations and labels were built at whatever the scale is right now; record
+  // it so the first renderLive() does not rewrite 138 transforms for nothing.
+  LIVE.symK = mapSymbolScale();
+  mapWireCamera();
 
   if (!D.STATIONS) {
     console.warn('[render/map] STATIONS missing — territories drawn, no nodes');
@@ -663,9 +1086,32 @@ function renderBoard() {
 // Global exports — no modules anywhere in this project.
 window.renderBoard = renderBoard;
 window.renderLive = renderLive;
+window.mapApplySymbolScale = mapApplySymbolScale;
+
+// Counter-scale the symbols the moment the camera moves, not on the next frame.
+// A wheel zoom with the game paused produces no frames at all, and the stations
+// would sit at the old scale until the player unpaused. Guarded: camera.js may
+// not be loaded, and it self-bootstraps after this file either way, so the
+// subscription is deferred to DOMContentLoaded below.
+// Idempotent, and called from renderBoard() rather than only from a
+// DOMContentLoaded handler: handler order between render/ and app/ is not
+// something this file gets to assume (app/main.js sets APP_OWNS_RENDER inside
+// its own DOMContentLoaded callback, so which of the two runs first is already
+// load-order-dependent). renderBoard() always runs exactly once per board, so
+// hanging the subscription off it is the one hook that cannot be missed.
+let MAP_CAM_WIRED = false;
+
+function mapWireCamera() {
+  if (MAP_CAM_WIRED) return true;
+  if (typeof onCameraChange !== 'function') return false;
+  onCameraChange(function () { mapApplySymbolScale(false); });
+  MAP_CAM_WIRED = true;
+  return true;
+}
 
 // Self-bootstrap so the shell is viewable before app/main.js exists. Once the
 // app layer lands it sets window.APP_OWNS_RENDER = true and this stands down.
 document.addEventListener('DOMContentLoaded', function () {
   if (!window.APP_OWNS_RENDER) renderBoard();
+  mapWireCamera();
 });

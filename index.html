@@ -29,7 +29,23 @@
     </div>
   </header>
 
-  <!-- ── board ───────────────────────────────────────────────────────── -->
+  <!-- ── stage: board + right rail ───────────────────────────────────────
+       A ROW flex whose only job is to put the rail beside the board rather
+       than on top of it. This shape is load-bearing, not cosmetic: anything
+       painted over the board that accepts pointer events swallows the click
+       that commits an attack, with no error at all (see the #g-ui note
+       below). A DOM sibling in normal flow cannot do that by construction.
+
+       The SVG has a viewBox and preserveAspectRatio="xMidYMid meet", so
+       narrowing .board-wrap simply rescales the map; render/camera.js has a
+       ResizeObserver on #board and rebuilds its fit rect, which is what keeps
+       marquee selection aligned with what the player sees.
+
+       render/ailog.js still inserts its panel into .app immediately above
+       .bottombar — i.e. below this whole row — so the log and the rail
+       displace the board on different axes and never fight. -->
+  <div class="stage">
+
   <main class="board-wrap">
     <!-- tools/build-map.js fits the projected geometry to this frame with a
          small margin, so the viewBox is fixed and the data does the framing. -->
@@ -37,6 +53,11 @@
          role="img" aria-label="1914 Europe strategic map">
       <defs id="board-defs"></defs>
       <g id="g-territories"></g>
+      <!-- Multiplier coverage (§8: "hold a farm and see the territories it's
+           boosting light up"). Above the territory fill so it reads as a wash
+           over the country, below the borders so it never eats a coastline.
+           pointer-events:none in style.css — see the #g-ui warning below. -->
+      <g id="g-coverage"></g>
       <g id="g-borders"></g>
       <g id="g-links"></g>
       <g id="g-stations"></g>
@@ -49,8 +70,17 @@
       <g id="g-waves"></g>
       <g id="g-ui"></g>
     </svg>
-    <div class="station-readout" id="station-readout" hidden></div>
   </main>
+
+    <!-- The rail. Persistent, fixed width, never hidden, never animated: the
+         player must never have to look for where information appeared.
+         Sections are appended by JS through railAddSection() — see the seam
+         documented in render/readout.js and 01-data-schema.md. The element is
+         empty here on purpose so adding a section never means editing this
+         file. -->
+    <aside class="rail" id="rail" aria-label="Status"></aside>
+
+  </div>
 
   <!-- ── bottom bar ──────────────────────────────────────────────────── -->
   <footer class="bottombar">
@@ -60,7 +90,29 @@
       <button type="button" class="btn send-btn" data-fraction="0.5">50</button>
       <button type="button" class="btn send-btn is-active" data-fraction="0.75">75</button>
       <button type="button" class="btn send-btn" data-fraction="1">All</button>
+
+      <!-- WHICH types, beside HOW MANY. Same delegated listener, same
+           `is-active` projection, same "set once, not per attack" rule as the
+           fraction — these are toggles, not a radio group, and all three are on
+           by default so a player who ignores them gets the old behaviour. -->
+      <span class="send-sep" aria-hidden="true"></span>
+      <button type="button" class="btn send-btn send-type is-active" data-unit-type="infantry"
+              title="Include infantry in the volley">INF</button>
+      <button type="button" class="btn send-btn send-type is-active" data-unit-type="artillery"
+              title="Include artillery in the volley">ART</button>
+      <button type="button" class="btn send-btn send-type is-active" data-unit-type="armour"
+              title="Include armour in the volley">ARM</button>
     </div>
+
+    <!-- Discoverability for the gesture table in render/select.js. A left-click
+         on one of your own cities only ever SELECTS it now — the friendly march
+         moved to the right button — and nothing else on screen would tell you
+         that. One line, always visible, no tutorial. -->
+    <p class="send-hint" id="send-hint">
+      <span class="send-hint-item"><b>click</b> yours to select</span>
+      <span class="send-hint-item"><b>click</b> enemy to attack</span>
+      <span class="send-hint-item"><b>right-click</b> yours to reinforce</span>
+    </p>
 
     <div class="powers" id="powers-strip"></div>
 
@@ -105,6 +157,10 @@
 <script src="render/hud.js"></script>
 <script src="render/select.js"></script>
 <script src="render/ailog.js"></script>
+<script src="render/coverage.js"></script>
+<script src="render/readout.js"></script>
+<script src="render/victory.js"></script>
+<script src="render/camera.js"></script>
 
 <script src="app/loop.js"></script>
 <script src="app/main.js"></script>

@@ -9,7 +9,15 @@
 //
 // The only command today is the many-to-one volley from 00-vision.md §8:
 //
-//     { type:'send', owner, sources:[stationId,…], target:stationId, fraction }
+//     { type:'send', owner, sources:[stationId,…], target:stationId, fraction,
+//       types?:['infantry',…] }
+//
+// `types` is OPTIONAL and omitting it means "all of them", which is what every
+// existing caller — the AI, every test, every replay written before it existed —
+// already means. It narrows the SAME per-source proportion to a subset of unit
+// kinds; it is not a second fraction. Filtering happens before the
+// MIN_SEND_UNITS check, so a source that holds only artillery and is asked for
+// infantry is rejected as 'too-few-units' rather than sending an empty wave.
 //
 // Design properties that are deliberate and must not be "fixed":
 //
@@ -47,10 +55,15 @@ function _cmdAdjacency() {
 }
 
 // Fallback shortest path, used ONLY while sim/movement.js has not loaded.
-// routeBetween() there is the real thing and is authoritative; this exists so
-// commands.js is independently testable and so a missing movement module
-// produces a wrong ETA rather than a crash inside a validation path.
-function _cmdFallbackRoute(fromSid, toSid) {
+// routeBetween()/routeFor() there are the real thing and are authoritative;
+// this exists so commands.js is independently testable and so a missing
+// movement module produces a wrong ETA rather than a crash inside a validation
+// path.
+//
+// `canPass` mirrors _moveSearch in sim/movement.js: a station that fails it can
+// be the END of a path but is never expanded from, so it can never sit in the
+// middle of one.
+function _cmdFallbackRoute(fromSid, toSid, canPass) {
   if (fromSid === toSid) return [fromSid];
   var adj = _cmdAdjacency();
   if (!adj[fromSid] || !adj[toSid]) return null;
@@ -59,6 +72,7 @@ function _cmdFallbackRoute(fromSid, toSid) {
   seen[fromSid] = true;
   while (queue.length) {
     var cur = queue.shift();
+    if (canPass && cur !== fromSid && !canPass(cur)) continue;
     var nbrs = adj[cur] || [];
     for (var i = 0; i < nbrs.length; i++) {
       var n = nbrs[i].to;
@@ -78,9 +92,32 @@ function _cmdFallbackRoute(fromSid, toSid) {
 
 // Route lookup with the movement module preferred. Read at CALL time, not load
 // time, so script order between sim/commands.js and sim/movement.js is free.
-function commandRoute(fromSid, toSid) {
-  if (typeof routeBetween === 'function') return routeBetween(fromSid, toSid);
-  return _cmdFallbackRoute(fromSid, toSid);
+//
+// `state` and `pid` are OPTIONAL and they change the question being asked:
+//
+//   commandRoute(a, b)              -> the geographic shortest path
+//   commandRoute(a, b, state, pid)  -> the path a wave of `pid` may legally
+//                                      walk on THIS board, routing around
+//                                      stations other powers hold
+//
+// Optional rather than mandatory because the two-argument form already has
+// callers (render/select.js's preview, ai/ai.js's ETA estimate) and silently
+// changing what it returns is how a shared helper poisons a caller that never
+// asked for the new behaviour. Everything that decides whether a send is LEGAL
+// must pass state and pid — applyCommand below does, and the preview should
+// too, or it will draw a line the commit then rejects.
+function commandRoute(fromSid, toSid, state, pid) {
+  var canPass = null;
+  if (state && state.stations && pid) {
+    if (typeof routeFor === 'function') return routeFor(state, pid, fromSid, toSid);
+    canPass = function (sid) {
+      var st = state.stations[sid];
+      return !!st && (st.owner === pid || st.owner === 'neutral');
+    };
+  } else if (typeof routeBetween === 'function') {
+    return routeBetween(fromSid, toSid);
+  }
+  return _cmdFallbackRoute(fromSid, toSid, canPass);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +182,21 @@ function routeEtaTicks(path, units) {
 // ---------------------------------------------------------------------------
 // applyCommand
 // ---------------------------------------------------------------------------
+
+// Zero every unit kind the command did not ask for. `types` absent, empty or
+// not an array means "all kinds" — the pre-existing behaviour, unchanged.
+// Returns a NEW bundle; nothing here mutates its argument.
+function _cmdFilterTypes(units, types) {
+  if (!Array.isArray(types) || !types.length) return units;
+  var keep = {};
+  for (var i = 0; i < types.length; i++) keep[types[i]] = true;
+  var order = BAL.UNIT_ORDER, out = emptyUnits();
+  for (var j = 0; j < order.length; j++) {
+    var t = order[j];
+    if (keep[t]) out[t] = units[t];
+  }
+  return out;
+}
 
 function _cmdReject(result, source, reason) {
   result.rejected.push({ source: source, reason: reason });
@@ -214,10 +266,14 @@ function applyCommand(state, cmd) {
     if (st.owner !== owner) { _cmdReject(result, src, 'not-owned'); continue; }
     if (src === target) { _cmdReject(result, src, 'self-target'); continue; }
 
-    var take = splitUnits(st.units, fraction);
+    var take = _cmdFilterTypes(splitUnits(st.units, fraction), cmd.types);
     if (totalUnits(take) < BAL.MIN_SEND_UNITS) { _cmdReject(result, src, 'too-few-units'); continue; }
 
-    var path = commandRoute(src, target);
+    // OWNERSHIP-AWARE. A source whose only path to the target runs through
+    // ground another power holds has no legal send, and is rejected here rather
+    // than being quietly marched through the enemy. Per-source, like every
+    // other check in this loop: the rest of the volley still goes.
+    var path = commandRoute(src, target, state, owner);
     if (!path || path.length < 2) { _cmdReject(result, src, 'no-route'); continue; }
 
     plans.push({ source: src, units: take, path: path });

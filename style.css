@@ -263,14 +263,14 @@ html, body {
   pointer-events: none;
 }
 
-/* in-flight trails and wave markers (drawn by later milestones) */
-
-.wave-trail {
-  stroke: #ffffff;
-  stroke-width: 2.5;
-  stroke-opacity: 0.55;
-  fill: none;
-}
+/* The placeholder .wave-trail block that used to sit here is gone. It was
+   written before render/waves.js existed ("drawn by later milestones") and was
+   fully superseded by the real block further down, EXCEPT for one line:
+   `stroke: #ffffff`. That line silently beat the per-wave colour, because
+   render/waves.js sets the colour with setAttribute('stroke', …) — a
+   presentation attribute, which any stylesheet rule outranks. Every trail on
+   the board rendered white, so you could not tell whose army was marching, and
+   nothing anywhere reported a problem. See known-issues #15. */
 
 /* board-level messaging, e.g. missing data */
 
@@ -698,6 +698,16 @@ html, body {
   border: 1px solid var(--line);
 }
 
+/* A staging march is an order, so it must not read as a hold — but it is aimed
+   at a city the power already owns, so it must not read as an attack either.
+   Outlined in the accent rather than filled with it: the third state, visibly
+   between the other two. */
+.ailog-row[data-kind="stage"] .ailog-kind {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  background: transparent;
+}
+
 .ailog-target {
   width: 120px;
   flex: 0 0 auto;
@@ -813,3 +823,1198 @@ html, body {
   position: relative;
   z-index: 1;
 }
+
+/* ===================================================================
+   Milestone 5 — readability.
+   Each block below is owned by exactly ONE file. Append inside your own
+   block; do not edit another's. Four agents wrote these in parallel and
+   the markers are what kept them from clobbering each other.
+   =================================================================== */
+
+/* --- coverage overlay (render/coverage.js) ------------------------- */
+#g-coverage { pointer-events: none; }
+
+/* Coverage LIGHTS a country up (§8) — it does not tint it. The wash is
+   var(--ink), the one colour on the board no power owns: every power colour is
+   a saturated hue (ger blue, aut amber, ita green …), so a pale desaturated
+   glow cannot be misread as "somebody holds this". An earlier pass used
+   var(--accent) and Poland lit up in almost exactly Austria's amber, which is
+   the specific misreading this rule exists to prevent.
+
+   Magnitude is carried by fill-opacity, written as an INLINE STYLE per
+   territory by render/coverage.js — a stylesheet rule outranks an SVG
+   presentation attribute, so the `0` below would win over any fill-opacity
+   attribute the renderer set. It is the resting state for an unlit country. */
+.coverage-wash {
+  fill: var(--ink);
+  fill-opacity: 0;
+  stroke: none;
+  pointer-events: none;
+}
+.coverage-wash.is-held,
+.coverage-wash.is-prospective {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-opacity: 0.55;
+  stroke-linejoin: round;
+}
+/* A farm you do not hold is costed as if you took it, so it is drawn as a
+   proposal: dashed, and dimmer than ground you are actually being fed by. */
+.coverage-wash.is-prospective {
+  stroke-dasharray: 5 4;
+  stroke-opacity: 0.65;
+}
+/* The source country. Heavier outline so "which farm is this" survives a wash
+   spanning four neighbours. */
+.coverage-wash.is-home {
+  stroke-width: 2.2;
+  stroke-opacity: 0.95;
+}
+
+/* The figure. Small, monospaced and haloed, sitting under the country name:
+   the wash says WHICH, this says BY HOW MUCH. */
+.coverage-figure {
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-weight: 600;
+  text-anchor: middle;
+  fill: var(--accent);
+  paint-order: stroke;
+  stroke: var(--garrison-halo);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  opacity: 0;
+  pointer-events: none;
+}
+.coverage-figure.is-held { opacity: 1; }
+.coverage-figure.is-prospective { opacity: 0.8; }
+/* coverage:end */
+
+/* --- status rail (index.html .stage / .rail, render/readout.js) ----- */
+/*
+   The rail replaced a floating panel that followed the cursor. That panel was
+   click-transparent so it never ate a commit, but it appeared exactly where
+   the player was aiming — beside the station they were about to click — and
+   covered the board at the one moment it mattered. The fix is not a better
+   anchor, it is a place on screen that is always the same place.
+
+   THREE PROPERTIES, all deliberate:
+
+   1. It is a flex SIBLING of .board-wrap, never an overlay. Same argument as
+      .ailog: a panel over the board that accepts pointer events swallows the
+      click that commits an attack and produces no error at all. In normal
+      flow it displaces the board instead — the SVG has a viewBox and simply
+      rescales — so it is safe by construction rather than by a rule someone
+      has to remember. Sections here MAY therefore take pointer events.
+
+   2. Fixed width, always visible. No drawer, no popover, no transition. The
+      board is permanently narrower and that is the whole point: a layout that
+      never moves is one the player stops having to think about.
+
+   3. Never blank. render/readout.js swaps the station section to an
+      empire-at-a-glance body when nothing is hovered, so the column never
+      reads as a broken empty gutter.
+
+   WIDTH — 284px. Floor is set by content: the farm-reach rows are the widest
+   thing in the readout ("Toulouse ×3 · adjacent · majority 2/3 (×0.60)") and
+   they ellipsis below ~250px of text box, which loses the control tier — the
+   most useful half of the row. Ceiling is set by the board: 284px is 20% of a
+   1440px window and 15% of 1920px, so the map keeps a comfortably landscape
+   aspect at every size this game is played at. It is also ~50px wider than
+   the old floating panel, which is why fewer farm rows truncate now. */
+
+.stage {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* .board-wrap's own rule is `flex: 1 1 auto`, written when it was the only
+   thing in a COLUMN. In a row, an `auto` basis on a box whose child is
+   `width: 100%` is circular; `0` makes the board take exactly the space the
+   rail leaves. min-width: 0 lets it actually shrink — without it the flex
+   default of `min-width: auto` would let the SVG push the rail off screen.
+   Scoped to .stage > so the original rule is untouched. */
+.stage > .board-wrap {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.rail {
+  flex: 0 0 284px;
+  width: 284px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+
+/* Sections are a vertical stack with rules between them, so a second section
+   added later needs no CSS of its own to look like it belongs. */
+.rail-section {
+  flex: 0 0 auto;
+  padding: 9px 12px 11px;
+  border-bottom: 1px solid var(--line);
+}
+.rail-section[hidden] { display: none; }
+
+.rail-title {
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 6px;
+}
+/* rail:end */
+
+/* --- station readout (render/readout.js) --------------------------- */
+/* The base .station-readout rule near the top of this file still sets the
+   panel colours; the two things it sets that the rail contradicts —
+   `position: absolute` and `pointer-events: none` — are overridden here.
+   Neither is a safety property any more: the panel is no longer over the
+   board, it is beside it (see the rail block above), so it cannot eat a
+   commit no matter what it does with pointer events. Letting it take them
+   back means the numbers are selectable and copyable.
+
+   Everything below this rule is unchanged from the floating panel — the
+   content is the same content, only its address moved. */
+.station-readout {
+  position: static;
+  pointer-events: auto;
+  width: auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  line-height: 1.35;
+}
+
+.rdo-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rdo-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.rdo-type {
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.rdo-sub { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+.rdo-swatch {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  background: var(--neutral-node);
+  flex: 0 0 auto;
+}
+.rdo-owner { font-size: 11px; color: var(--ink-dim); }
+
+.rdo-row { display: flex; align-items: baseline; gap: 6px; margin-top: 3px; }
+.rdo-k { color: var(--ink-faint); font-size: 11px; }
+.rdo-v {
+  margin-left: auto;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--ink);
+  text-align: right;
+}
+
+.rdo-terr .rdo-v { color: var(--ink-dim); }
+.rdo-tier {
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+/* Reduced or absent benefits are the point of the middle tier — they get the
+   warning colour so a half-held country is visible without reading. */
+.rdo-tier.is-partial { color: var(--accent); }
+.rdo-tier.is-contested { color: var(--warn); }
+
+.rdo-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 7px 0 5px;
+}
+
+.rdo-garr .rdo-v { color: var(--garrison); }
+
+.rdo-bar {
+  height: 3px;
+  margin: 5px 0 4px;
+  background: var(--panel-hi);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.rdo-bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--ink-dim);
+}
+/* Full = stopped paying dividends (00-vision.md §2). Worth seeing at a glance. */
+.rdo-bar-fill.is-full { background: var(--accent); }
+
+.rdo-units { display: flex; gap: 4px; }
+.rdo-units .rdo-unit {
+  flex: 1 1 0;
+  display: block;
+  margin-top: 0;
+  text-align: center;
+  min-width: 0;
+}
+.rdo-units .rdo-k {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+.rdo-units .rdo-v {
+  display: block;
+  margin-left: 0;
+  text-align: center;
+  font-size: 12px;
+}
+
+.rdo-growth .rdo-v { color: var(--ink); }
+.rdo-growth.is-stalled .rdo-v { color: var(--ink-faint); }
+
+.rdo-status {
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  margin-top: 1px;
+}
+.rdo-status.is-bad { color: var(--warn); }
+.rdo-status:empty { display: none; }
+
+/* The breakdown — the reason this panel exists. Indented and dimmer than the
+   headline so it reads as the working, not as more headline numbers. */
+.rdo-mods {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--line);
+}
+.rdo-mod { margin-top: 2px; }
+.rdo-mod .rdo-k { font-size: 10px; }
+.rdo-mod .rdo-v { font-size: 10.5px; color: var(--ink-dim); }
+.rdo-mod.is-off .rdo-v { color: var(--ink-faint); }
+
+/* Farm rows WRAP now; the floating panel had to ellipsis them because it was
+   232px of overlay that could not be allowed to grow. The rail has a scroll
+   axis and a fixed home, so the row can use two lines — which matters because
+   the clause that got truncated first was the one at the end ("— feeding
+   nobody", "· under attack"), i.e. the whole reason the row is struck out. */
+.rdo-farm {
+  font-size: 9.5px;
+  color: var(--ink-dim);
+  padding-left: 8px;
+  margin-top: 1px;
+  border-left: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.rdo-farm.is-dead { color: var(--ink-faint); text-decoration: line-through; }
+
+.rdo-note {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--accent);
+}
+.rdo-note:empty { display: none; }
+
+/* The two bodies of the station section. Exactly one is displayed; JS toggles
+   `display` rather than swapping content, so neither is ever rebuilt. */
+.rdo-idle .rdo-name { color: var(--ink-dim); }
+
+/* The idle body exists so the rail is never an empty gutter. The hint is the
+   only instructional text in the whole interface and it earns that by being
+   the answer to the question the blank column would otherwise raise. */
+.rdo-hint {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--ink-faint);
+}
+/* readout:end */
+
+/* --- victory screen (render/victory.js) ---------------------------- */
+
+/* The scrim covers the whole app, and takes NO pointer events. An overlay over
+   #g-stations that accepts them swallows the click that commits an attack with
+   no error at all — that has bitten this project twice, and the fact that the
+   game is over when this appears is not a reason to build the trap again. Only
+   .vscr-card and .vscr-pill re-enable them, and both are small. */
+.vscr {
+  /* `fixed`, not `absolute`: .app is not a positioned ancestor, so `absolute`
+     would resolve against the initial containing block anyway — this just says
+     so out loud and survives anyone adding `position` to .app. */
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--hud-h) + 16px) 16px calc(var(--bottom-h) + 16px);
+  pointer-events: none;
+  background: radial-gradient(ellipse at center,
+              rgba(12, 15, 20, 0.55) 0%, rgba(12, 15, 20, 0.86) 100%);
+}
+
+/* Dismissed: the scrim and the card go, the pill stays. The board underneath
+   is then completely untouched — which is the point, since the final map is
+   the thing the player most wants to look at. */
+.vscr.is-dismissed { background: none; }
+.vscr.is-dismissed .vscr-card { display: none; }
+
+.vscr-card {
+  position: relative;
+  pointer-events: auto;
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 22px 24px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 2);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* Tone is carried by a top rule and the eyebrow, nothing else — the card's
+   body is shape-identical for all three endings so the summary reads the same
+   way whether you won it or lost it. */
+.vscr-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  border-radius: calc(var(--radius) * 2) calc(var(--radius) * 2) 0 0;
+  background: var(--accent);
+}
+.vscr-loss .vscr-card::before { background: var(--warn); }
+.vscr-draw .vscr-card::before { background: var(--ink-faint); }
+
+.vscr-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--ink-faint);
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+.vscr-close:hover { color: var(--ink); }
+
+.vscr-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.vscr-loss .vscr-eyebrow { color: var(--warn); }
+.vscr-draw .vscr-eyebrow { color: var(--ink-dim); }
+
+.vscr-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--neutral-node);
+}
+
+.vscr-title {
+  margin: 8px 0 0;
+  font-size: 23px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink);
+}
+
+.vscr-blurb {
+  margin: 8px 0 0;
+  max-width: 46em;
+  color: var(--ink-dim);
+  line-height: 1.5;
+}
+
+/* Day / ticks / seed. The seed is here because "seed 19140628, this happened"
+   is a complete bug report (00-vision.md §9) and the end screen is the moment
+   you know you want it. */
+.vscr-metrics {
+  display: flex;
+  gap: 22px;
+  margin: 16px 0 4px;
+  padding: 10px 12px;
+  background: var(--panel-hi);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.vscr-metric { display: flex; align-items: baseline; gap: 7px; }
+.vscr-metric-label {
+  color: var(--ink-dim);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.vscr-metric-value {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.vscr-sub {
+  margin: 20px 0 8px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.vscr-none { margin: 0; color: var(--ink-faint); }
+
+/* The arc of the war, straight out of state.log. */
+.vscr-arc {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-left: 1px solid var(--line);
+}
+.vscr-arc-row {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0 4px 12px;
+  position: relative;
+  line-height: 1.4;
+}
+.vscr-arc-row::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: 10px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.vscr-arc-victory::before { background: var(--accent); }
+.vscr-arc-day {
+  flex: 0 0 62px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-faint);
+  padding-top: 1px;
+}
+.vscr-arc-text { color: var(--ink-dim); }
+.vscr-arc-victory .vscr-arc-text { color: var(--ink); }
+
+/* Standings. Territories first because that is the victory metric
+   (countTerritories = majority control, 00-vision.md §3). */
+.vscr-table { display: flex; flex-direction: column; }
+.vscr-trow {
+  display: grid;
+  grid-template-columns: 1fr 44px 44px 44px 62px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.vscr-trow:last-child { border-bottom: 0; }
+.vscr-thead {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.vscr-thead .vscr-tname { padding-left: 15px; }
+.vscr-tname {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.vscr-tlabel { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vscr-tnum {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink-dim);
+}
+.vscr-trow.is-winner { background: var(--panel-hi); }
+.vscr-trow.is-winner .vscr-tlabel,
+.vscr-trow.is-winner .vscr-tnum { color: var(--ink); font-weight: 600; }
+.vscr-trow.is-fallen .vscr-tlabel,
+.vscr-trow.is-fallen .vscr-tnum { color: var(--ink-faint); }
+.vscr-trow.is-fallen .vscr-dot { opacity: 0.45; }
+.vscr-trow.is-neutral .vscr-tlabel,
+.vscr-trow.is-neutral .vscr-tnum { color: var(--ink-faint); font-style: italic; }
+.vscr-tag {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--accent);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.vscr-tfell {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.vscr-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.vscr-btn { padding: 7px 12px; font-family: var(--font); font-size: 12px; }
+.vscr-btn.is-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.vscr-btn.is-primary:hover { color: var(--ink); border-color: var(--accent); }
+
+/* The way back after "View the map". Small, out of the board's centre, and the
+   only other node in this subtree that takes pointer events. */
+.vscr-pill {
+  display: none;
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  pointer-events: auto;
+  appearance: none;
+  padding: 5px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.vscr.is-dismissed .vscr-pill { display: block; }
+.vscr-pill:hover { background: var(--panel-hi); }
+/* victory:end */
+
+/* --- ticker + neutral hardening (render/hud.js, render/map.js) ----- */
+
+/* ── fullness ring (render/map.js) ─────────────────────────────────────
+   How full is this station, as a proportion of capacity.
+
+   §8 leaves exactly one door open here. Colour carries OWNERSHIP only, so
+   fullness cannot be a tint; shape carries TYPE, so it cannot be a silhouette.
+   What is left is length, weight and opacity of a secondary mark — this is an
+   arc, and it is deliberately ACHROMATIC (pure white at low alpha) so it
+   claims no hue at all and can never be misread as a power's colour. It sits
+   outside the silhouette and never overlaps it, so the type read is untouched
+   and the garrison number keeps its contrast.
+
+   The track is the denominator, drawn at full circle even when the arc is at
+   zero. Without it a short arc is indistinguishable from "no ring", and the
+   whole point is that 31 means nothing until you can see what 31 is out of. */
+
+.station-fill-track {
+  fill: none;
+  stroke: var(--garrison);
+  stroke-opacity: 0.10;
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.station-fill {
+  fill: none;
+  stroke: var(--garrison);
+  stroke-opacity: 0.38;
+  stroke-width: 1.8;
+  stroke-linecap: butt;
+  pointer-events: none;
+  /* The arc length itself is the signal, so the transition only has to stop it
+     stepping visibly between the 2.5% buckets render/map.js writes. */
+  transition: stroke-dasharray 200ms linear;
+}
+
+/* A station at capacity has stopped paying dividends (§2) and should be spent.
+   That is a binary fact, not a proportion, so it gets a binary cue: the ring
+   closes and firms up. Still no hue — weight and alpha only. */
+.station-fill.is-full {
+  stroke-opacity: 0.62;
+  stroke-width: 2.1;
+}
+
+/* Reading the arcs is a whole-board scan; on the one node under the cursor the
+   proportion should be exact rather than peripheral. Native :hover — select.js
+   marks selection with carets, not with a class on the <g> (§8), so there is no
+   selection hook to attach to here and none is invented. */
+.station:hover .station-fill { stroke-opacity: 0.95; }
+.station:hover .station-fill-track { stroke-opacity: 0.28; }
+
+/* ── event ticker (render/hud.js) ──────────────────────────────────────
+   Peripheral awareness, not a log. render/ailog.js owns detail. */
+
+/* The bottom bar hands the ticker whatever the send control and the seven power
+   chips leave over. On a wide window that is plenty; the floor below just stops
+   a long power name from being the only thing that fits.
+   Deliberately NOT taken out of `.powers`: letting the chips shrink did buy the
+   ticker 90px and it clipped two powers off the strip, which is a worse trade —
+   who is on the board is permanent information and the ticker is transient. */
+.ticker { flex: 1 1 300px; }
+
+@media (min-width: 1100px) {
+  .ticker { min-width: 300px; }
+}
+
+.ticker-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+/* Fade by age. Newest is DOM index 0 and, under column-reverse, the bottom
+   row — so nth-child ramps opacity down as entries climb. Pure CSS: the age
+   ramp costs renderHud nothing per frame, which matters because it runs at
+   60fps and the rows shift on every event. */
+.ticker-list li:nth-child(1) { opacity: 1; }
+.ticker-list li:nth-child(2) { opacity: 0.72; }
+.ticker-list li:nth-child(3) { opacity: 0.52; }
+.ticker-list li:nth-child(4) { opacity: 0.36; }
+.ticker-list li:nth-child(5) { opacity: 0.24; }
+
+/* Day stamp. Bursts arrive in clumps, and without it four capture lines look
+   simultaneous when they are a week apart. It is also the first thing to go
+   when the bar is cramped — the sentence matters more than the timestamp. */
+@media (max-width: 1099px) {
+  .tick-day { display: none; }
+}
+
+.tick-day {
+  flex: 0 0 auto;
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+  min-width: 30px;
+  text-align: right;
+  letter-spacing: 0.02em;
+}
+
+.tick-body {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ownership colour on the name. The fastest read in the game and already how
+   every other surface works (§8) — the ticker was the only place saying who
+   in undifferentiated grey. */
+.tick-power { font-weight: 600; }
+
+/* Weight. A capitulation, an elimination and a victory are the loudest things
+   that can happen in a match; a neutral city changing hands is background.
+   These rules come AFTER the nth-child ramp and match its specificity, so a
+   major event stays legible as it ages out instead of dimming to 24%. */
+.ticker-list li[data-weight="major"] {
+  opacity: 1;
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+.ticker-list li[data-weight="major"] .tick-day { color: var(--ink-dim); }
+
+/* A rule in --accent rather than a background: the bar is 52px and a filled
+   row would dominate the whole strip. */
+.ticker-list li[data-weight="major"] .tick-body {
+  border-left: 2px solid var(--accent);
+  padding-left: 7px;
+}
+
+/* Victory ends the match — it outranks even the other majors. */
+.ticker-list li[data-kind="victory"] .tick-body { border-left-color: var(--garrison); }
+
+.ticker-list li[data-weight="mid"] { color: var(--ink-dim); }
+.ticker-list li[data-weight="mid"] .tick-body { border-left: 2px solid var(--line); padding-left: 7px; }
+
+.ticker-list li[data-weight="minor"] .tick-body { padding-left: 9px; }
+
+/* Enter animation, fired by hud.js on the newest row only — see the comment
+   there. Slides up from below the bar, which matches column-reverse: new
+   events genuinely arrive from the bottom and push the stack up. */
+@keyframes tick-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.ticker-list li.is-new { animation: tick-enter 220ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-list li.is-new { animation: none; }
+  .station-fill { transition: none; }
+}
+/* hud:end */
+
+/* --- camera / zoom (render/camera.js) ------------------------------ */
+
+/* The controls are DOM siblings of the SVG inside .board-wrap, deliberately
+   not SVG children: anything painted over the board that accepts pointer
+   events swallows the click that commits an attack. Confining them to a fixed
+   corner makes that hazard a known 110px instead of an invisible one.
+
+   Even 110px is 110px too many: at 4x zoom a station can sit underneath the
+   panel, and `elementFromPoint` at its centre returned .cam-controls rather
+   than the station — a click that silently does nothing, with no error. So the
+   PANEL is pointer-events:none and only the buttons take pointer events back.
+   The padding, the gaps between buttons and the scale readout all pass clicks
+   through to the board beneath. */
+
+.cam-controls {
+  pointer-events: none;
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  z-index: 2;
+}
+
+.cam-btn {
+  pointer-events: auto;      /* the only part of the panel that takes clicks */
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.cam-scale {
+  min-width: 30px;
+  padding: 0 4px 0 2px;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--ink-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Discoverability: a player who does not know the wheel zooms never finds it.
+   The hint sits next to the buttons and fades out for good once the camera has
+   actually moved, so it teaches once rather than nagging. */
+.cam-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 40px;
+  padding: 3px 7px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  pointer-events: none;
+  transition: opacity 240ms ease-out;
+  z-index: 2;
+}
+
+.board-wrap.is-zoomed .cam-hint { opacity: 0; }
+
+/* Feedback that the drag is a pan and not a marquee. */
+#board.is-panning { cursor: grabbing; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cam-hint { transition: none; }
+}
+
+/* ── symbol counter-scale ──────────────────────────────────────────────
+   render/camera.js zooms by narrowing the viewBox, which magnifies geography
+   and symbols alike. Stations, labels, wave markers, carets and ETA labels are
+   counter-scaled by 1/scale in JS (`cameraSymbolScale()`), so they hold a
+   constant on-screen size and zooming actually thins a cluster out instead of
+   just enlarging it.
+
+   A scaled <g> also scales its children's stroke-width, which is exactly right
+   for those symbols — a 2-unit outline inside a 0.25x group is 2 screen pixels
+   at 4x, same as at 1x. Nothing to do here for them.
+
+   What is NOT counter-scaled is the connective tissue: links, in-flight trails
+   and preview lines run BETWEEN two board points, so their endpoints must scale
+   with the map. Only their weight should hold. `vector-effect:
+   non-scaling-stroke` is the SVG-native way to say that — the geometry
+   transforms, the stroke does not — and it costs nothing per frame. Territory
+   fills, borders and coverage washes are geography and are deliberately left to
+   scale in full.
+
+   `--cam-scale` is published on :root by camera.js on every camera write, for
+   anything that needs to compensate from the stylesheet rather than from JS. */
+
+.link,
+.wave-trail,
+.sel-line,
+.sel-marquee-rect {
+  vector-effect: non-scaling-stroke;
+}
+/* camera:end */
+
+/* --- battle readout (render/map.js) -------------------------------- */
+
+/* A battle used to be nearly invisible. The node showed the DEFENDER's garrison
+   and nothing else for the several seconds a fight takes, so "my 60 are
+   grinding this fortress down" and "my 60 evaporated" rendered identically.
+   The attacking stack was in the state the whole time and was never drawn.
+
+   Everything below is display:none unless the <g> carries .is-fighting, so a
+   peaceful node is untouched — no layout shift, nothing to un-paint. And all of
+   it is pointer-events:none: this layer sits INSIDE #g-stations, over the
+   board, and the second number hangs far enough below a node to cover a
+   neighbour in a tight cluster. select.js hit-tests with closest('[data-station]'),
+   so a hit here would resolve to the WRONG station and silently commit the
+   attack somewhere else. Same failure mode as #g-ui, #g-waves and #g-coverage. */
+
+.station-battlegroup {
+  display: none;
+  pointer-events: none;
+}
+
+.station.is-fighting .station-battlegroup { display: block; }
+
+/* The defender's arc IS the pre-existing .station-battle circle — reused, not
+   replaced. Its amber pulse is switched off here for two reasons: an animated
+   stroke-width makes two adjacent arc LENGTHS hard to compare, which is the one
+   thing the ring exists to communicate; and --warn is a hue that is not an
+   ownership colour, sitting immediately beside two that are. A complete
+   saturated ring appearing where a quiet node has only the faint achromatic
+   fullness arc is already an unmissable "something is happening here", and it
+   is legible under prefers-reduced-motion for free.
+
+   A CSS animation outranks an inline style, so `animation: none` is load-bearing
+   — without it the keyframes would keep overwriting the stroke-width that makes
+   the arcs readable. */
+.station.is-fighting .station-battle {
+  animation: none;
+  stroke-opacity: 1;
+  stroke-width: 3;
+  stroke-linecap: butt;
+}
+
+.station-mom {
+  fill: none;
+  stroke: var(--neutral-node);
+  stroke-width: 3;
+  stroke-opacity: 1;
+  stroke-linecap: butt;
+  fill-opacity: 0;
+  pointer-events: none;
+  /* Arc length is the signal; the transition only stops it stepping visibly
+     between the 1% buckets render/map.js writes, and matches .station-fill. */
+  transition: stroke-dasharray 120ms linear, stroke-dashoffset 120ms linear;
+}
+
+/* The even-odds mark, notched through the ring at 6 o'clock. The defender's arc
+   starts at 12 and sweeps clockwise, so the colour boundary falling short of
+   this line means the defender holds under half the Power in play — "am I
+   winning" answered by position rather than by comparing two arcs. */
+.station-mom-half {
+  stroke: var(--bg);
+  stroke-width: 1.8;
+  stroke-opacity: 1;
+  pointer-events: none;
+}
+
+/* The attacking stack's strength, in the ATTACKER's own power colour. Colour
+   still carries ownership only (§8) — this is that rule doing its job, not an
+   exception to it. Secondary to the centred garrison number by size and by
+   position; the garrison is not moved, resized or recoloured. The fill is
+   rewritten inline per battle and this value is only the fallback. */
+.station-attackers {
+  fill: var(--neutral-node);
+  stroke: var(--garrison-halo);
+  stroke-width: 4;
+  paint-order: stroke fill;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+/* The ring and the second number occupy the band the station name and the ×N
+   modifier sit in. While a fight is running the node is a combat readout and
+   nothing else — the name and the modifier are what the hover readout is for,
+   and neither is a thing anyone reads mid-battle. Hidden rather than moved, so
+   nothing on a peaceful node shifts. */
+.station.is-fighting .station-name,
+.station.is-fighting .station-modifier { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .station-mom { transition: none; }
+}
+/* battle:end */
+
+/* send: ─── gesture hint + routed attack preview (render/select.js) ────────
+   Owned wholly by the selection/preview work. Appended last on purpose: the
+   older `.sel-*` rules further up this file are not mine to edit, and equal
+   specificity later in the cascade is how these override them.
+
+   COLOUR NOW CARRIES THE VERB. Attack is red, reinforce is the player's own
+   ownership colour (written inline by select.js, since it is per-power data).
+   The ETA spread — which used to be the thing red meant — moved onto stroke
+   WEIGHT and opacity, so the two signals no longer fight over one channel.
+
+   Everything below lives inside #g-ui, which is pointer-events:none. The
+   explicit repeats are not redundancy for its own sake: an overlay that accepts
+   pointer events eats the click that commits an attack and produces NO error at
+   all, and that has already happened twice on this project. */
+
+.send-hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  /* NOT shrinkable. The bottom bar is a single non-wrapping flex row and the
+     ticker beside it is the flexible element (flex:1 1 auto, min-width:0), so
+     if this were shrinkable too the browser would split the shortfall between
+     them and clip the hint mid-word instead of letting the ticker give. The
+     narrowing is done in discrete steps by the media queries below, where it
+     can drop whole phrases rather than half of one. */
+  flex: 0 0 auto;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  border-left: 1px solid var(--line);
+  padding-left: 14px;
+}
+
+/* Narrow: keep only the reinforce hint. The two click hints describe the
+   gesture a player will discover in the first ten seconds anyway; the right
+   button is the one nothing else on screen would ever tell them about. */
+@media (max-width: 1250px) {
+  .send-hint .send-hint-item:not(:last-child) { display: none; }
+}
+
+@media (max-width: 1000px) {
+  .send-hint { display: none; }
+}
+
+.send-hint-item b {
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+
+/* The routed preview. One polyline per source, one vertex per hop. */
+.sel-path {
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 1.6;
+  stroke-opacity: 0.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  pointer-events: none;
+  /* Geometry between board points: the endpoints scale with the map, the
+     weight must not. Same reasoning as the .sel-line rule in the camera
+     block — this class did not exist when that rule was written. */
+  vector-effect: non-scaling-stroke;
+}
+
+.sel-path.is-attack { stroke: var(--warn); }
+
+/* Reinforce lines get their stroke written inline by select.js from
+   POWERS[player].color. This is the fallback for the case where the scenario
+   table has no colour for the power, and it must not be `--warn`: a friendly
+   march that renders identically to an attack is exactly the confusion the
+   colour split exists to remove. */
+.sel-path.is-reinforce { stroke: var(--accent); }
+
+/* Slowest arrival: heavier and fully opaque, never recoloured. */
+.sel-path.is-slowest {
+  stroke-width: 3.2;
+  stroke-opacity: 1;
+}
+
+/* Transit cities. A bend on its own is ambiguous — it could be geography — so
+   every station the wave passes THROUGH is marked explicitly. An open chevron
+   hung UNDER the node, never over it: the garrison number is the interface
+   (00-vision.md §8) and nothing this file draws may sit on top of one. */
+.sel-transit {
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.sel-transit.is-attack { stroke: var(--warn); }
+.sel-transit.is-reinforce { stroke: var(--accent); }
+
+/* Refused source: drawn, never omitted. Silence would read as "this one is
+   fine" and the player would learn otherwise from a wave that never appeared. */
+.sel-line.is-refused {
+  stroke: var(--ink-faint);
+  stroke-width: 1;
+  stroke-opacity: 0.45;
+  stroke-dasharray: 3 4;
+  pointer-events: none;
+}
+
+.sel-refused-mark {
+  stroke: var(--ink-faint);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  fill: none;
+  pointer-events: none;
+}
+
+.sel-eta.is-attack { fill: var(--warn); }
+.sel-eta.is-slowest { font-size: 11.5px; }
+.sel-eta.is-refused {
+  fill: var(--ink-faint);
+  font-weight: 500;
+  font-size: 9.5px;
+}
+/* INF / ART / ARM. Toggles, not a radio group: several can be on at once, so
+   they must not read as "the selected one of four" the way the fraction buttons
+   do. Same active treatment, a separator and a slightly quieter inactive state
+   are what carry the difference. */
+.send-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 6px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+
+.send-btn.send-type {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+
+/* An excluded type is not merely un-highlighted, it is struck through: the
+   volley genuinely will not contain it, and "off" needs to be as legible as
+   "on" when the player is wondering why a source was refused. */
+.send-btn.send-type:not(.is-active) {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+/* send:end */
+
+/* landing: ─── amphibious beachheads (render/waves.js) ────────────────────
+   A wave whose final hop crosses a sea link lands in echelons over
+   BAL.LANDING_TICKS — 12 sim-seconds — and sits at its destination the whole
+   time. Drawn like any other wave that is a marker parked on a station for
+   twelve seconds, i.e. a bug. Everything here exists to say "a force is still
+   on the water" instead.
+
+   Three signals, none of which a marching wave or a garrison has: the marker
+   stands OFF the node (render/waves.js sets the position), a ring around it
+   drains as the force comes ashore, and its trail points forward at the beach
+   as a dashed leader rather than backward as a solid streak.
+
+   pointer-events:none on all of it. #g-waves already carries it, and every
+   rule below is inside a `.wave` or on `.wave-trail`, but it is restated
+   because this layer paints over the board and select.js hit-tests with
+   closest('[data-station]') — anything here that took a click would silently
+   swallow the gesture that commits an attack, with no error at all. Same
+   failure mode as #g-ui, #g-coverage and the battle readout. */
+
+/* The denominator. Faint and achromatic so it is the ARC that is read, never
+   the track — the same relationship .station-fill-track has to .station-fill. */
+.wave-atsea-track {
+  fill: none;
+  stroke: var(--ink-faint);
+  stroke-opacity: 0.5;
+  stroke-width: 2.4;
+  pointer-events: none;
+}
+
+/* The force still at sea, as a share of what set out — full ring at the first
+   echelon, gone at the last. In the owner's colour, which is the same rule the
+   momentum ring follows: colour carries ownership and only ownership (§8).
+
+   `stroke` and `stroke-dasharray` are written INLINE per frame by
+   render/waves.js and are deliberately absent here. A stylesheet declaration
+   outranks an SVG presentation attribute silently (known-issues #15); it does
+   NOT outrank an inline style, which is why the renderer writes styles — but a
+   dasharray declared here would still fight the transition below for no reason. */
+.wave-atsea {
+  fill: none;
+  fill-opacity: 0;
+  stroke-width: 2.6;
+  stroke-opacity: 1;
+  stroke-linecap: butt;
+  pointer-events: none;
+  /* Arc length is the signal; the transition only stops it stepping visibly
+     between the 1% buckets the renderer writes. Matches .station-mom. */
+  transition: stroke-dasharray 120ms linear;
+}
+
+/* Afloat, not landed. The marching chip and the garrison node are both solid;
+   this one is translucent, so "these are not on the ground yet" survives even
+   where the ring is nearly empty. The number keeps its own halo and is
+   untouched. */
+.wave.is-landing .wave-chip {
+  fill-opacity: 0.6;
+  stroke-opacity: 0.9;
+}
+
+/* The leader. render/waves.js anchors it at the marker and points it at the
+   beach, so the dashes drift the way the echelons are going. Motion is doing
+   real work here: it is the difference between a wave that is stuck and a wave
+   that is unloading, and it costs nothing per frame because it is a CSS
+   animation over a static geometry. */
+.wave-trail.is-landing {
+  stroke-opacity: 0.85;
+  stroke-width: 2.2;
+  stroke-linecap: butt;
+  stroke-dasharray: 3 3.5;
+  animation: landing-surf 0.7s linear infinite;
+}
+
+@keyframes landing-surf {
+  from { stroke-dashoffset: 6.5; }
+  to   { stroke-dashoffset: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Still visibly a leader — dashed, forward-pointing and offshore — just not
+     moving. The ring and the count carry the progress on their own. */
+  .wave-trail.is-landing { animation: none; }
+  .wave-atsea { transition: none; }
+}
+/* landing:end */

@@ -16,7 +16,7 @@
 //   city table -> project -> nudge inside polygon -> emit STATIONS
 //             -> intra-territory MST + short edges
 //             -> inter-territory border links from map.js `neighbors`
-//             -> hardcoded sea crossings
+//             -> derive the coastline -> sea crossings between coastal cities
 //             -> assert one connected graph -> emit LINKS
 //             -> homeland-only ownership -> emit POWERS + SETUP
 
@@ -210,8 +210,14 @@ const CITIES = [
 ];
 
 // ============================================================ SEA LINKS =====
-// Hardcoded, by station id. The isles and Anatolia depend on these entirely.
-const SEA = [
+// The FLOOR, by station id — the crossings the design names out loud
+// (00-vision.md §3). Everything else is derived from the coastline further
+// down; these are added whether or not the derivation finds them, because they
+// encode real chokepoints and the "one connected component" assertion leans on
+// them. Seven of the ten come back out of the derivation on their own, which
+// is its best self-check; the three that do not are named where the floor is
+// applied, each for a reason worth knowing.
+const SEA_FLOOR = [
   ['dov', 'lil'],   // the Straits of Dover
   ['dub', 'crd'],   // the Irish Sea
   ['aal', 'osl'],   // the Skagerrak
@@ -225,9 +231,13 @@ const SEA = [
 ];
 
 // ============================================================== POWERS ======
-// Each power starts holding exactly ONE territory — its homeland — and nothing
-// else. Everything else is neutral. Expansion is the entire game; this is a
-// deliberate departure from historical 1914 extents.
+// Each power starts holding exactly ONE STATION — its capital — and nothing
+// else. Everything else on the board is neutral, including the rest of the
+// power's own homeland. Expansion is the entire game.
+//
+// `home` no longer decides ownership; it survives because it names which
+// territory a power is culturally seated in, which the colours and the map
+// legend still read as identity.
 // Colours are picked for hue separation on the #0c0f14 board (style.css).
 const POWERS = [
   { id: 'ger', name: 'German Empire',    color: '#4f74c8', home: 'ger', capital: 'ber', ai: 'expansionist' },
@@ -491,7 +501,15 @@ function addLink(a, b, sea) {
   if (a === b) return;
   const key = [a, b].sort().join('~');
   if (linkMap.has(key)) {
-    if (sea) linkMap.get(key).sea = true;
+    // A pair the land passes already claimed. Promoting it to sea has to
+    // re-cost it too: `ank~ist` and `bar~spl` are floor crossings that the
+    // border pass reached first, and for want of this line they shipped as sea
+    // links carrying a LAND distance — the Bosporus at road speed.
+    const rec = linkMap.get(key);
+    if (sea && !rec.sea) {
+      rec.sea = true;
+      rec.dist = Math.round(dist(STATIONS[a].pos, STATIONS[b].pos) * 1.6);
+    }
     return;
   }
   const geo = dist(STATIONS[a].pos, STATIONS[b].pos);
@@ -550,9 +568,296 @@ for (const tid of Object.keys(TERRITORIES).sort()) {
   }
 }
 
+// --- the coastline ----------------------------------------------------------
+// Ten hardcoded pairs are a set of bridges, not a sea (02-visibility-and-sea.md
+// §3a). The second network is derived from real geometry instead, in three
+// steps: work out where the water is, work out which cities are on it, then
+// work out which straight lines between them actually cross it.
+//
+// Step 1 — WHERE THE WATER IS. "Land" is the union of the 30 territory
+// polygons. That is not the same as "not sea": Kosovo, the IJsselmeer and the
+// far side of the map clip are all holes in the modelled land, and a link drawn
+// across one of them would be a road pretending to be a ferry. So the land mask
+// is rasterised and open water is FLOOD FILLED inward from the edge of the
+// viewBox. Anything unpainted is an enclave — a hole with no way out to a real
+// sea — and counts as land. Deterministic: a fixed grid, a fixed fill order,
+// no rng, no clock.
+const CELL = 1.5;              // raster cell, viewBox units (~8.7 km)
+const COAST_EPS = 1.5;         // how far off a polygon edge to sample for water
+const GW = Math.ceil(1000 / CELL) + 2, GH = Math.ceil(700 / CELL) + 2;
+
+const TIDS = Object.keys(TERRITORIES).sort();
+const POLYS = {}, BBOX = {};
+for (const tid of TIDS) {
+  POLYS[tid] = polyOf(tid);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of POLYS[tid]) {
+    if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+  }
+  BBOX[tid] = [x0, y0, x1, y1];
+}
+const onLand = p => {
+  for (const tid of TIDS) {
+    const b = BBOX[tid];
+    if (p[0] < b[0] || p[0] > b[2] || p[1] < b[1] || p[1] > b[3]) continue;
+    if (pointInPoly(p, POLYS[tid])) return true;
+  }
+  return false;
+};
+
+const gLand = new Uint8Array(GW * GH);
+for (let j = 0; j < GH; j++)
+  for (let i = 0; i < GW; i++)
+    if (onLand([(i - 0.5) * CELL, (j - 0.5) * CELL])) gLand[j * GW + i] = 1;
+
+const gOpen = new Uint8Array(GW * GH);
+{
+  const stack = [];
+  for (let i = 0; i < GW; i++) stack.push([i, 0], [i, GH - 1]);
+  for (let j = 0; j < GH; j++) stack.push([0, j], [GW - 1, j]);
+  while (stack.length) {
+    const [i, j] = stack.pop();
+    if (i < 0 || j < 0 || i >= GW || j >= GH) continue;
+    const k = j * GW + i;
+    if (gOpen[k] || gLand[k]) continue;
+    gOpen[k] = 1;
+    stack.push([i + 1, j], [i - 1, j], [i, j + 1], [i, j - 1]);
+  }
+}
+// Water = off every territory polygon AND in a cell the open sea reaches.
+const isWater = p => {
+  if (onLand(p)) return false;
+  const i = Math.round(p[0] / CELL + 0.5), j = Math.round(p[1] / CELL + 0.5);
+  if (i < 0 || j < 0 || i >= GW || j >= GH) return true;   // outside the frame is sea
+  return !!gOpen[j * GW + i];
+};
+
+// Step 2 — THE COASTLINE ITSELF. A polygon edge is coast when the side of it
+// facing AWAY from its own territory is open water. Border edges fail this by
+// construction: map.js assembles neighbours from shared arcs, so the outward
+// side of a border edge lands inside the neighbour.
+const COASTLINE = [];
+for (const tid of TIDS) {
+  const P = POLYS[tid];
+  for (let i = 0; i < P.length; i++) {
+    const a = P[i], b = P[(i + 1) % P.length];
+    const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+    if (!L) continue;
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const nx = -dy / L, ny = dx / L;
+    const p1 = [mx + nx * COAST_EPS, my + ny * COAST_EPS];
+    const p2 = [mx - nx * COAST_EPS, my - ny * COAST_EPS];
+    if (isWater(pointInPoly(p1, P) ? p2 : p1)) COASTLINE.push([a, b]);
+  }
+}
+const distToCoast = p => {
+  let best = Infinity;
+  for (const e of COASTLINE) {
+    const a = e[0], b = e[1];
+    const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+    let t = l2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const d = Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+    if (d < best) best = d;
+  }
+  return best;
+};
+
 // --- sea crossings ----------------------------------------------------------
-for (const [a, b] of SEA) {
+// Step 3 — WHICH LINES CROSS IT. Five constants, all geographic, all stated in
+// km through the same km() the land thresholds use.
+const COASTAL_KM = 70;         // a port is a city this close to open water. The
+                               // nudge pass parks coastal cities exactly INSET
+                               // (~15 km) inside a simplified outline, so the
+                               // floor of the measured distribution is 15, not
+                               // 0; 70 is its first real gap (Tirana 63 -> the
+                               // Ruhr 83) and is what admits Lisbon, Oslo and
+                               // Bordeaux without admitting Berlin.
+const SEA_MAX_KM = 700;        // the longest crossing the design will grant —
+                               // roughly the Bay of Biscay. Wider than this and
+                               // it stops reading as one amphibious bound and
+                               // starts reading as a naval campaign, which
+                               // 00-vision.md §3 explicitly does not want.
+const MIN_SEA_GAP_KM = 50;     // a crossing must have this much OPEN WATER in
+                               // one unbroken stretch. The Straits of Dover are
+                               // the tightest crossing the design must admit and
+                               // measure 57 km on this board, so the bar sits
+                               // just under them. This is what stops two cities
+                               // on the same beach acquiring a "crossing".
+const MAX_INTERIOR_LAND_KM = 45;  // land BETWEEN the first and last water on the
+                               // line. Zero would be right if cities sat on the
+                               // shore; they are nudged inland, so Dover ->
+                               // Lille clips 40 km of French coast on its way
+                               // out. Above this the line is a march with a
+                               // puddle in it, not a crossing.
+const NEAREST_CROSSINGS = 1;   // how many of its own shortest crossings each
+                               // port keeps; the network is the UNION, so a
+                               // station ends up with more when several other
+                               // ports name it (Aalborg is the nearest partner
+                               // of five Scandinavian ports, and that is the
+                               // shape of the Skagerrak, not an artefact).
+                               // 1 is not timidity: it is the budget. The real
+                               // ceiling is external — test/runner.js asserts
+                               // sea links are under 15% of all links ("a
+                               // handful", 00-vision.md §3), which against 204
+                               // land links means at most 35 in total. Raising
+                               // this to 2 produces ~40 and fails that
+                               // assertion; the assertion, not the geometry, is
+                               // what decides how big this network may be.
+
+// Cities the SIMPLIFIED outline misreads as ports.
+//
+// The coast is derived from `data/map.js`, whose polygons are simplified Natural
+// Earth borders. Simplification cuts inland where a coast is intricate, so a few
+// cities measure much closer to "open water" than they are on Earth. Distance
+// alone cannot separate them: Trento measures 34km, and any threshold that
+// excludes it also excludes Bordeaux at 49km and Oslo at 59km, which are real
+// ports. So the correction goes here, per city, with the real number stated.
+//
+// Trento is the one that mattered. It is a DEFENSIVE station — an Alpine
+// fortress whose entire design job is to gate a mountain chokepoint (00-vision
+// §2). A derived `spl~tre` crossing handed it a Dalmatian port and let an
+// attacker skip the mountains altogether, which is the opposite of what the
+// station is for. A wrong link is worse than a missing one here: it does not
+// look like a bug, it looks like a route.
+const NO_SEA = {
+  tre: 'Trento — Alpine fortress, ~110km from the Adriatic; the outline eats the Venetian lagoon',
+};
+
+const SEA_MAX = km(SEA_MAX_KM);
+const coastalIds = order.slice().sort().filter(sid =>
+  !NO_SEA[sid] && distToCoast(STATIONS[sid].pos) <= km(COASTAL_KM));
+
+// Walk the segment and measure water. Both endpoints are on land by
+// construction, so the water is always interior.
+const SAMPLE_PX = 1.0;
+function crossing(a, b) {
+  const A = STATIONS[a].pos, B = STATIONS[b].pos;
+  const L = dist(A, B), n = Math.max(2, Math.ceil(L / SAMPLE_PX));
+  const wet = [];
+  let run = 0, longest = 0, first = -1, last = -1;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const w = isWater([A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t]);
+    wet.push(w);
+    if (w) { if (first < 0) first = i; last = i; run++; if (run > longest) longest = run; }
+    else run = 0;
+  }
+  let inner = 0;
+  if (first >= 0) for (let i = first; i <= last; i++) if (!wet[i]) inner++;
+  const per = L / n;
+  return { len: L, water: longest * per, land: inner * per };
+}
+
+// Cheapest LAND-ONLY route between two stations, or Infinity. Computed on the
+// graph as it stands before a single crossing is added, so it is the road the
+// crossing would be competing with and nothing else.
+const landRoute = (() => {
+  const adj = {};
+  for (const rec of linkMap.values()) {
+    (adj[rec.a] = adj[rec.a] || []).push([rec.b, rec.dist]);
+    (adj[rec.b] = adj[rec.b] || []).push([rec.a, rec.dist]);
+  }
+  const cache = {};
+  return (from, to) => {
+    if (!cache[from]) {
+      const d = {};
+      for (const sid of order) d[sid] = Infinity;
+      d[from] = 0;
+      const left = new Set(order);
+      while (left.size) {
+        let cur = null, best = Infinity;
+        for (const sid of order) if (left.has(sid) && d[sid] < best) { best = d[sid]; cur = sid; }
+        if (cur === null) break;
+        left.delete(cur);
+        for (const [n, w] of (adj[cur] || [])) if (d[cur] + w < d[n]) d[n] = d[cur] + w;
+      }
+      cache[from] = d;
+    }
+    return cache[from][to];
+  };
+})();
+
+const seaReject = { land: 0, gap: 0, inner: 0, road: 0, far: 0, already: 0 };
+const seaRejectEg = [];
+const seaCands = [];
+for (let i = 0; i < coastalIds.length; i++) {
+  for (let j = i + 1; j < coastalIds.length; j++) {
+    const a = coastalIds[i], b = coastalIds[j];
+    if (dist(STATIONS[a].pos, STATIONS[b].pos) > SEA_MAX) continue;
+    // Never convert an existing road into a ferry: a pair already joined by
+    // land does not need a redundant crossing, and flipping the record would
+    // silently make a land march pay the sea toll.
+    if (linkMap.has([a, b].sort().join('~'))) { seaReject.already++; continue; }
+    const c = crossing(a, b);
+    if (c.water === 0) {
+      seaReject.land++;
+      if (seaRejectEg.length < 6) seaRejectEg.push(a + '~' + b + ' entirely overland');
+      continue;
+    }
+    if (c.water < km(MIN_SEA_GAP_KM)) { seaReject.gap++; continue; }
+    if (c.land > km(MAX_INTERIOR_LAND_KM)) {
+      seaReject.inner++;
+      if (seaRejectEg.length < 6)
+        seaRejectEg.push(a + '~' + b + ' ' + Math.round(c.land * EARTH_R_KM / FIT.k) + 'km of land mid-line');
+      continue;
+    }
+    // A crossing that is LONGER than the road between the same two cities is
+    // not a new theatre, it is a parallel road. Aalborg->Hamburg (92) beside
+    // Aalborg-Aarhus-Hamburg (58); Glasgow->London (161) beside the length of
+    // England. Both are real water on this outline and both are useless: no
+    // router will ever choose them, and they clutter the hop graph the AI
+    // reasons over. Measured against the LAND-ONLY graph, so anything an army
+    // genuinely cannot walk to — every island, everything across the Baltic —
+    // has an infinite road and is always kept.
+    if (Math.round(c.len * 1.6) >= landRoute(a, b)) {
+      seaReject.road++;
+      if (seaRejectEg.length < 8)
+        seaRejectEg.push(a + '~' + b + ' crossing ' + Math.round(c.len * 1.6) +
+          ' vs road ' + landRoute(a, b));
+      continue;
+    }
+    seaCands.push({ a, b, len: c.len });
+  }
+}
+// Every valid crossing would be a lot of graph, so each port keeps its
+// NEAREST_CROSSINGS shortest and the network is the UNION of those choices.
+// Union, not a running degree cap: a cap applied greedily cascades — Dublin,
+// Cardiff and Cork fill up on short hops and Glasgow, refused by all three,
+// ends up married to its worst remaining option (a 585 km line to London that
+// grazes the Irish Sea). Under the union rule a port's own shortlist is never
+// taken from it, and a station may still finish with more than
+// NEAREST_CROSSINGS links if several other ports name it — Aalborg ends with
+// five because it is the nearest partner of half of Scandinavia, which is the
+// shape of the Skagerrak rather than an artefact.
+const shortlist = {};
+for (const sid of coastalIds) shortlist[sid] = [];
+for (const c of seaCands) { shortlist[c.a].push(c); shortlist[c.b].push(c); }
+const byLen = (x, y) => x.len - y.len || (x.a < y.a ? -1 : x.a > y.a ? 1 : (x.b < y.b ? -1 : 1));
+const keep = new Set();
+for (const sid of coastalIds)
+  for (const c of shortlist[sid].sort(byLen).slice(0, NEAREST_CROSSINGS)) keep.add(c.a + '~' + c.b);
+seaReject.far = seaCands.length - keep.size;
+const seaDerived = seaCands.slice().sort(byLen).filter(c => keep.has(c.a + '~' + c.b));
+for (const c of seaDerived) addLink(c.a, c.b, true);
+
+// The floor last, so a named chokepoint is never lost to a shortlist. Three of
+// the ten do not come back out of the derivation, and each says something true
+// about the board rather than about the rules:
+//   ist~ank  Natural Earth's largest ring for Turkey is Anatolia, so
+//            Constantinople was nudged across the Bosporus onto the Asian
+//            shore. The strait does not exist as water here at all.
+//   bar~spl  the ita/hrv border pass already claimed the pair as a road, so it
+//            is promoted rather than derived (and re-costed by addLink).
+//   mec~aar  the Danish straits are 75 by sea against 70 by road through
+//            Hamburg, so the parallel-road rule declines them. Kept because
+//            00-vision.md §3 names them and because a Denmark reachable only
+//            through Hamburg is a worse map.
+const floorOnly = [];
+for (const [a, b] of SEA_FLOOR) {
   if (!STATIONS[a] || !STATIONS[b]) throw new Error('sea link names unknown station: ' + a + '~' + b);
+  if (!seaDerived.some(c => c.a === [a, b].sort()[0] && c.b === [a, b].sort()[1])) floorOnly.push(a + '~' + b);
   addLink(a, b, true);
 }
 
@@ -578,24 +883,37 @@ const LINKS = [...linkMap.values()].sort((x, y) => x.a < y.a ? -1 : x.a > y.a ? 
 
 // ============================================================== SETUP =======
 // Deterministic per-station fraction, so re-running the build never churns the
-// numbers. Homelands start at 40-60% of capacity — a real base, with immediate
-// pressure to expand. Neutrals start at 15-30%; neutral fortresses higher,
-// because gating a chokepoint is their entire job.
+// numbers.
+//
+// A power owns its CAPITAL and nothing else. Everything else — including the
+// other cities of its own homeland — is neutral and has to be taken.
+//
+// That makes the capital's starting garrison the whole of a power's opening
+// budget, so it is filled near capacity rather than the 40-60% a homeland used
+// to start at. The arithmetic that matters: at GROWTH_BASE 0.004 and rate ~0.9
+// a station climbs from half to 90% of capacity in roughly 1200 ticks (two
+// sim-minutes), while neutral garrisons harden from ~20% to ~99% of capacity
+// within 3000 ticks. Open at 50% and the neutrals nearest you harden faster
+// than you can regrow to afford them, and the first move of the game is to
+// wait — which is the one opening the design cannot have. Open near full and
+// you have exactly one real volley in hand on turn zero.
+const CAPITAL_FILL = 0.90;   // of capacity; the entire opening budget
+
 function hashFrac(sid) {
   let h = 2166136261;
   for (let i = 0; i < sid.length; i++) { h ^= sid.charCodeAt(i); h = Math.imul(h, 16777619); }
   return ((h >>> 0) % 1000) / 1000;
 }
-const homeOf = {};
-for (const p of POWERS) homeOf[p.home] = p.id;
+const capitalOf = {};
+for (const p of POWERS) capitalOf[p.capital] = p.id;
 
 const SETUP = {};
 for (const sid of order) {
   const st = STATIONS[sid];
-  const owner = homeOf[st.territory] || 'neutral';
+  const owner = capitalOf[sid] || 'neutral';
   const f = hashFrac(sid);
   let frac;
-  if (owner !== 'neutral') frac = 0.40 + f * 0.20;
+  if (owner !== 'neutral') frac = CAPITAL_FILL;
   else if (st.type === 'defensive') frac = 0.35 + f * 0.15;
   else frac = 0.15 + f * 0.15;
 
@@ -620,8 +938,15 @@ for (const sid of order) {
   for (const p of POWERS) {
     if (!STATIONS[p.capital]) problems.push(p.id + ' capital ' + p.capital + ' is not a station');
     else if (SETUP[p.capital].owner !== p.id) problems.push(p.id + ' does not own its capital');
-    const terrs = new Set(order.filter(s => SETUP[s].owner === p.id).map(s => STATIONS[s].territory));
-    if (terrs.size !== 1) problems.push(p.id + ' owns ' + terrs.size + ' territories, expected exactly 1');
+    // Exactly one station, and it is the capital. This replaces the old
+    // "exactly one territory" assertion, which a capital-only opening would
+    // pass for the wrong reason: a power holding one city in a nine-city
+    // country controls no territory at all under the majority rule, so the
+    // territory count is 0 and an assertion written against territories has
+    // nothing left to catch.
+    const mine = order.filter(s => SETUP[s].owner === p.id);
+    if (mine.length !== 1) problems.push(p.id + ' owns ' + mine.length + ' stations, expected exactly 1');
+    else if (mine[0] !== p.capital) problems.push(p.id + ' owns ' + mine[0] + ', not its capital ' + p.capital);
   }
   for (const sid of Object.keys(SETUP)) {
     const u = SETUP[sid].units;
@@ -657,9 +982,10 @@ js += '];\n';
 fs.writeFileSync(OUT_STATIONS, js);
 
 let sc = '// data/scenario.js — GENERATED by tools/build-stations.js. Do not edit by hand.\n';
-sc += '// Every power starts holding exactly ONE territory — its homeland — and nothing\n';
-sc += '// else. All other stations are neutral. Expansion is the entire game; this is a\n';
-sc += '// deliberate departure from historical 1914 extents (00-vision.md §6).\n\n';
+sc += '// Every power starts holding exactly ONE STATION — its capital — and nothing\n';
+sc += '// else. The rest of its own homeland is neutral and must be taken like any\n';
+sc += '// other ground. Expansion is the entire game; this is a deliberate departure\n';
+sc += '// from historical 1914 extents (00-vision.md §6).\n\n';
 sc += 'const POWERS = {\n';
 for (const p of POWERS) {
   sc += '  ' + p.id + ': { id: ' + JSON.stringify(p.id) + ', name: ' + JSON.stringify(p.name) +
@@ -684,6 +1010,16 @@ console.log('wrote   : data/stations.js, data/scenario.js');
 console.log('stations: ' + order.length + '  (' +
   Object.keys(byType).sort().map(t => t + ' ' + byType[t]).join(', ') + ')');
 console.log('links   : ' + LINKS.length + '  (' + LINKS.filter(l => l.sea).length + ' sea crossings)');
+console.log('coast   : ' + COASTLINE.length + ' coastal edges of ' +
+  TIDS.reduce((n, t) => n + POLYS[t].length, 0) + ';  ' + coastalIds.length + '/' + order.length +
+  ' stations within ' + COASTAL_KM + 'km of open water');
+console.log('sea     : ' + seaDerived.length + ' derived + ' + floorOnly.length + ' floor-only (' +
+  (floorOnly.join(', ') || 'none') + ')');
+console.log('          rejected: ' + seaReject.land + ' never left land, ' + seaReject.gap +
+  ' water gap <' + MIN_SEA_GAP_KM + 'km, ' + seaReject.inner + ' >' + MAX_INTERIOR_LAND_KM +
+  'km land mid-line, ' + seaReject.road + ' parallel to a shorter road, ' + seaReject.already +
+  ' already a road, ' + seaReject.far + ' outside every port\'s nearest ' + NEAREST_CROSSINGS);
+for (const e of seaRejectEg) console.log('          e.g. ' + e);
 console.log('powers  : ' + POWERS.length + ' + neutral;  owned stations ' +
   order.filter(s => SETUP[s].owner !== 'neutral').length + '/' + order.length);
 console.log('density : ' + Object.keys(byTerr).sort()

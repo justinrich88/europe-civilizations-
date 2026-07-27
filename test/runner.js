@@ -257,6 +257,8 @@ function runAllTests() {
   suiteSimDisconnect(d);
   suiteSimCapitulation(d);
   suiteSimCommands(d);
+  suiteSimRouting(d);
+  suiteSimBeachhead(d);
 
   // AI family — test/ai-tests.js; skips loudly until ai/ lands.
   if (typeof suiteAI === 'function') suiteAI(d);
@@ -1050,9 +1052,53 @@ function _anyStation(S, pred) {
   return null;
 }
 
+// Change who holds a station. NEVER assign state.stations[sid].owner directly
+// in a fixture: routing is ownership-aware and cached against state.ownerEpoch
+// (core/state.js setStationOwner), so a raw assignment can leave the next
+// routeFor() answering from a search built on the board before the edit. The
+// bug that produces is invisible — a correct-looking test measuring a stale
+// map. Falls back to a plain write plus a manual bump if core/state.js predates
+// the helper, so this file keeps running against an older sim.
+function _setOwner(state, sid, owner) {
+  if (typeof setStationOwner === 'function') return setStationOwner(state, sid, owner);
+  var st = state.stations[sid];
+  if (!st || st.owner === owner) return false;
+  st.owner = owner;
+  state.ownerEpoch = (state.ownerEpoch || 0) + 1;
+  return true;
+}
+
+// Grow a power outward from its capital by `n` stations, breadth-first over
+// LINKS, and return the ids granted.
+//
+// This exists because the opening position is now ONE STATION per power — the
+// capital and nothing else (data/scenario.js). Any test that needed "a power
+// with two stations" used to get one free from the scenario and now does not.
+// Reading a fixture off the starting board was always the wrong dependency: it
+// couples a sim test to a design decision about openings, so the sim test goes
+// red when the opening changes even though the sim did not. Build the fixture
+// the test actually needs instead.
+function _grantFromCapital(state, LINKS, capital, pid, n) {
+  var adj = _linkAdjacency(LINKS);
+  var granted = [], seen = {}, queue = [capital];
+  seen[capital] = true;
+  while (queue.length && granted.length < n) {
+    var cur = queue.shift();
+    var next = (adj[cur] || []).slice().sort();     // sorted: determinism
+    for (var i = 0; i < next.length; i++) {
+      var sid = next[i];
+      if (seen[sid]) continue;
+      seen[sid] = true;
+      queue.push(sid);
+      if (granted.length < n) { _setOwner(state, sid, pid); granted.push(sid); }
+    }
+  }
+  return granted;
+}
+
 function _clearBoard(state, owner) {
   Object.keys(state.stations).forEach(function (sid) {
-    state.stations[sid].owner = owner;
+    _setOwner(state, sid, owner);
     state.stations[sid].units = { infantry: 0, artillery: 0, armour: 0 };
   });
   state.waves.length = 0;
@@ -1122,7 +1168,7 @@ function suiteSimCombat(d) {
     var sid = _anyStation(S, function (st) { return st.type === 'holding' && st.defense === 1.0; });
     var s = fns.newGame(seed || 7);
     _clearBoard(s, 'neutral');
-    s.stations[sid].owner = 'neutral';
+    _setOwner(s, sid, 'neutral');
     s.stations[sid].units.infantry = def;
     // The attacker lands as a wave that has already arrived; sim/combat.js
     // resolves any station holding hostile forces.
@@ -1196,8 +1242,8 @@ function suiteSimMultiplier(d) {
     (T[home].neighbors || []).forEach(function (n) { near[n] = true; });
 
     var s = fns.newGame(5);
-    Object.keys(s.stations).forEach(function (sid) { s.stations[sid].owner = 'neutral'; });
-    s.stations[mid].owner = 'ger';
+    Object.keys(s.stations).forEach(function (sid) { _setOwner(s, sid, 'neutral'); });
+    _setOwner(s, mid, 'ger');
     fns.step(s);
 
     var bad = [];
@@ -1236,10 +1282,12 @@ function suiteSimDisconnect(d) {
     var s = fns.newGame(9);
     // Isolate one owned station by handing every other station of that power
     // to neutral: nothing links it home any more.
-    var owned = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === pid; });
-    assert(owned.length > 1, 'need a power with more than one station');
-    var victim = owned.filter(function (sid) { return sid !== P[pid].capital; })[0] || owned[0];
-    owned.forEach(function (sid) { if (sid !== victim && sid !== P[pid].capital) s.stations[sid].owner = 'neutral'; });
+    // Two hops out, then the hop in between handed back to neutral: the far
+    // station is ours, and nothing we own links it home.
+    var chain = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 6);
+    assert(chain.length >= 2, 'could not grow a chain from ' + P[pid].capital);
+    var victim = chain[chain.length - 1];
+    chain.forEach(function (sid) { if (sid !== victim) _setOwner(s, sid, 'neutral'); });
     s.stations[victim].units.infantry = 40;
 
     var before = s.stations[victim].units.infantry;
@@ -1251,10 +1299,10 @@ function suiteSimDisconnect(d) {
   test('decay rate matches DISCONNECT_DECAY within a factor of two', function () {
     var pid = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; })[0];
     var s = fns.newGame(9);
-    var owned = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === pid; });
-    var victim = owned.filter(function (sid) { return sid !== P[pid].capital; })[0];
-    if (!victim) return skipTest('decay rate', 'power has only a capital');
-    owned.forEach(function (sid) { if (sid !== victim && sid !== P[pid].capital) s.stations[sid].owner = 'neutral'; });
+    var chain = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 6);
+    if (chain.length < 2) return skipTest('decay rate', 'could not grow a chain from the capital');
+    var victim = chain[chain.length - 1];
+    chain.forEach(function (sid) { if (sid !== victim) _setOwner(s, sid, 'neutral'); });
     s.stations[victim].units.infantry = 100;
     _run(fns, s, B.DISCONNECT_GRACE);
     var start = s.stations[victim].units.infantry;
@@ -1286,11 +1334,27 @@ function suiteSimCapitulation(d) {
     var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
     var victim = pids[0], victor = pids[1];
     var s = fns.newGame(21);
+
+    // Build the victim a real empire first, and RUN long enough for the peak
+    // tracker to sample it. Both halves matter. Capitulation is measured
+    // against a high-water mark of stations held (sim/victory.js), so a power
+    // that never grew has a peak of 1 and can only "capitulate" by holding
+    // zero stations — at which point the transfer this test exists to prove
+    // moves nothing and the assertions below all pass against an empty set.
+    // That is precisely how this test passed while doing nothing after the
+    // opening changed to capital-only.
+    var empire = _grantFromCapital(s, ctx.data.LINKS, P[victim].capital, victim, 11);
+    assert(empire.length >= 8, 'could not build an empire for ' + victim);
+    _run(fns, s, B.CAPITULATE_CHECK_INTERVAL + 5);
+    assert(s.powers[victim].peakStations >= 9,
+      'peak never registered: ' + s.powers[victim].peakStations);
+
+    // Now break it: the capital and all but two stations change hands.
     var owned = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === victim; });
-    // Hand over the capital and all but a couple of stations.
-    owned.forEach(function (sid, i) { if (i > 1) s.stations[sid].owner = victor; });
-    s.stations[P[victim].capital].owner = victor;
+    owned.forEach(function (sid, i) { if (i > 1) _setOwner(s, sid, victor); });
+    _setOwner(s, P[victim].capital, victor);
     var remnant = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === victim; });
+    assert(remnant.length > 0, 'the remnant is empty — this test would prove nothing');
 
     _run(fns, s, B.CAPITULATE_CHECK_INTERVAL * 2 + 5);
 
@@ -1315,7 +1379,7 @@ function suiteSimCapitulation(d) {
     var sids = Object.keys(s.stations).sort();
 
     // Strip the victim down to nothing and hand over its capital.
-    sids.forEach(function (sid) { if (s.stations[sid].owner === victim) s.stations[sid].owner = victor; });
+    sids.forEach(function (sid) { if (s.stations[sid].owner === victim) _setOwner(s, sid, victor); });
 
     // The target must be DEFENDED. Against an empty station the capture
     // resolves in phase 3 and the capitulation in phase 5 of the SAME tick
@@ -1341,10 +1405,81 @@ function suiteSimCapitulation(d) {
     var victim = pids[0], victor = pids[1];
     var s = fns.newGame(22);
     var owned = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === victim; });
-    owned.forEach(function (sid) { if (sid !== P[victim].capital) s.stations[sid].owner = victor; });
+    owned.forEach(function (sid) { if (sid !== P[victim].capital) _setOwner(s, sid, victor); });
     _run(fns, s, B.CAPITULATE_CHECK_INTERVAL * 2 + 5);
     assertEqual(s.stations[P[victim].capital].owner, victim,
       'capital was taken without anyone attacking it');
+  });
+
+  // The rule pinned from the OTHER side. The test above proves capitulation
+  // fires; this one proves it does not fire early, and it is the half that a
+  // capital-only opening breaks.
+  //
+  // Capitulation used to be measured in TERRITORIES against a power's starting
+  // territory count. Start every power on its capital alone and that count is
+  // 0 for all seven, because one city in a nine-city country is not a majority
+  // — so the "still holds a quarter of what it started with" guard could never
+  // hold, and any power that lost its capital handed its whole empire over on
+  // the next 50-tick check no matter how much of it was still standing.
+  // Nothing in the suite objected, because every capitulation test until now
+  // asserted that a collapse DID happen.
+  test('a power that loses its capital but still holds most of its empire does not capitulate', function () {
+    var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
+    var victim = pids[0], victor = pids[1];
+    var s = fns.newGame(23);
+
+    var empire = _grantFromCapital(s, ctx.data.LINKS, P[victim].capital, victim, 11);
+    assert(empire.length >= 8, 'could not build an empire for ' + victim);
+    _run(fns, s, B.CAPITULATE_CHECK_INTERVAL + 5);
+
+    var heldBefore = Object.keys(s.stations).filter(function (sid) { return s.stations[sid].owner === victim; }).length;
+    assert(heldBefore >= 9, 'fixture too small to be meaningful: ' + heldBefore);
+
+    // The capital falls and nothing else does.
+    _setOwner(s, P[victim].capital, victor);
+    _run(fns, s, B.CAPITULATE_CHECK_INTERVAL * 2 + 5);
+
+    var heldAfter = Object.keys(s.stations).filter(function (sid) { return s.stations[sid].owner === victim; }).length;
+    assert(heldAfter >= heldBefore - 2,
+      victim + ' lost its capital and folded from ' + heldBefore + ' stations to ' + heldAfter +
+      ' — an empire still well above CAPITULATE_FRACTION capitulated');
+    assert(s.powers[victim].alive !== false, victim + ' was marked dead while still holding ' + heldAfter);
+  });
+
+  // Victory is "outlast every rival", not "own every pixel".
+  //
+  // The old rule required a single owner across all 108 stations, neutrals
+  // included, and it was close to unsatisfiable: measured at the tick cap,
+  // Russia held 105 of 108 with every rival dead and no victory fired, because
+  // three neutral villages had never been taken by anyone. Worse, the draw
+  // clause sat AFTER an early `return` in the contested check and was therefore
+  // unreachable — so those games ended neither in victory nor in a draw, and
+  // tools/balance.js scored 73% of every batch by awarding the timeout to
+  // whoever led on territories.
+  test('victory needs every RIVAL gone, not every neutral village taken', function () {
+    var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
+    var champ = pids[0], rival = pids[1];
+    var s = fns.newGame(24);
+    _clearBoard(s, 'neutral');
+
+    var all = Object.keys(s.stations).sort();
+    for (var i = 0; i < 10; i++) { _setOwner(s, all[i], champ); s.stations[all[i]].units.infantry = 20; }
+    var lastRivalCity = all[10];
+    _setOwner(s, lastRivalCity, rival);
+    s.stations[lastRivalCity].units.infantry = 5;
+
+    _run(fns, s, 5);
+    assert(!s.winner, 'declared a winner while ' + rival + ' still held ' + lastRivalCity);
+
+    // The rival falls. Every neutral station is left exactly as it was.
+    _setOwner(s, lastRivalCity, champ);
+    _run(fns, s, 5);
+
+    var neutralsLeft = all.filter(function (sid) { return s.stations[sid].owner === 'neutral'; }).length;
+    assert(neutralsLeft > 50,
+      'fixture left only ' + neutralsLeft + ' neutral stations — it cannot prove neutrals are ignored');
+    assertEqual(s.winner, champ,
+      champ + ' outlasted every rival but no victory fired, with ' + neutralsLeft + ' neutrals on the board');
   });
 }
 
@@ -1357,9 +1492,9 @@ function suiteSimCommands(d) {
   test('a send spawns one wave and takes SEND_FRACTION from each source', function () {
     var pid = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; })[0];
     var s = fns.newGame(31);
-    var owned = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === pid; });
-    assert(owned.length >= 2, 'need two stations');
-    var src = owned[0], dst = owned[1];
+    var granted = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 1);
+    assert(granted.length === 1, 'could not grant a neighbour of ' + P[pid].capital);
+    var src = P[pid].capital, dst = granted[0];
     s.stations[src].units.infantry = 40;
     var before = s.stations[src].units.infantry;
     fns.apply(s, { type: 'send', owner: pid, sources: [src], target: dst, fraction: B.SEND_FRACTION_DEFAULT });
@@ -1389,6 +1524,780 @@ function suiteSimCommands(d) {
       return JSON.stringify(s.stations);
     };
     assertEqual(run(), run(), 'two runs from the same seed diverged');
+  });
+}
+
+// ===========================================================================
+// sim / ownership-aware routing
+//
+// The rule (sim/movement.js): a wave may march through ground its owner HOLDS
+// and through nothing else — neutral ground included. The FINAL station is
+// exempt by construction in _moveSearch (a station that fails the traversal
+// test may still be REACHED, it just cannot be expanded from), so walking into
+// a neutral or enemy city is the attack, and marching through one is not.
+//
+// Neutral used to be passable. With the capital-only opening that made 101 of
+// 108 stations an open highway on move one: on seed 19140628 Britain's opening
+// garrison walked London -> BERLIN through Lille, Cologne and Leipzig without
+// fighting any of them. Two tests below exist purely to catch that returning —
+// "a wave stops and fights a garrisoned neutral" and the capital-opening reach
+// guard at the end of the suite.
+//
+// Routing (_moveCanTraverse) and enforcement (_moveIntercepts) are two halves
+// of one rule and are tested as such: whatever routeFor refuses to plan, a wave
+// that finds itself on such a path anyway must be stopped at. If they ever
+// disagree, a wave either ghosts through a garrison or halts on ground it was
+// entitled to cross.
+//
+// Keyed on OWNERSHIP, never on war status, so none of these fixtures touch
+// relations: a corridor that opened and closed as diplomacy drifted would be
+// untestable for the same reason it would be unplayable.
+//
+// Every fixture is built from the live link graph rather than from hard-coded
+// city ids — the map is generated (tools/build-map.js) and any id written here
+// would rot the next time it is regenerated.
+// ===========================================================================
+
+function _routeAdj(LINKS) {
+  var adj = {};
+  for (var i = 0; i < LINKS.length; i++) {
+    var l = LINKS[i];
+    (adj[l.a] = adj[l.a] || []).push(l.b);
+    (adj[l.b] = adj[l.b] || []).push(l.a);
+  }
+  Object.keys(adj).forEach(function (k) { adj[k].sort(); });
+  return adj;
+}
+
+// a and d two hops apart with at least TWO distinct stations in between and no
+// direct link, so blocking whichever one the geographic route picks leaves a
+// real detour rather than nothing at all.
+function _routeDiamond(adj) {
+  var ids = Object.keys(adj).sort();
+  for (var i = 0; i < ids.length; i++) {
+    for (var j = 0; j < ids.length; j++) {
+      var a = ids[i], dd = ids[j];
+      if (a >= dd) continue;
+      if (adj[a].indexOf(dd) >= 0) continue;
+      var mids = adj[a].filter(function (x) { return adj[dd].indexOf(x) >= 0; });
+      if (mids.length >= 2) return { a: a, d: dd, mids: mids.sort() };
+    }
+  }
+  return null;
+}
+
+// A dead end: a station of degree 1 is reachable ONLY through its single
+// neighbour, so that neighbour is a genuine cut vertex and no detour exists.
+function _routeDeadEnd(adj) {
+  var ids = Object.keys(adj).sort();
+  for (var i = 0; i < ids.length; i++) {
+    var t = ids[i];
+    if (adj[t].length !== 1) continue;
+    var gate = adj[t][0];
+    var srcs = adj[gate].filter(function (x) { return x !== t; }).sort();
+    if (srcs.length) return { target: t, gate: gate, src: srcs[0] };
+  }
+  return null;
+}
+
+// Board with every station neutral and empty, then `pid` given `own`.
+// A routing fixture: wipe the board to neutral, then hand `pid` the stations
+// the test cares about.
+//
+// It also seeds a token RIVAL somewhere far away, and that is load-bearing
+// rather than decorative. Victory now fires when one power has outlasted every
+// other (sim/victory.js), and stepTick stops advancing a finished game — so a
+// board on which exactly one power holds anything is a WON board, and every
+// wave on it freezes in place at tick one. Three tests failed with "the wave
+// never resolved" for precisely this reason, which reads like a movement bug
+// and is not one. The rival is given a station and no units: it exists to keep
+// the war running, not to fight.
+function _routeBoard(fns, seed, pid, own) {
+  var s = fns.newGame(seed);
+  _clearBoard(s, 'neutral');
+  for (var i = 0; i < own.length; i++) {
+    _setOwner(s, own[i], pid);
+    s.stations[own[i]].units.infantry = 60;
+  }
+
+  // Put it as far from the fixture as the link graph allows. Taking the first
+  // free station in id order is not good enough — it landed on the very middle
+  // one test then asserted was neutral, turning a fixture detail into a
+  // failure. Farthest-by-hops is deterministic and cannot sit in the
+  // neighbourhood the test is reasoning about.
+  var pids = Object.keys(s.powers).sort().filter(function (p) { return p !== 'neutral' && p !== pid; });
+  var adj = _linkAdjacency(LINKS);
+  var seen = {}, frontier = own.slice(), far = null;
+  for (var k = 0; k < own.length; k++) seen[own[k]] = true;
+  while (frontier.length) {
+    var next = [];
+    for (var f = 0; f < frontier.length; f++) {
+      var nbs = (adj[frontier[f]] || []).slice().sort();
+      for (var n = 0; n < nbs.length; n++) {
+        if (seen[nbs[n]]) continue;
+        seen[nbs[n]] = true;
+        next.push(nbs[n]);
+      }
+    }
+    if (next.length) far = next.slice().sort()[0];   // sorted: determinism
+    frontier = next;
+  }
+  if (far) {
+    _setOwner(s, far, pids[0]);
+    s.stations[far].units.infantry = 1;
+  }
+  return s;
+}
+
+function suiteSimRouting(d) {
+  var ctx = _needSim('sim / ownership-aware routing', ['newGame', 'step', 'apply']);
+  if (!ctx) return;
+  if (typeof routeFor !== 'function') {
+    return skipSuite('sim / ownership-aware routing', 'routeFor() [sim/movement.js] not loaded');
+  }
+  if (!d.LINKS) return skipSuite('sim / ownership-aware routing', 'data/stations.js LINKS not loaded');
+
+  suite('sim / ownership-aware routing');
+  var fns = ctx.fns, P = ctx.data.POWERS, B = ctx.data.BAL;
+  var adj = _routeAdj(d.LINKS);
+  var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
+  var pid = pids[0], foe = pids[1];
+
+  test('a route detours around an enemy-held station', function () {
+    var dm = _routeDiamond(adj);
+    assert(dm, 'no two-hop diamond in the link graph to build the fixture from');
+    // Both middles are HELD: this test is about an enemy closing one of two
+    // open doors, so both doors have to be open to begin with. Leaving them
+    // neutral would make the assertion pass for the wrong reason.
+    var s = _routeBoard(fns, 41, pid, [dm.a].concat(dm.mids));
+
+    var open = routeFor(s, pid, dm.a, dm.d);
+    assert(open && open.length === 3, 'expected a two-hop route over a clear board');
+    var blocked = open[1];
+    assert(dm.mids.indexOf(blocked) >= 0, 'route did not use one of the shared middles');
+
+    _setOwner(s, blocked, foe);
+    var got = routeFor(s, pid, dm.a, dm.d);
+    assert(got, 'no route at all around ' + blocked + ' — expected the detour');
+    assertEqual(got[got.length - 1], dm.d, 'detour did not end at the target');
+    assert(got.indexOf(blocked) < 0,
+      'route still marches through enemy-held ' + blocked + ': ' + got.join('>'));
+
+    // The geographic path is deliberately unchanged: routeBetween is the map's
+    // opinion and the AI's distance heuristics still read it.
+    var geo = routeBetween(dm.a, dm.d);
+    assert(geo.indexOf(blocked) >= 0,
+      'routeBetween() became ownership-aware — it must stay pure geography');
+  });
+
+  test('a NEUTRAL station on the path blocks — only ground you hold is passable', function () {
+    var dm = _routeDiamond(adj);
+    assert(dm, 'no diamond fixture');
+    var s = _routeBoard(fns, 42, pid, [dm.a]);
+    var mid = dm.mids[0];
+    assertEqual(s.stations[mid].owner, 'neutral', 'fixture middle was not neutral');
+
+    // Every path from a to d runs through a middle, and every middle is
+    // neutral. Under the old rule this was the map's own two-hop route.
+    assertEqual(routeFor(s, pid, dm.a, dm.d), null,
+      'routeFor marched through neutral ground to reach ' + dm.d +
+      ' — neutral is no longer a corridor');
+    // ...and the geographic route is unchanged, so this is a rule about
+    // ownership and not about the map having lost an edge.
+    var geo = routeBetween(dm.a, dm.d);
+    assert(geo && geo.length === 3,
+      'routeBetween() became ownership-aware — it must stay pure geography');
+
+    // The neutral middle is still REACHABLE: it is a legal end of a path, and
+    // walking into it is the attack that has to be fought. Blocking it as a
+    // destination too would make neutral cities unconquerable.
+    var hit = routeFor(s, pid, dm.a, mid);
+    assert(hit && hit.join('>') === [dm.a, mid].join('>'),
+      'a neutral NEIGHBOUR became unreachable — the final station is not exempt');
+
+    // Taking the middle opens exactly the route that neutrality refused.
+    _setOwner(s, mid, pid);
+    var open = routeFor(s, pid, dm.a, dm.d);
+    assert(open, 'no route to ' + dm.d + ' even after taking the middle ' + mid);
+    assertEqual(open.join('>'), [dm.a, mid, dm.d].join('>'),
+      'route did not go through the newly-held middle');
+  });
+
+  test('an enemy-held DESTINATION does not block — that is the attack', function () {
+    var dm = _routeDiamond(adj);
+    // The middles are held so the only thing under test is the DESTINATION.
+    var s = _routeBoard(fns, 43, pid, [dm.a].concat(dm.mids));
+    _setOwner(s, dm.d, foe);
+    var got = routeFor(s, pid, dm.a, dm.d);
+    assert(got, 'routeFor refused to route INTO an enemy station');
+    assertEqual(got[got.length - 1], dm.d, 'route did not reach the enemy target');
+  });
+
+  test('a target reachable only through an enemy is rejected with no-route', function () {
+    var de = _routeDeadEnd(adj);
+    assert(de, 'no degree-1 station on the map to build a cut-vertex fixture from');
+    var s = _routeBoard(fns, 44, pid, [de.src]);
+    _setOwner(s, de.gate, foe);
+    s.stations[de.gate].units.infantry = 10;
+
+    assertEqual(routeFor(s, pid, de.src, de.target), null,
+      'routeFor found a way past the only gate into ' + de.target);
+
+    var before = s.stations[de.src].units.infantry;
+    var r = fns.apply(s, { type: 'send', owner: pid, sources: [de.src], target: de.target,
+                           fraction: B.SEND_FRACTION_DEFAULT });
+    assert(r.ok === false, 'applyCommand accepted a send with no legal route');
+    assertEqual(r.rejected.length, 1, 'expected exactly one rejected source');
+    assertEqual(r.rejected[0].reason, 'no-route', 'wrong rejection reason');
+    assertEqual(r.waves.length, 0, 'a wave was created for a rejected send');
+    // "a rejected source never leaves the board half-mutated" (sim/commands.js).
+    assertClose(s.stations[de.src].units.infantry, before, 1e-9,
+      'units were subtracted for a source that was rejected');
+  });
+
+  test('a send through the gate is refused while it is neutral, accepted once held', function () {
+    var de = _routeDeadEnd(adj);
+    assert(de, 'no degree-1 station on the map to build a cut-vertex fixture from');
+    var s = _routeBoard(fns, 45, pid, [de.src]);
+    var cmd = { type: 'send', owner: pid, sources: [de.src], target: de.target,
+                fraction: B.SEND_FRACTION_DEFAULT };
+    assertEqual(s.stations[de.gate].owner, 'neutral', 'fixture gate was not neutral');
+
+    var before = s.stations[de.src].units.infantry;
+    var r = fns.apply(s, cmd);
+    assert(r.ok === false, 'a send THROUGH neutral ' + de.gate + ' was accepted');
+    assertEqual(r.rejected[0].reason, 'no-route', 'wrong rejection reason');
+    assertEqual(r.waves.length, 0, 'a wave was created for a rejected send');
+    assertClose(s.stations[de.src].units.infantry, before, 1e-9,
+      'units were subtracted for a source that was rejected');
+
+    // Same command, same board, one thing changed: the power now holds the
+    // gate. Nothing about the geography or the diplomacy moved.
+    _setOwner(s, de.gate, pid);
+    var r2 = fns.apply(s, cmd);
+    assert(r2.ok === true, 'a send over ground the power HOLDS was refused: ' +
+      JSON.stringify(r2.rejected));
+    assertEqual(r2.waves.length, 1, 'expected exactly one wave');
+    assertEqual(r2.waves[0].path.join('>'), [de.src, de.gate, de.target].join('>'),
+      'the accepted wave did not route through the held gate');
+  });
+
+  test('a capture bumps ownerEpoch and invalidates the route cache', function () {
+    var dm = _routeDiamond(adj);
+    // Middles held: the cache question needs a route to exist BEFORE the
+    // capture, so there is a stale answer for the second call to return.
+    var s = _routeBoard(fns, 46, pid, [dm.a].concat(dm.mids));
+
+    // Warm the cache FIRST — this test is worthless if the second call is the
+    // first one that ever ran.
+    var first = routeFor(s, pid, dm.a, dm.d);
+    assert(first && first.length === 3, 'fixture route was not the expected two hops');
+    var blocked = first[1];
+    var epochBefore = s.ownerEpoch;
+
+    setStationOwner(s, blocked, foe);
+    assert(s.ownerEpoch > epochBefore,
+      'setStationOwner did not move state.ownerEpoch (' + epochBefore + ')');
+
+    var second = routeFor(s, pid, dm.a, dm.d);
+    assert(second, 'no route after the capture');
+    assert(second.join('>') !== first.join('>'),
+      'routeFor returned the pre-capture path ' + first.join('>') + ' — cache went stale');
+    assert(second.indexOf(blocked) < 0, 'stale route still crosses ' + blocked);
+  });
+
+  test('ownerEpoch is an integer that only counts real changes', function () {
+    var s = fns.newGame(47);
+    assertEqual(s.ownerEpoch, 0, 'a fresh game must start at epoch 0');
+    var sid = Object.keys(s.stations).sort()[0];
+    var owner = s.stations[sid].owner;
+    setStationOwner(s, sid, owner);
+    assertEqual(s.ownerEpoch, 0, 'a no-op ownership write bumped the epoch');
+    setStationOwner(s, sid, owner === foe ? pid : foe);
+    assertEqual(s.ownerEpoch, 1, 'a real ownership change did not bump the epoch by one');
+  });
+
+  test('a wave is intercepted when an intermediate station flips mid-flight', function () {
+    var dm = _routeDiamond(adj);
+    // Middles held, so the send is legal at send time. The whole point is that
+    // the board changes UNDER a route that was legal when it was planned.
+    var s = _routeBoard(fns, 48, pid, [dm.a].concat(dm.mids));
+    s.stations[dm.a].units.infantry = 200;
+
+    var r = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 0.9 });
+    assert(r.ok, 'setup send was refused: ' + JSON.stringify(r.rejected));
+    var w = r.waves[0];
+    assertEqual(w.path.length, 3, 'fixture needs a two-hop route so there IS an intermediate');
+    var mid = w.path[1];
+
+    // One tick so the wave is genuinely in the air, then the middle changes
+    // hands behind it. Its path was fixed at send time and cannot be replanned.
+    fns.step(s);
+    assert(s.waves.length === 1, 'wave resolved before it could be intercepted — fixture too short');
+    _setOwner(s, mid, foe);
+    s.stations[mid].units.infantry = 5;
+
+    for (var i = 0; i < 4000 && s.waves.length; i++) fns.step(s);
+    assertEqual(s.waves.length, 0, 'the wave never resolved');
+
+    // It fought at the interception point, not at its original destination.
+    for (var k = 0; k < 400; k++) fns.step(s);
+    assertEqual(s.stations[mid].owner, pid,
+      'the wave ghosted through enemy-held ' + mid + ' instead of fighting there');
+    assertEqual(s.stations[dm.d].owner, 'neutral',
+      'the wave reached ' + dm.d + ' — it should have been stopped at ' + mid);
+  });
+
+  test('a NEUTRAL intermediate intercepts too', function () {
+    // The enforcement half of the inverted routing test above. _moveIntercepts
+    // and _moveCanTraverse have to agree exactly: routing refuses to PLAN a
+    // path through neutral ground, so a wave that ends up on one anyway must be
+    // stopped at it. Neutral used to be the one intermediate that waved a wave
+    // through, which is the same bug as routing through it, only later.
+    var dm = _routeDiamond(adj);
+    var s = _routeBoard(fns, 49, pid, [dm.a].concat(dm.mids));
+    s.stations[dm.a].units.infantry = 200;
+
+    var r = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 0.9 });
+    assert(r.ok, 'setup send was refused: ' + JSON.stringify(r.rejected));
+    var w = r.waves[0];
+    assertEqual(w.path.length, 3, 'fixture needs a two-hop route so there IS an intermediate');
+    var mid = w.path[1];
+
+    fns.step(s);
+    assert(s.waves.length === 1, 'wave resolved before it could be intercepted — fixture too short');
+    // The middle is LOST behind the wave — to nobody, not to a rival. Under the
+    // old rule that was a free pass.
+    _setOwner(s, mid, 'neutral');
+    s.stations[mid].units.infantry = 5;
+
+    for (var i = 0; i < 4000 && s.waves.length; i++) fns.step(s);
+    assertEqual(s.waves.length, 0, 'the wave never resolved');
+
+    for (var k = 0; k < 400; k++) fns.step(s);
+    assertEqual(s.stations[mid].owner, pid,
+      'the wave ghosted through neutral ' + mid + ' instead of fighting there');
+    assertEqual(s.stations[dm.d].owner, 'neutral',
+      'the wave reached ' + dm.d + ' — it should have been stopped at neutral ' + mid);
+  });
+
+  // ---- the regression the suite did not have ------------------------------
+  test('a wave stops and fights a garrisoned neutral instead of marching through it', function () {
+    // THE bug, in miniature. Seed 19140628, turn zero, before neutral ground
+    // was closed: Britain sent its opening 67-unit garrison out of London and
+    // captured BERLIN, walking through Lille (6 defenders), Cologne (9) and
+    // Leipzig (8) without fighting one of them. Nothing in this suite noticed.
+    var dm = _routeDiamond(adj);
+    var s = _routeBoard(fns, 50, pid, [dm.a]);
+    var mid = dm.mids[0], far = dm.d;
+    var garrison = 100;
+    s.stations[mid].units.infantry = garrison;
+
+    // 1. It cannot be PLANNED: the far target is unroutable past the garrison.
+    assertEqual(routeFor(s, pid, dm.a, far), null,
+      'routeFor planned a march through garrisoned neutral ' + mid + ' to reach ' + far);
+
+    // 2. And a wave put on that path anyway is stopped at the garrison. Pushed
+    //    in directly, because routeFor will (correctly) no longer build it —
+    //    which is exactly why enforcement has to be checked separately.
+    var sent = 180;
+    s.waves.push({ id: 1, owner: pid, from: dm.a, to: far, path: [dm.a, mid, far],
+                   hop: 0, progress: 0,
+                   units: { infantry: sent, artillery: 0, armour: 0 } });
+
+    // Watched rather than measured at the end: `far` is a neutral station and
+    // neutral stations REGROW, so its unit count drifts up from zero on its own
+    // and cannot be used as evidence of anything.
+    var touchedFar = false;
+    for (var i = 0; i < 8000 && s.waves.length; i++) {
+      fns.step(s);
+      if (typeof stationAttackers === 'function' && stationAttackers(s, far).length) touchedFar = true;
+    }
+    assertEqual(s.waves.length, 0, 'the wave never resolved');
+    assert(!touchedFar,
+      'the wave arrived at ' + far + ' beyond the garrison at ' + mid +
+      ' — this is the London-to-Berlin bug');
+    for (var k = 0; k < 300; k++) fns.step(s);
+
+    // The neutral garrison was fought down, not walked past.
+    assertEqual(s.stations[mid].owner, pid,
+      'the neutral garrison at ' + mid + ' was never engaged — the wave marched through it');
+    assert(totalUnits(s.stations[mid].units) < sent - 1e-9,
+      'the attacker holds ' + mid + ' at full strength (' + sent + ') — no fight happened');
+    assertEqual(s.stations[far].owner, 'neutral',
+      'the wave took ' + far + ' beyond the garrison — this is the London-to-Berlin bug');
+  });
+
+  // ---- the cheap guard that would have caught it on day one ---------------
+  test('from the capital-only opening a power can reach only its link neighbours', function () {
+    // One assertion over the real starting board. Every power opens holding its
+    // capital and nothing else, so "how far can anybody go on move one" is
+    // exactly link degree — 6/4/6/3/6/6/5 for aut/fra/gbr/rus/ita/ott/ger on
+    // this map. Derived from LINKS rather than hard-coded so it survives a map
+    // rebuild; what it pins down is the RELATIONSHIP, which must not change.
+    var s = fns.newGame(19140628);
+    var caps = {};
+    pids.forEach(function (p) { caps[P[p].capital] = p; });
+
+    pids.forEach(function (p) {
+      var cap = P[p].capital;
+      var held = Object.keys(s.stations).sort().filter(function (sid) {
+        return s.stations[sid].owner === p;
+      });
+      assertEqual(held.join(','), cap,
+        p + ' does not open holding exactly its capital — this guard assumes it does');
+
+      var reach = Object.keys(s.stations).sort().filter(function (sid) {
+        return sid !== cap && routeFor(s, p, cap, sid) !== null;
+      });
+      var nb = (adj[cap] || []).slice().sort();
+      assertEqual(reach.join(','), nb.join(','),
+        p + ' reaches ' + reach.length + ' stations from ' + cap + ' but has ' +
+        nb.length + ' links — ' + reach.join(','));
+
+      // The bug stated as its consequence: nobody may touch anybody on move one.
+      var decap = reach.filter(function (sid) { return caps[sid]; });
+      assertEqual(decap.length, 0,
+        p + ' can reach a rival capital from ' + cap + ' on move one: ' + decap.join(','));
+    });
+  });
+}
+
+// ===========================================================================
+// sim / beachhead landings   (02-visibility-and-sea.md §3b)
+//
+// A wave whose FINAL hop is a sea link comes ashore in echelons over
+// BAL.LANDING_TICKS instead of arriving all at once; units still at sea are not
+// in station.attackers and so cannot be hit. A LAND final hop is unchanged.
+//
+// Every fixture is derived from the live link graph — one sea link and one land
+// link into the SAME station, so the amphibious and overland runs differ in
+// nothing but the water. Hard-coding beach ids would rot with the map, and
+// worse, would let the two arms of the comparison drift apart.
+//
+// None of the assertions below hard-code an odds threshold either. The one test
+// that has to know where the break-even sits FINDS it, by searching for the
+// smallest overland attacker that wins and then re-running exactly that force
+// over the sea. That claim stays true and stays meaningful whatever COMBAT_RATE
+// and LANDING_TICKS are later retuned to.
+// ===========================================================================
+
+// A sea link, plus a land link into the same landing station. Lowest ids win so
+// the fixture is stable across runs.
+function _beachFixture(LINKS) {
+  var sea = LINKS.filter(function (l) { return l.sea === true; })
+    .sort(function (a, b) { return (a.a + '|' + a.b) < (b.a + '|' + b.b) ? -1 : 1; });
+  for (var i = 0; i < sea.length; i++) {
+    // Either end may be the beach; try both so a one-sided coastline still works.
+    var ends = [[sea[i].a, sea[i].b], [sea[i].b, sea[i].a]];
+    for (var e = 0; e < ends.length; e++) {
+      var src = ends[e][0], beach = ends[e][1];
+      var land = LINKS.filter(function (l) {
+        return !l.sea && (l.a === beach || l.b === beach);
+      }).map(function (l) { return l.a === beach ? l.b : l.a; }).sort();
+      if (!land.length) continue;
+      // A land neighbour of the SOURCE too, so the interception fixture can put
+      // a hop in front of the crossing — see that test for why it matters.
+      var pre = LINKS.filter(function (l) {
+        return !l.sea && (l.a === src || l.b === src);
+      }).map(function (l) { return l.a === src ? l.b : l.a; })
+        .filter(function (x) { return x !== beach; }).sort();
+      return { src: src, beach: beach, land: land[0], pre: pre[0] || null };
+    }
+  }
+  return null;
+}
+
+// Empty, all-neutral, growth-free board. Growth is switched off so every
+// assertion below is about movement and combat only — a beach that regrows
+// mid-landing would make the arithmetic untraceable.
+function _beachBoard(fns, seed) {
+  var s = fns.newGame(seed);
+  _clearBoard(s, 'neutral');
+  Object.keys(s.stations).forEach(function (sid) { s.stations[sid].growthMul = 0; });
+  return s;
+}
+
+// Run the MOVEMENT phase alone, n times.
+//
+// Deliberately not fns.step() for the assertions that are about landing
+// arithmetic rather than about fighting. A test fixture's stations belong to a
+// made-up power with no capital, so growthTick correctly marks them
+// disconnected and DISCONNECT_DECAY quietly shaves the garrison every tick —
+// which is invisible in the assertion and looks exactly like the landing losing
+// units. Isolating phase 2 makes "50 in, 50 ashore" mean what it says. The
+// suites that are about combat still run the whole tick.
+function _beachMove(s, n) {
+  for (var i = 0; i < n && s.waves.length; i++) movementTick(s);
+  return s;
+}
+
+function _beachWave(s, origin, beach, units, owner) {
+  var w = { id: 1, owner: owner, from: origin, to: beach, path: [origin, beach],
+            hop: 0, progress: 1, units: units };
+  s.waves.push(w);
+  return w;
+}
+
+// Drop `atk` infantry onto `beach` from `origin` and run until nothing is left
+// in the air or in the battle. Returns whether the station was taken.
+function _beachAssault(fns, fx, atk, def, origin, seed, owner) {
+  var pid = owner || '_atk';
+  var s = _beachBoard(fns, seed);
+  s.stations[fx.beach].units.infantry = def;
+  _beachWave(s, origin, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, pid);
+  for (var t = 0; t < 30000; t++) {
+    fns.step(s);
+    var st = s.stations[fx.beach];
+    if (!s.waves.length && !(st.attackers && Object.keys(st.attackers).length)) break;
+  }
+  var st2 = s.stations[fx.beach];
+  return { took: st2.owner === pid, left: st2.owner === pid ? totalUnits(st2.units) : 0, state: s };
+}
+
+function suiteSimBeachhead(d) {
+  var ctx = _needSim('sim / beachhead landings', ['newGame', 'step']);
+  if (!ctx) return;
+  if (!d.LINKS) return skipSuite('sim / beachhead landings', 'data/stations.js LINKS not loaded');
+  var fx = _beachFixture(d.LINKS);
+  if (!fx) return skipSuite('sim / beachhead landings', 'no sea link with a land link into the same station');
+
+  suite('sim / beachhead landings');
+  var fns = ctx.fns, B = ctx.data.BAL;
+  var N = B.LANDING_TICKS;
+
+  test('LANDING_TICKS is present and shorter than a decisive battle', function () {
+    assert(typeof N === 'number' && N >= 1, 'BAL.LANDING_TICKS missing or < 1');
+    // atanh(1/2)/COMBAT_RATE is a 2:1 battle. A landing longer than the fight
+    // it is fought inside is not a beachhead, it is a second combat model.
+    var battle2to1 = Math.log(3) / 2 / B.COMBAT_RATE;
+    assert(N < battle2to1,
+      'LANDING_TICKS ' + N + ' exceeds a 2:1 battle (' + Math.round(battle2to1) + ' ticks)');
+  });
+
+  // ---- the point of the whole feature -------------------------------------
+  test('a force that takes a beach over land LOSES coming off the water', function () {
+    var def = 30;
+    // Smallest overland attacker that wins. Searched, never hard-coded: this
+    // test must keep meaning something after a combat retune.
+    var breakEven = null;
+    for (var a = Math.round(def * 0.9); a <= def * 4; a++) {
+      if (_beachAssault(fns, fx, a, def, fx.land, 7).took) { breakEven = a; break; }
+    }
+    assert(breakEven, 'no overland attacker up to 4:1 could take the fixture beach');
+
+    var sea = _beachAssault(fns, fx, breakEven, def, fx.src, 7);
+    assert(!sea.took,
+      breakEven + ' units took ' + fx.beach + ' over land but ALSO took it across the sea — ' +
+      'echelon landing is not costing the attacker anything (LANDING_TICKS ' + N + ')');
+  });
+
+  test('...but enough force still gets ashore — the sea is not a wall', function () {
+    var r = _beachAssault(fns, fx, 120, 30, fx.src, 7);
+    assert(r.took, 'a 4:1 amphibious assault failed — LANDING_TICKS has made landings impossible');
+  });
+
+  // ---- the sea toll, exactly once -----------------------------------------
+  //
+  // Landing into a FRIENDLY station so nothing is lost to combat: every unit
+  // that leaves the boat is still countable at the end. Double-charging shows
+  // up as (1 - LOSS)^2, per-echelon charging as (1 - LOSS)^N.
+  test('the sea artillery toll is charged exactly ONCE across a landing', function () {
+    var s = _beachBoard(fns, 21);
+    _setOwner(s, fx.beach, '_atk');
+    var inf = 40, art = 40;
+    _beachWave(s, fx.src, fx.beach, { infantry: inf, artillery: art, armour: 0 }, '_atk');
+
+    _beachMove(s, N + 200);
+    assertEqual(s.waves.length, 0, 'the landing never finished — a residue is trickling forever');
+
+    var got = s.stations[fx.beach].units;
+    var want = art * (1 - B.SEA_ARTILLERY_LOSS);
+    assertClose(got.artillery, want, 1e-9,
+      'artillery ashore after one crossing (once = ' + want.toFixed(4) +
+      ', twice = ' + (art * Math.pow(1 - B.SEA_ARTILLERY_LOSS, 2)).toFixed(4) + ')');
+    assertClose(got.infantry, inf, 1e-9, 'infantry must not be taxed by the crossing at all');
+  });
+
+  if (!fx.pre) skipTest('the toll is charged once when interception truncates onto a sea hop',
+    'no land link into ' + fx.src + ' to put a hop in front of the crossing');
+  else test('the toll is charged once when interception truncates onto a sea hop', function () {
+    // pre --land--> src --sea--> beach --land--> inland, with the beach in
+    // hostile hands so the wave is intercepted there and its path truncated to
+    // [pre, src, beach]. The truncated path's final hop is the sea link, so the
+    // landing rules must apply.
+    //
+    // The leading land hop is the point of the fixture. It makes w.from a
+    // station with NO link to the beach at all, so an implementation that
+    // decided sea-ness from the wave's stated endpoints (w.from / w.to) instead
+    // of from the truncated path cannot accidentally get the right answer here.
+    //
+    // The attacker must HOLD the leading land hop. Only ground its owner holds
+    // is passable, so a neutral `src` would intercept the wave one hop early
+    // and the fixture would never reach the water at all — that would be a
+    // fixture measuring the routing rule, not the sea toll.
+    var s = _beachBoard(fns, 22);
+    _setOwner(s, fx.pre, '_atk');
+    _setOwner(s, fx.src, '_atk');
+    _setOwner(s, fx.beach, '_foe');
+    s.stations[fx.beach].units.infantry = 1;
+    var art = 40;
+    var w = { id: 1, owner: '_atk', from: fx.pre, to: fx.land,
+              path: [fx.pre, fx.src, fx.beach, fx.land], hop: 0, progress: 0,
+              units: { infantry: 60, artillery: art, armour: 0 } };
+    s.waves.push(w);
+
+    for (var t = 0; t < 20000 && !w.landing; t++) movementTick(s);
+    assert(w.landing, 'an intercepted wave on the far side of a sea link never began a landing');
+    assertEqual(w.path.length, 3, 'path was not truncated at the interception point');
+    assertEqual(w.path[2], fx.beach, 'truncated somewhere other than the beach');
+    assertClose(w.landing.total, (60 + art * (1 - B.SEA_ARTILLERY_LOSS)),
+      1e-9, 'landing strength — the crossing toll was not applied exactly once');
+  });
+
+  // ---- units at sea are not in the battle ---------------------------------
+  if (N < 4) skipTest('units still at sea cannot be hit',
+    'LANDING_TICKS is ' + N + ' — there is no at-sea phase to observe');
+  else test('units still at sea cannot be hit', function () {
+    var s = _beachBoard(fns, 23);
+    s.stations[fx.beach].units.infantry = 60;
+    var atk = 60;
+    var w = _beachWave(s, fx.src, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, '_atk');
+
+    var half = Math.floor(N / 2);
+    for (var t = 0; t < half; t++) fns.step(s);
+    assert(s.waves.length === 1, 'the landing finished early — fixture cannot see the at-sea phase');
+
+    // The at-sea remainder is spent ONLY by the echelon schedule. If combat
+    // could reach it this number would be smaller, and if the schedule drifted
+    // it would not be exact.
+    assertClose(totalUnits(w.units), atk * (1 - half / N), 1e-9,
+      'the at-sea remainder is not exactly (1 - t/N) of the force — either combat ' +
+      'is reaching units still on the water, or echelons are not a fixed fraction');
+    assert(totalUnits(s.stations[fx.beach].attackers['_atk']) < atk * (half / N),
+      'the force ashore has taken no losses — the beach is not fighting back');
+  });
+
+  // ---- mid-landing flips ---------------------------------------------------
+  test('a landing into a station its own side holds merges, never fights', function () {
+    var s = _beachBoard(fns, 24);
+    _setOwner(s, fx.beach, '_atk');
+    s.stations[fx.beach].units.infantry = 10;
+    _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 0, armour: 0 }, '_atk');
+
+    for (var t = 0; t < N + 200 && s.waves.length; t++) {
+      movementTick(s);
+      assert(!s.stations[fx.beach].attackers || !s.stations[fx.beach].attackers['_atk'],
+        'an echelon landed on friendly ground as an ATTACKER on tick ' + t);
+    }
+    assertClose(s.stations[fx.beach].units.infantry, 60, 1e-9,
+      'the landing did not merge into the garrison intact');
+  });
+
+  test('a station that flips to the landing power mid-landing absorbs the rest', function () {
+    var s = _beachBoard(fns, 25);
+    s.stations[fx.beach].units.infantry = 20;
+    var atk = 90;
+    var w = _beachWave(s, fx.src, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, '_atk');
+
+    var quarter = Math.max(1, Math.floor(N / 4));
+    _beachMove(s, quarter);
+    assert(s.waves.length === 1, 'landing ended before the flip could be staged');
+    var atSea = totalUnits(w.units);
+    assert(atSea > 1, 'nothing left at sea to test the merge with');
+
+    // The beach changes hands under the landing — the same situation
+    // WAVE_REROUTE_ON_LOSS: false describes for a wave in flight.
+    s.stations[fx.beach].attackers = null;
+    delete s.stations[fx.beach].attackers;
+    s.stations[fx.beach].units = { infantry: 0, artillery: 0, armour: 0 };
+    _setOwner(s, fx.beach, '_atk');
+
+    _beachMove(s, N + 200);
+    assertEqual(s.waves.length, 0, 'the landing never finished after the flip');
+    assert(!s.stations[fx.beach].attackers,
+      'the remaining echelons fought their own side after the station flipped to them');
+    assertClose(s.stations[fx.beach].units.infantry, atSea, 1e-9,
+      'the at-sea remainder did not merge into the garrison it now belongs to');
+  });
+
+  test('a station that flips to a THIRD power mid-landing keeps taking attackers', function () {
+    var s = _beachBoard(fns, 26);
+    s.stations[fx.beach].units.infantry = 20;
+    var w = _beachWave(s, fx.src, fx.beach, { infantry: 90, artillery: 0, armour: 0 }, '_atk');
+
+    var quarter = Math.max(1, Math.floor(N / 4));
+    _beachMove(s, quarter);
+    assert(s.waves.length === 1, 'landing ended before the flip could be staged');
+
+    delete s.stations[fx.beach].attackers;
+    s.stations[fx.beach].units = { infantry: 200, artillery: 0, armour: 0 };
+    _setOwner(s, fx.beach, '_third');
+
+    movementTick(s);
+    assert(s.stations[fx.beach].attackers && s.stations[fx.beach].attackers['_atk'],
+      'echelons landing on a THIRD power merged or vanished instead of attacking — ' +
+      'they are still hostile to whoever is standing there');
+  });
+
+  // ---- the residue rule ----------------------------------------------------
+  test('the final echelon flushes the remainder instead of trickling', function () {
+    var s = _beachBoard(fns, 27);
+    _setOwner(s, fx.beach, '_atk');
+    var atk = 50;
+    _beachWave(s, fx.src, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, '_atk');
+
+    // The observable contract of the flush rule is that the water NEVER holds a
+    // stack smaller than the smallest one a player is allowed to send. Asserting
+    // only "it finished by tick N" is not enough: a landing with no flush at all
+    // also finishes by tick N, it just spends its last echelons dribbling
+    // fractions ashore. This is the assertion that can tell them apart.
+    var t = 0, thinnest = Infinity;
+    for (; t < 5000 && s.waves.length; t++) {
+      movementTick(s);
+      var atSea = totalUnits(s.waves.length ? s.waves[0].units : { infantry: 0, artillery: 0, armour: 0 });
+      if (atSea > 0 && atSea < thinnest) thinnest = atSea;
+      assert(atSea === 0 || atSea > B.MIN_SEND_UNITS,
+        'tick ' + t + ' left ' + atSea.toFixed(4) + ' units at sea, under MIN_SEND_UNITS ' +
+        B.MIN_SEND_UNITS + ' — the remainder is being trickled, not flushed');
+    }
+    assertEqual(s.waves.length, 0, 'the landing wave outlived its schedule');
+    assert(t <= N, 'the landing took ' + t + ' ticks against LANDING_TICKS ' + N);
+    assert(thinnest < Infinity, 'the landing never had anything at sea — fixture is not landing');
+    assertClose(s.stations[fx.beach].units.infantry, atk, 1e-9,
+      'units were lost or left behind in the flush');
+  });
+
+  // ---- the land path is untouched -----------------------------------------
+  test('a LAND arrival is still instant and never sets a landing', function () {
+    var s = _beachBoard(fns, 28);
+    s.stations[fx.beach].units.infantry = 5;
+    var w = _beachWave(s, fx.land, fx.beach, { infantry: 40, artillery: 0, armour: 0 }, '_atk');
+
+    fns.step(s);
+    assertEqual(s.waves.length, 0, 'a land arrival was deferred past the tick it was seen on');
+    assert(!w.landing, 'a land arrival built a landing record');
+    // Everything is in the battle on the tick it landed; combat has run once,
+    // so allow for one tick of attrition rather than asserting the raw 40.
+    var ashore = totalUnits(s.stations[fx.beach].attackers['_atk']);
+    assertBetween(ashore, 39, 40, 'a land arrival did not commit its whole stack at once');
+  });
+
+  test('a zero-hop wave (path length 1) is unaffected', function () {
+    // The convention tests everywhere else lean on: push { progress: 1,
+    // path: [sid] } and it resolves this tick with no crossing and no landing.
+    var s = _beachBoard(fns, 29);
+    s.stations[fx.beach].units.infantry = 5;
+    var w = { id: 1, owner: '_atk', from: fx.beach, to: fx.beach, path: [fx.beach],
+              hop: 0, progress: 1, units: { infantry: 30, artillery: 10, armour: 0 } };
+    s.waves.push(w);
+    fns.step(s);
+    assertEqual(s.waves.length, 0, 'a zero-hop wave did not resolve on the tick it was seen');
+    assert(!w.landing, 'a zero-hop wave built a landing record');
+    // A crossing toll would leave 9.0; one tick of combat leaves ~9.99. The
+    // threshold sits between the two on purpose.
+    assert(s.stations[fx.beach].attackers['_atk'].artillery > 9.5,
+      'a zero-hop wave was charged a sea crossing it never made');
   });
 }
 

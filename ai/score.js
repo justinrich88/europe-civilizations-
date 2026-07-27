@@ -163,7 +163,24 @@ function _aiRound(v) {
 // two questions asked of it — "is this a legal target?" (2) and "can this
 // station join the volley?" (3). Absent means "further than that", which every
 // caller must treat as out of range rather than as zero.
-function _aiHopsFromOwn(own, cap) {
+//
+// The sweep is REACHABILITY, not geography: it expands only through stations
+// `pid` may legally march through (its own and neutral ones — sim/movement.js
+// routeFor), while still RECORDING the enemy stations on the far side of that
+// frontier, because those are exactly the ones worth attacking. Without this
+// the scorer offers targets sitting behind somebody else's cities, every
+// resulting volley comes back 'no-route' from applyCommand, and the power sits
+// paralysed with a decision log full of holds.
+// Must mirror _moveCanTraverse in sim/movement.js exactly. If the AI believes
+// it can march through neutral ground and the sim disagrees, every plan it
+// makes beyond its own border is rejected as 'no-route' and the power simply
+// stops playing — a failure that looks like a passive AI, not a broken rule.
+function _aiScoreCanTraverse(state, pid, sid) {
+  var st = state.stations[sid];
+  return !!st && st.owner === pid;
+}
+
+function _aiHopsFromOwn(state, pid, own, cap) {
   var adj = _aiAdjacency();
   var hops = {};
   var frontier = [];
@@ -176,7 +193,10 @@ function _aiHopsFromOwn(own, cap) {
     for (i = 0; i < frontier.length; i++) {
       var nb = adj[frontier[i]] || [];
       for (j = 0; j < nb.length; j++) {
-        if (hops[nb[j]] === undefined) { hops[nb[j]] = h + 1; next.push(nb[j]); }
+        if (hops[nb[j]] !== undefined) continue;
+        hops[nb[j]] = h + 1;
+        // Recorded either way; only marched through if it is passable.
+        if (_aiScoreCanTraverse(state, pid, nb[j])) next.push(nb[j]);
       }
     }
     if (!next.length) break;
@@ -227,7 +247,7 @@ function aiContext(state, pid) {
     pid: pid,
     personality: _aiPersonality(pid),
     own: own,
-    hops: _aiHopsFromOwn(own, cap),
+    hops: _aiHopsFromOwn(state, pid, own, cap),
     leader: stand.leader,
     leaderShare: stand.leaderShare,
     ownForces: powerForces(state, pid),
@@ -272,7 +292,12 @@ function _aiSources(state, pid, sid, ctx) {
         var n = nb[j];
         if (seen[n]) continue;
         seen[n] = true;
-        next.push(n);
+        // Run OUTWARD from the target through passable ground only. This is the
+        // routeFor rule read backwards: a source can only join the volley if
+        // the ground between it and the target is its own or neutral, so a
+        // station on the far side of a rival's city must not be counted into
+        // the odds for an attack it can never deliver.
+        if (_aiScoreCanTraverse(state, pid, n)) next.push(n);
         if (state.stations[n].owner === pid) {
           var send = _aiSendable(state, n);
           if (send.power > 0) found.push({ sid: n, hops: h + 1, power: send.power });

@@ -162,11 +162,13 @@ Distinct from the static data above. This is the only thing that mutates.
 ```js
 {
   tick: 0, speed: 1, paused: true, rng: <uint32>, winner: null,
+  ownerEpoch: 0,
   powers:   { ger: { alive:true, relations:{fra:-40,…}, startTerritories:12 } },
   stations: { ber: { owner:'ger', units:{infantry:0,artillery:0,armour:0},
                      connected:true, growthMul:1.0 } },
   waves:    [ { id, owner, from, to, path:['ber','lei'], hop:0,
-                progress:0.0, units:{…} } ],
+                progress:0.0, units:{…},
+                landing:{ ashore:0, total:0, per:{…} } } ],   // beachheads only
   battles:  { ber: { startedTick, variance, wobble } },
   log:      [],
 }
@@ -179,6 +181,7 @@ Hard rules:
 - `rng` is the PRNG state and lives *inside* state, so a snapshot fully determines the future.
 - Iterate via precomputed sorted id arrays, never `Object.keys` order.
 - `sim/` and `ai/` must never touch `document`.
+- **`ownerEpoch` is an integer counter, never a timestamp.** It counts station ownership changes. Routing is ownership-aware and cached (`routeFor` below), and this is the only thing that tells the cache the board moved. Change a station's owner **only** through `setStationOwner(state, sid, owner)` — a raw write to `state.stations[sid].owner` leaves the epoch behind and the next route may be answered from a search built against the old map. That includes test fixtures.
 
 All mutation flows through one entry point:
 
@@ -219,11 +222,34 @@ Helper contracts other files may rely on:
 |---|---|---|
 | `stationPower(state, sid, side)` | `sim/combat.js` | Total combat Power for one side at a station, including defense, terrain and matchup |
 | `growthMultiplier(state, sid)` | `sim/growth.js` | Product of all multiplier effects reaching this station, capped at `BAL.GROWTH_MUL_CAP` |
-| `routeBetween(fromSid, toSid)` | `sim/movement.js` | Shortest path as an array of station ids, `null` if unreachable. Pure — depends only on `LINKS`. |
+| `routeBetween(fromSid, toSid)` | `sim/movement.js` | **Geography.** Shortest path as an array of station ids, `null` if unreachable. Pure — depends only on `LINKS`, and must stay that way. Distance heuristics read it. |
+| `routeFor(state, pid, fromSid, toSid)` | `sim/movement.js` | **Legality.** The path a wave of `pid` may actually walk on this board, or `null` when there is none. Same shape and tie-break as `routeBetween`. |
+| `setStationOwner(state, sid, owner)` | `core/state.js` | Change who holds a station and bump `state.ownerEpoch`. The only supported way. Returns `true` if anything changed. |
+
+### The traversal rule
+
+A wave may march **through** stations its owner holds and through **neutral** stations. It may not march through a station held by any other power. The **final** station in a path is exempt — walking into an enemy city is the attack itself.
+
+Keyed on **ownership, not on war status**. Relations drift every tick (`sim/relations.js`), so a war-keyed rule would open and close corridors underneath the player for reasons that are off screen; ownership is drawn on the map and can be reasoned about. `neutral` is passable in both directions and by everyone.
+
+Two consequences other files must honour:
+
+- `applyCommand` validates each source with `commandRoute(src, target, state, owner)` and rejects a source with no legal path as **`'no-route'`**, per-source, mutating nothing for that source.
+- A wave's path is fixed at send time. If an intermediate station on it changes hands while the wave is in the air, the wave is **intercepted**: it stops there and resolves as an arrival at that station, fighting whoever now holds it. Implemented by truncating `w.path`, so the arrival convention below is unchanged — a wave is always at `path[path.length - 1]`. Neutral intermediates never intercept.
 
 Nothing in `sim/` may touch `document`, call `Math.random`, or read `Date.now`. Randomness comes only from the seeded PRNG in `core/rng.js` threaded through `state.rng`.
 
 **Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
+
+**`landing` — the beachhead remainder** (`02-visibility-and-sea.md` §3b). Present on a wave **only** while it is coming ashore, and only when its **final hop is a sea link**; a land arrival never carries one and is committed whole on the tick it lands. A sea arrival resolves on the tick it is seen as usual, but commits `1/BAL.LANDING_TICKS` of its strength per tick and stays on `state.waves` until empty.
+
+| Field | Meaning |
+|---|---|
+| `ashore` | Units already committed to the station |
+| `total` | Strength at the moment the landing began — **after** the sea artillery toll, which is charged once for the whole landing and never per echelon |
+| `per` | Units of each type committed per tick, fixed at the start so echelons are a constant fraction of *original* strength and the force lands in its original mix |
+
+`w.units` continues to hold the units **still at sea**, so nothing else in the sim needs a new place to look for a wave's strength. Those units are not in `station.attackers` and therefore cannot be hit — that is the whole mechanic, and it needs no combat code. The merge-or-attack decision is re-taken **per echelon**, so a station that flips to the landing power mid-landing absorbs the remainder as reinforcements (consistent with `WAVE_REROUTE_ON_LOSS: false`), while one that flips to a third power keeps receiving attackers. The final echelon flushes whatever is left rather than trickling a sub-`MIN_SEND_UNITS` residue. Renderers may read `landing` to draw the beachhead; nothing in `sim/` reads it except `sim/movement.js`.
 
 If any of this needs to change, change it *here first*, then update `simFns()` in `test/runner.js`, then the sim.
 
@@ -257,10 +283,12 @@ Two more helper contracts, both in `sim/commands.js` and both load-bearing for t
 
 | Global | File | Contract |
 |---|---|---|
-| `commandRoute(fromSid, toSid)` | `sim/commands.js` | Route a send will take; `null` if unreachable. Prefers `routeBetween` when `sim/movement.js` is loaded. |
+| `commandRoute(fromSid, toSid[, state, pid])` | `sim/commands.js` | Route a send will take; `null` if unreachable. With `state` and `pid` it returns the **legal** route (`routeFor`); with two arguments only, the geographic one (`routeBetween`). Falls back to its own BFS while `sim/movement.js` is unloaded. |
 | `routeEtaTicks(route, units)` | `sim/commands.js` | Estimated ticks for a stack to walk a route, at the speed of its slowest unit type. |
 
 The preview **must** call these rather than estimating, or the ETAs shown before a commit will not match the waves the commit produces — which makes the preview worse than nothing, since avoiding defeat in detail is exactly what it exists for. A rename here degrades the preview to blank lines without failing any test.
+
+**The preview must pass `state` and `PLAYER`.** `commandRoute(from, to)` still answers with geography, and geography is no longer what a send does: a two-argument preview will draw a line straight through an enemy city and the commit will then reject that source with `'no-route'`. A source for which `commandRoute(src, target, GAME, PLAYER)` returns `null` has no legal send and should be drawn as refused rather than as a route.
 
 **Input funnels to `applyCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls `applyCommand(GAME, cmd)` — the same entry point the AI uses. There is no second path by which the board changes, which is what keeps replay and headless testing free.
 
@@ -301,9 +329,13 @@ Both files read this, so it is contractual rather than an implementation detail:
                                                                // declared type
                                                                // gets neutral 1s
   own:      ['aal', 'ber', ...],   // sorted station ids this power holds
-  hops:     { sid: n },            // link-hops from the NEAREST owned station.
+  hops:     { sid: n },            // link-hops from the NEAREST owned station,
+                                   // over PASSABLE ground only (own + neutral,
+                                   // the routeFor rule) while still recording
+                                   // the enemy stations on the far side of it.
                                    // BFS capped at max(TARGET_MAX_HOPS,
-                                   // SOURCE_MAX_HOPS); absent means "further".
+                                   // SOURCE_MAX_HOPS); absent means "further,
+                                   // or not legally reachable at all".
   leader:      'rus' | null,       // current territory-count leader
   leaderShare: 0.34,               // leader's share of all owned territories
   ownForces:   1842,               // total units, for commitment sizing
@@ -315,15 +347,24 @@ Both files read this, so it is contractual rather than an implementation detail:
 ```js
 {
   tick, power,
-  kind:    'attack' | 'hold',
-  target:  'bru' | null,
+  kind:    'attack' | 'hold' | 'stage',
+  target:  'bru' | null,   // on 'stage' this is the DEPOT being reinforced,
+                           // a station the power already owns
+  stageFor: 'ist' | null,  // 'stage' only: the enemy station the mass is being
+                           // assembled against
   score:   14.2,
   terms:   { multiplier: 3.0, weakness: 2.1, proximity: 1.2, ... },
   odds:    2.4,          // estimated attacker:defender POWER ratio, not units
   minOdds: 1.19,         // BAL.AI.MIN_ODDS x personality.minOddsMul
   sources: ['aal','col'],
   fraction: 0.75,
-  reason:  null | 'no-candidates' | 'odds-too-low' | 'no-sources' | 'garrison-floor',
+  reason:  null | 'no-candidates' | 'odds-too-low' | 'no-sources' | 'garrison-floor'
+                | 'no-route'    // sources could pay, but every path there runs
+                                // through another power's ground
+                | 'stage-massed' | 'stage-no-feeders'
+                | 'staging'          // always, and only, on kind 'stage'
+                | 'peace-exhausted', // on an ATTACK: nothing was reachable but
+                                     // ground held by a power at peace
   rejected: []           // populated only when BAL.AI.LOG_REJECTED
 }
 ```
@@ -333,6 +374,18 @@ one. A power that does nothing for two minutes must be able to say why it did
 nothing, or it is indistinguishable from a power whose code never ran — which
 is the single hardest AI bug to see (§6: *"a passive AI is otherwise
 undebuggable"*).
+
+`kind: 'stage'` is an **order**, not a hold: a many-to-one send whose target is
+a station the power already holds, so the wave merges into that garrison rather
+than fighting (`_moveDeposit`). It exists because `attack | hold` alone froze
+the board — a power whose best target needs more force than its ETA-eligible
+sources hold cannot attack, and holding does nothing, so it stands still
+forever while its interior sits at capacity not growing. Staging never sends
+anything at an enemy; it changes where the power's own units are standing.
+
+`render/ailog.js` renders any non-`hold` kind with the label *attack*, so a
+staging decision currently reads as an attack on a friendly city with reason
+`staging`. Cosmetic, and the panel is outside the AI's ownership.
 
 ### Log storage
 
@@ -355,3 +408,142 @@ Trim from the front on push.
   `territoryControl(...).owner`. It is never an actor: it takes no decisions,
   and `atWar` does not gate attacking it.
 - Nothing in `ai/` may touch `document`, `Math.random` or `Date.now`.
+
+---
+
+## Render API — Milestone 5 additions
+
+Same pinned-name discipline. Four files written in parallel; these are the
+names they had to agree on.
+
+| Global | File | Contract |
+|---|---|---|
+| `renderCoverage(state)` | `render/coverage.js` | Draw multiplier reach into `#g-coverage`. Called per frame; must no-op cheaply when the highlighted set has not changed. |
+| `setCoverageFocus(sid)` | `render/coverage.js` | Show the reach of one multiplier station, or clear with `null`. The only way other files drive the overlay. |
+| `renderReadout(state)` | `render/readout.js` | Per-frame pump for the **whole rail**, not just the station panel — it is the only per-frame hook `app/loop.js` offers this file, so every rail section rides on it. Runs each registered section's `update`. |
+| `setReadoutFocus(sid)` | `render/readout.js` | Which station the readout describes. `null` no longer hides anything — the rail is permanent, so it drops the station section back to its idle body. |
+| `railAddSection(spec)` | `render/readout.js` | Add (or replace, by `id`) a section in the right-hand rail. **The only supported way to put anything in `#rail`.** See below. |
+| `renderVictory(state)` | `render/victory.js` | Show the end-of-game screen when `state.winner` is set; no-op otherwise. |
+
+**Layer ownership.** `#g-coverage` belongs to `render/coverage.js` and to
+nothing else. Like `#g-ui` and `#g-waves` it is `pointer-events: none` — any
+layer over the board that accepts pointer events eats the click that commits an
+attack, and the game stops responding with no error.
+
+**`state.winner` can be the string `'draw'`.** `sim/victory.js` sets it when
+`BAL.MAX_GAME_TICKS` is reached so a stalemated Monte Carlo run cannot hang. It
+is not a power id, and `POWERS['draw']` does not exist. Anything reading
+`state.winner` must handle it — this is the same class of mistake as assuming
+`territoryControl(...).owner` is never `'neutral'`.
+
+**Hover is shared.** `render/select.js` owns pointer handling on `#board`.
+Readout and coverage focus are driven *from* it via `setReadoutFocus` /
+`setCoverageFocus`; neither file attaches its own board-wide listener, or two
+handlers fight over the same hover.
+
+### The rail — `#rail`, and how to add to it
+
+`index.html` wraps the board and the rail in `.stage`, a **row** flex:
+
+```
+.app (column)
+  ├── header.hud
+  ├── div.stage (row)
+  │     ├── main.board-wrap  →  svg#board
+  │     └── aside#rail       →  <section class="rail-section"> …
+  ├── .ailog                 (render/ailog.js inserts here, above .bottombar)
+  └── footer.bottombar
+```
+
+The rail is a **DOM sibling of the board, never an overlay**, for the same
+reason `.ailog` is: a panel over `#board` that accepts pointer events swallows
+the click that commits an attack and the game stops responding with no error at
+all. In normal flow it displaces the board instead — the SVG has a viewBox and
+simply rescales — so it is safe by construction rather than by a rule someone
+has to remember. Sections may therefore take pointer events freely.
+
+Narrowing the board is transparent to selection: `render/camera.js` has a
+`ResizeObserver` on `#board` and rebuilds its fit rect, so `cameraView()`'s
+aspect keeps matching the element's and `getScreenCTM()` keeps mapping client
+pixels onto the viewBox exactly. Verified after the change — 60/60 stations at
+scale 1 and 18/18 visible stations at scale 4 hit-test to themselves via
+`document.elementFromPoint`, and a real marquee drag selects exactly the set
+computed independently from station coordinates.
+
+**The rail is a stack of sections and it is always visible.** It is never
+allowed to go blank: the station section swaps to an empire-at-a-glance body
+when nothing is hovered, because a fixed-width column that empties out reads as
+a broken layout rather than as "nothing selected".
+
+**To add a section, call `railAddSection` — do not append to `#rail` by hand,
+and do not invent a second convention.** This is the seam; there is no
+privileged path, the station readout registers through it too.
+
+```js
+railAddSection({
+  id:     'supply',                    // unique; a repeat id REPLACES
+  title:  'Supply',                    // optional header, omit for none
+  order:  20,                          // ascending; station detail is 10
+  build:  function (host) { … return nodes; },        // runs ONCE
+  update: function (state, nodes) { … return true; }, // runs EVERY FRAME
+});
+```
+
+| Rule | Why |
+|---|---|
+| `build` runs once; `update` must **mutate** those nodes, never rebuild them | `renderReadout` runs at 60fps; rebuilding thrashes layout and kills text selection |
+| `update` must not mutate state | `render/` reads — same rule as everything else here |
+| `update` returns `false` to hide the section this frame, `true`/`undefined` to show it | one `[hidden]` write per change, not per frame |
+| A throw is caught; the section is retired after 3 consecutive failures | mirrors `safeRender` in `app/loop.js`, so one bad section cannot take the readout — or the loop — down with it |
+| Registration may happen at any time, before or after the first frame | the rail re-sorts when the registry changes, so script order in `index.html` does not matter |
+
+Do not add speculative empty sections. Rail width and the section stack live in
+the `rail:` marker block in `style.css`.
+
+### Camera — pinned names
+
+| Global | File | Contract |
+|---|---|---|
+| `initCamera()` | `render/camera.js` | Wire zoom/pan on `#board`. Called once, after `renderBoard()`. |
+| `cameraReset()` | `render/camera.js` | Return to the full-board view. |
+| `cameraView()` | `render/camera.js` | Current `{x, y, w, h, scale}` — read-only, for tests and the console. |
+| `cameraScale()` | `render/camera.js` | Current zoom, `1..4`. Allocation-free; safe to call every frame. |
+| `cameraSymbolScale()` | `render/camera.js` | The factor a symbol must be scaled by to hold a constant on-screen size (`scale ^ -CAM_SYMBOL_EXP`). Returns `1` before `initCamera()`. |
+| `onCameraChange(fn)` | `render/camera.js` | Subscribe to camera writes; `fn(scale)` fires after zoom, pan, reset and resize. Returns an unsubscribe function. |
+| `mapApplySymbolScale(force)` | `render/map.js` | Rewrite station and territory-label transforms for the current symbol scale. No-op when the scale has not moved. |
+| `--cam-scale` (CSS var on `:root`) | `render/camera.js` | Current zoom, republished on every camera write, for stylesheet-driven compensation. |
+
+**The camera moves the `viewBox` and nothing else.** It must never apply a
+`transform` to a layer group: `render/select.js` maps client pixels to viewBox
+units through `getScreenCTM().inverse()` and hit-tests with
+`closest('[data-station]')`, so a viewBox change is transparent to selection
+while a group transform would silently desynchronise the marquee from the nodes.
+
+**Symbol counter-scaling is per-symbol, never camera-level.** Because the
+viewBox magnifies geography and symbols alike, every renderer that draws a
+*symbol* — station groups, territory labels, station names, `×N` annotations,
+wave markers, selection carets, preview ETA labels — writes
+`transform="translate(x,y) scale(cameraSymbolScale())"` about that symbol's own
+anchor. Geography (territory fills, borders, links, coverage washes) is *not*
+counter-scaled; link and trail stroke weight is held constant with
+`vector-effect: non-scaling-stroke` in `style.css`. This is per-symbol precisely
+so rule above still holds: there is no group transform for the camera to
+desynchronise hit-testing with. `CAM_SYMBOL_EXP` in `render/camera.js` is the
+single knob (`1` = fully constant on-screen size).
+
+Anything comparing a distance in viewBox units against a threshold meant to feel
+constant on screen must divide by `cameraScale()` **at the comparison**, not
+redefine the constant — see `SEL_CLICK_SLOP` / `selClickSlop()` in
+`render/select.js`.
+
+Left-drag belongs to the marquee. `selOnMouseDown` already ignores
+`evt.button !== 0`, so pan must use a non-left button (or a modifier).
+Pan bindings: right- or middle-drag, and the four **arrow keys**. Arrow pan is a
+*velocity* integrated per frame by camera.js's own `requestAnimationFrame` loop
+(`CAM_PAN_SPEED`, in **view-widths per second**, so it is zoom-independent), not
+a step per keydown — OS key repeat is ignored. The loop starts on the first
+keydown and cancels itself once the velocity has ramped to zero, so it costs
+nothing when idle, and it is deliberately independent of `app/loop.js` so the
+camera still pans while the game is paused. `blur` and a hidden tab stop the
+*motion* only; every other camera control keeps working.
+Zoom: wheel, the on-screen `+`/`−`, and `-`/`=`; `0` resets.

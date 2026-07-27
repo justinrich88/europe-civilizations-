@@ -354,7 +354,9 @@ function _capture(state, sid, atkIds) {
   st.units.infantry = won.infantry;
   st.units.artillery = won.artillery;
   st.units.armour = won.armour;
-  st.owner = winner;
+  // Through setStationOwner so state.ownerEpoch moves: a capture invalidates
+  // every ownership-aware route cached against this board (sim/movement.js).
+  setStationOwner(state, sid, winner);
   st.capturedTick = state.tick;
   delete st.attackers[winner];
 

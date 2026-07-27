@@ -336,3 +336,96 @@ when it will stand down). The *state of war* is not a per-direction fact:
 **being attacked is not something you can decline.** `atWar` now ORs both
 directions, so a war persists while either side still wants it and ends only
 when both have drifted back above `PEACE_THRESHOLD`.
+
+---
+
+## 15. A stylesheet rule beats an SVG presentation attribute, silently
+
+The coverage overlay was correct in the DOM and invisible on screen. Every wash
+rect had the right `fill-opacity` — `setAttribute('fill-opacity', 0.18)` had
+done exactly what it said — and the elements rendered at zero.
+
+`fill-opacity` on an SVG element is a **presentation attribute**, which sits at
+the very bottom of the cascade: below *any* stylesheet declaration, including a
+plain class selector with no `!important`. A stub `.coverage-wash {
+fill-opacity: 0 }` left in style.css therefore outranked every JS write, and did
+so with no error, no warning, and a DOM inspector showing the attribute present
+and correct.
+
+Fix: write it as an inline style (`el.style.fillOpacity`), which outranks the
+class, or delete the class rule. Inline was chosen — the value is animated per
+frame and belongs to the renderer that computes it.
+
+**Rule of thumb: if a renderer computes a visual property per frame, it must
+write it as a style, not an attribute.** Attributes are for values the
+stylesheet is expected to be able to override — they are defaults, not commands.
+
+### It recurred, in the place hardest to notice
+
+Second occurrence, found while building the beachhead visual. `render/waves.js`
+coloured every in-flight stack by owner with `trail.setAttribute('stroke', c)`,
+and an early placeholder block — `/* in-flight trails and wave markers (drawn by
+later milestones) */`, written before `render/waves.js` existed — still carried
+`.wave-trail { stroke: #ffffff }`. **Every trail on the board rendered white**,
+so no marching army could be told from any other, on a map whose entire colour
+language is ownership.
+
+What makes this worth a second entry is why it survived. The bug is invisible
+unless two powers march at once *and* you already know what you are looking at:
+one white trail looks like a design choice. The attribute read back correctly,
+the DOM inspector showed the right value, and the suite could never see it —
+`test/node.js` loads no `render/` file at all.
+
+The diagnostic is two lines, and is worth running against any coloured element
+that looks wrong:
+
+```js
+el.getAttribute('stroke');            // what the renderer wrote
+getComputedStyle(el).stroke;          // what the browser will actually paint
+```
+
+If those disagree, a stylesheet rule is winning. Fix applied on both sides:
+delete the superseded rule, **and** write the colour as `el.style.stroke`, so
+the next stray rule cannot resurrect it.
+
+---
+
+## 16. The preview browser ran the PREVIOUS build while every check passed
+
+A routing change was verified in the browser and came back perfect: zero
+disagreements between what the preview would draw and what the command layer
+would accept, across 106 targets.
+
+The page had never loaded the routing change.
+
+`python3 -m http.server` sends `Last-Modified` and no `Cache-Control`, so a
+client may apply heuristic freshness and keep serving a file that changed
+seconds ago. The in-app preview browser does, and it does so in a way that
+survives `location.reload()` **and** a forced navigation.
+
+What made it dangerous is that nothing failed. Stale JS is not a broken page —
+it is a *working* page running last week's logic, answering every question
+confidently and wrongly. The tell was a result that was merely implausible:
+Germany held 2 stations and all 106 targets were reachable.
+
+**Diagnose it by asking the network and the page the same question:**
+
+```js
+const r = await fetch('/sim/commands.js', { cache: 'no-store' });
+/function commandRoute\([^)]*\)/.exec(await r.text())[0];  // what the SERVER has
+commandRoute.length;                                        // what the PAGE has
+```
+
+A mismatch means stale. Checking a function's arity, or `typeof someNewGlobal`,
+is a two-second guard worth running at the top of any browser verification.
+
+**Fixes, in order of preference:**
+
+1. `tools/serve.py` — a dev server that sends `no-store` and strips
+   `Last-Modified`/`ETag`. The `concert-fresh` launch config uses it.
+2. Serve on a **different port**. A new origin gets a new cache, which is the
+   only lever that reliably worked once a stale copy was already held.
+3. Never trust a reload alone.
+
+**Verify the verifier.** Any browser check that cannot fail is not a check —
+before trusting a clean pass, confirm the page is running the code under test.

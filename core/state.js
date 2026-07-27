@@ -80,6 +80,12 @@ function newGame(seed) {
     rng: seed >>> 0,
     winner: null,
     nextWaveId: 1,
+    // Bumped by setStationOwner() every time a station changes hands. Routing
+    // is ownership-aware (sim/movement.js), so a route cached before a capture
+    // is wrong after it -- this integer is what tells the cache to drop. An
+    // INTEGER, never a timestamp: it is part of the state, so a snapshot has to
+    // reproduce it exactly.
+    ownerEpoch: 0,
     powers: {},
     stations: {},
     waves: [],
@@ -91,7 +97,17 @@ function newGame(seed) {
     s.powers[pid] = {
       alive: true,
       relations: {},          // pid -> -100 (war) .. +100, see sim/relations.js
-      startTerritories: 0,    // filled below; capitulation is measured against it
+      startTerritories: 0,    // filled below; readouts and AI valuation
+      // High-water mark of stations held, and the baseline capitulation is
+      // measured against (sim/victory.js). It is NOT startTerritories, and the
+      // reason is the opening: every power now begins on its capital alone, so
+      // a power holding one city of a nine-city country controls no territory
+      // under the majority rule and starts at 0. Measuring collapse against 0
+      // is measuring against nothing — the rule reads as alive and does not
+      // fire. A high-water mark also states the intent more honestly than a
+      // starting count ever did: capitulation exists to end the mop-up when an
+      // empire has been broken, and "broken" means fallen from its peak.
+      peakStations: 0,        // filled below
       lastActTick: -9999,     // AI action budget
     };
   });
@@ -120,9 +136,32 @@ function newGame(seed) {
 
   POWER_IDS.forEach(function (pid) {
     s.powers[pid].startTerritories = countTerritories(s, pid);
+    s.powers[pid].peakStations = powerStations(s, pid).length;
   });
 
   return s;
+}
+
+// ---------------------------------------------------------------------------
+// Ownership
+//
+// The ONLY supported way to change who holds a station. It exists because
+// ownership is no longer a leaf fact: sim/movement.js routes waves around
+// stations held by other powers, and it caches those searches. A capture
+// therefore invalidates routing, and the cheapest honest way to say so is a
+// counter that only ever goes up.
+//
+// Anything that assigns `state.stations[sid].owner` directly -- including a
+// test fixture -- must bump `state.ownerEpoch` itself, or the next route it
+// asks for may be answered from a cache built against the old board.
+// ---------------------------------------------------------------------------
+function setStationOwner(state, sid, owner) {
+  var st = state && state.stations ? state.stations[sid] : null;
+  if (!st) return false;
+  if (st.owner === owner) return false;
+  st.owner = owner;
+  state.ownerEpoch = (state.ownerEpoch || 0) + 1;
+  return true;
 }
 
 // ---------------------------------------------------------------------------

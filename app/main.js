@@ -23,7 +23,20 @@
 // 00-vision.md casts the player as one of the great powers; ger is the one with
 // a central position and land borders on every front, which is the version of
 // the map where the core skill (massing before committing) actually bites.
-window.PLAYER = 'ger';
+//
+// ?player=fra overrides it, so one build can be handed to a human testing any
+// of aut / fra / gbr / ger / ita / ott / rus without an edit. An unknown code
+// falls back rather than throwing, for the same reason readSeed() does: a
+// mistyped query string should still give you a game.
+window.PLAYER = (function () {
+  var m = /[?&]player=([a-z]{3})/.exec(String(location.search));
+  var pid = m ? m[1] : 'ger';
+  if (typeof POWERS !== 'undefined' && POWERS && !POWERS[pid]) {
+    console.warn('[app/main] unknown player "' + pid + '", falling back to ger');
+    return 'ger';
+  }
+  return pid;
+})();
 
 // Fixed default seed. NEVER Date.now(): a seed that changes per load makes bug
 // reports unreproducible, and the whole determinism argument in 00-vision.md §9
@@ -53,6 +66,44 @@ function setSendFraction(f) {
   return v;
 }
 
+// ── send unit types ─────────────────────────────────────────────────────
+//
+// "You can select how many units to send but not which types." Same shape as
+// the fraction above and for the same reason: it is a preference about how a
+// command is BUILT, not a fact about the world, so it is app-level UI state and
+// deliberately not in window.GAME.
+//
+// Default is all three on, so a player who never touches these controls gets
+// exactly the behaviour that existed before they were added. Turning the last
+// one off is refused rather than allowed: an empty volley is not a thing anyone
+// means, and letting the control reach a state where every send is silently
+// rejected as 'too-few-units' would be a worse bug than the one being fixed.
+
+var _sendTypes = { infantry: true, artillery: true, armour: true };
+
+// Array of enabled type ids, in BAL.UNIT_ORDER, for applyCommand's cmd.types.
+// Returns null when all three are on — "no filter" and "every filter" mean the
+// same volley, and null is the form the sim already treats as "unchanged".
+function sendTypes() {
+  const order = (typeof BAL !== 'undefined' && BAL && BAL.UNIT_ORDER)
+    ? BAL.UNIT_ORDER : ['infantry', 'artillery', 'armour'];
+  const on = order.filter(function (t) { return _sendTypes[t]; });
+  return (on.length === order.length) ? null : on;
+}
+
+function sendTypeEnabled(t) {
+  return !!_sendTypes[t];
+}
+
+function toggleSendType(t) {
+  if (!(t in _sendTypes)) return false;
+  const on = Object.keys(_sendTypes).filter(function (k) { return _sendTypes[k]; });
+  if (_sendTypes[t] && on.length === 1) return true;   // never all-off
+  _sendTypes[t] = !_sendTypes[t];
+  syncTypeButtons();
+  return _sendTypes[t];
+}
+
 // ── chrome wiring ───────────────────────────────────────────────────────
 //
 // Both button groups follow the same rule: the DOM carries the value in a data
@@ -80,6 +131,17 @@ function syncFractionButtons(fraction) {
   }
 }
 
+// Same rule as syncFractionButtons: the JS value is authoritative and the
+// classes are a projection of it. Nothing reads button state back.
+function syncTypeButtons() {
+  const wrap = byId('send-control');
+  if (!wrap) return;
+  const btns = wrap.querySelectorAll('[data-unit-type]');
+  for (const b of btns) {
+    b.classList.toggle('is-active', !!_sendTypes[b.getAttribute('data-unit-type')]);
+  }
+}
+
 // One delegated listener per group rather than one per button: the markup in
 // index.html is owned by nobody in particular right now and buttons may be
 // added, so delegation survives edits that per-button binding would not.
@@ -102,10 +164,19 @@ function wireSendControls() {
     console.warn('[app/main] no #send-control in the document');
     return;
   }
+  // ONE listener for both control groups inside #send-control, matching the
+  // pattern already here rather than adding a second wiring style: the fraction
+  // and the type filter are the same kind of setting and live in the same box.
   wrap.addEventListener('click', function (ev) {
-    const btn = ev.target.closest('[data-fraction]');
-    if (!btn || !wrap.contains(btn)) return;
-    setSendFraction(Number(btn.getAttribute('data-fraction')));
+    const frac = ev.target.closest('[data-fraction]');
+    if (frac && wrap.contains(frac)) {
+      setSendFraction(Number(frac.getAttribute('data-fraction')));
+      return;
+    }
+    const type = ev.target.closest('[data-unit-type]');
+    if (type && wrap.contains(type)) {
+      toggleSendType(type.getAttribute('data-unit-type'));
+    }
   });
 }
 
@@ -201,6 +272,9 @@ function boot() {
   // Written by another agent in parallel; may not exist yet.
   if (typeof initSelection === 'function') tryStep('initSelection', initSelection);
 
+  // Zoom/pan (render/camera.js). After renderBoard() — it measures the board.
+  if (typeof initCamera === 'function') tryStep('initCamera', initCamera);
+
   // AI decision log (render/ailog.js) — hidden until `L`. Optional like the AI
   // it inspects, so it is guarded the same way.
   if (typeof initAiLog === 'function') tryStep('initAiLog', initAiLog);
@@ -209,6 +283,7 @@ function boot() {
   wireSendControls();
   wireKeys();
   syncFractionButtons(_sendFraction);
+  syncTypeButtons();
 
   // The game opens paused (core/state.js sets paused:true) so the player can
   // read the board before anything moves. setSpeed(0) makes the loop, the state
@@ -217,6 +292,16 @@ function boot() {
 
   // First HUD paint before the loop's first frame, so the bar is never blank.
   if (typeof renderHud === 'function') renderHud(window.GAME);
+
+  // Same for the rail, and for the same reason. Without this the rail is built
+  // by its first frame from app/loop.js, which is normally 16ms away and
+  // invisible — but not always: requestAnimationFrame is throttled hard in a
+  // background tab and in the in-app preview pane, where the rail was measured
+  // sitting empty at 284px wide with the game already loaded and paused.
+  // The game opens paused on purpose so the board can be read before anything
+  // moves (setSpeed(0) below), and a 284px column of nothing is a poor thing to
+  // read. The HUD has always been painted here; the rail was simply newer.
+  if (typeof renderReadout === 'function') renderReadout(window.GAME);
 
   if (typeof startLoop === 'function') startLoop();
   else console.error('[app/main] app/loop.js has not loaded — no startLoop()');
@@ -227,6 +312,10 @@ function boot() {
 // Global exports — no modules anywhere in this project.
 window.sendFraction = sendFraction;
 window.setSendFraction = setSendFraction;
+window.sendTypes = sendTypes;
+window.sendTypeEnabled = sendTypeEnabled;
+window.toggleSendType = toggleSendType;
+window.syncTypeButtons = syncTypeButtons;
 window.syncSpeedButtons = syncSpeedButtons;
 window.syncFractionButtons = syncFractionButtons;
 window.boot = boot;

@@ -224,6 +224,9 @@ function loopFrame(nowMs) {
     if (typeof renderWaves === 'function') safeRender('renderWaves', renderWaves, state);
     if (typeof renderHud === 'function') safeRender('renderHud', renderHud, state);
     if (typeof renderAiLog === 'function') safeRender('renderAiLog', renderAiLog, state);
+    if (typeof renderReadout === 'function') safeRender('renderReadout', renderReadout, state);
+    if (typeof renderCoverage === 'function') safeRender('renderCoverage', renderCoverage, state);
+    if (typeof renderVictory === 'function') safeRender('renderVictory', renderVictory, state);
   }
 }
 

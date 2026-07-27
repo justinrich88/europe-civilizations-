@@ -44,6 +44,36 @@ function _vicName(pid) {
 // Capitulation
 // ---------------------------------------------------------------------------
 
+// Powers still in the war: alive AND actually holding ground. Sorted, because
+// the id array feeds a win declaration and determinism runs all the way up
+// (00-vision.md §9). A power marked alive with nothing left is a bookkeeping
+// state, not a combatant — victoryTick flips that flag on its own throttle, so
+// without the station check a winner would be announced up to 50 ticks late.
+function _vicSurvivingPowers(state) {
+  var pids = _vicPowerIds();
+  var out = [];
+  for (var i = 0; i < pids.length; i++) {
+    var pid = pids[i];
+    if (pid === 'neutral') continue;
+    var p = state.powers[pid];
+    if (!p || p.alive === false) continue;
+    if (!_vicHoldsAnything(state, pid)) continue;
+    out.push(pid);
+  }
+  return out.sort();
+}
+
+// Raise a power's high-water mark of stations held. Monotonic by construction:
+// it only ever moves up, so retaking ground does not lower the bar a power has
+// to fall back through to capitulate.
+function _vicTrackPeak(state, pid) {
+  var p = state.powers[pid];
+  if (!p) return 0;
+  var now = powerStations(state, pid).length;
+  if (now > (p.peakStations || 0)) p.peakStations = now;
+  return p.peakStations || 0;
+}
+
 // Both conditions, per BAL.CAPITULATE_REQUIRES_CAPITAL. Returns the power that
 // holds the capital (the beneficiary) or null.
 function capitulationCheck(state, pid) {
@@ -59,13 +89,31 @@ function capitulationCheck(state, pid) {
   if (BAL.CAPITULATE_REQUIRES_CAPITAL && holder === pid) return null;
   if (holder === pid || holder === 'neutral') return null;   // nobody to surrender to
 
-  // Measured against what this power actually started with, not against a
-  // board-wide constant: a power that opened with one homeland territory has a
-  // different collapse point from one that opened with six.
-  var start = p.startTerritories || 0;
-  var now = countTerritories(state, pid);
-  if (start > 0 && now >= start * BAL.CAPITULATE_FRACTION) return null;
-  if (start === 0 && now > 0) return null;
+  // Measured in STATIONS against this power's own high-water mark, not in
+  // territories against its starting count.
+  //
+  // Two reasons, and the first is fatal on its own. Every power now opens on
+  // its capital alone (data/scenario.js), and one city inside a nine-city
+  // country is not a majority, so `startTerritories` is 0 for all seven. A
+  // threshold of `0 * 0.25` is a threshold of nothing: the rule would sit here
+  // reading as alive and never fire, and no test would notice because no test
+  // asserts that a rule DOES fire.
+  //
+  // The second is that the peak states the design intent better than the start
+  // ever did. Capitulation exists to remove the tedious last-20% mop-up
+  // (00-vision.md §7), and what makes a mop-up tedious is an empire that WAS
+  // big. A power that conquered half of Europe and has been driven back to two
+  // cities should fold; a power that never grew past its capital has no mop-up
+  // to skip and should be taken the hard way.
+  // The mark itself is maintained by _vicTrackPeak below, NOT here. This
+  // function is only reached once a power has already lost its capital, so a
+  // peak updated in this branch would be frozen at whatever the power held on
+  // turn zero — which is 1 — and `now >= 1 * 0.25` is true for any surviving
+  // power. The rule would then only ever fire at exactly zero stations, i.e.
+  // it would be elimination wearing capitulation's name.
+  var peak = p.peakStations || 0;
+  var now = powerStations(state, pid).length;
+  if (peak > 0 && now >= peak * BAL.CAPITULATE_FRACTION) return null;
 
   return holder;
 }
@@ -76,7 +124,10 @@ function capitulate(state, pid, holder) {
   for (var i = 0; i < ids.length; i++) {
     var st = state.stations[ids[i]];
     if (st.owner !== pid) continue;
-    st.owner = holder;
+    // A capitulation transfers a whole empire at once. Same reason as
+    // sim/combat.js's _capture: it must move state.ownerEpoch, or routes
+    // cached against the old map of Europe survive the country that drew them.
+    setStationOwner(state, ids[i], holder);
     // The surrendering army is not handed over intact (BAL.CAPITULATE_UNIT_KEEP).
     st.units.infantry *= BAL.CAPITULATE_UNIT_KEEP;
     st.units.artillery *= BAL.CAPITULATE_UNIT_KEEP;
@@ -155,6 +206,13 @@ function victoryTick(state) {
       var p = state.powers[pid];
       if (!p || p.alive === false) continue;
 
+      // Before the check, not inside it: capitulationCheck() returns early
+      // while a power still holds its capital, so that is the one place the
+      // mark can never be raised. Sampling every 50 ticks is deliberate — the
+      // peak only has to be right to within a few stations, and this is
+      // already the whole-board scan.
+      _vicTrackPeak(state, pid);
+
       var holder = capitulationCheck(state, pid);
       if (holder) { capitulate(state, pid, holder); continue; }
 
@@ -167,16 +225,29 @@ function victoryTick(state) {
 
   // Win detection runs every tick — it is one pass over the station list, and a
   // victory that shows up five seconds late reads as a bug.
-  var ids = _vicStationIds(state);
-  var owner = null;
-  for (var s = 0; s < ids.length; s++) {
-    var o = state.stations[ids[s]].owner;
-    if (owner === null) { owner = o; continue; }
-    if (o !== owner) return;                      // still contested; nothing to do
-  }
-  if (owner && owner !== 'neutral') {
-    state.winner = owner;
-    logEvent(state, 'victory', _vicName(owner) + ' controls all of Europe');
+  // You win by outlasting every RIVAL, not by owning every pixel.
+  //
+  // This used to require a single owner across all 108 stations, neutrals
+  // included, and that condition turned out to be nearly unsatisfiable.
+  // Measured, seed 9 at the 60,000-tick cap: Russia held 105 of 108 stations
+  // and every other power was dead — and no victory fired, because three
+  // neutral villages had never been taken by anybody. Seed 7 was the same
+  // story at 106 of 108. Those games were not close; they were over, and the
+  // sim would not say so.
+  //
+  // The cost of that was not only cosmetic. tools/balance.js awards a capped
+  // game to whoever leads on territories, so 73% of every batch we have
+  // measured was a timeout leaderboard wearing the word "win" — the balance
+  // instrument was reading the mop-up, not the war.
+  //
+  // Neutral holdouts are exactly the "tedious last-20%" that 00-vision.md §7
+  // invented capitulation to delete. A power that has outlived every rival has
+  // won Europe; a handful of ungarrisoned villages in the Pyrenees does not
+  // make that a draw.
+  var alive = _vicSurvivingPowers(state);
+  if (alive.length === 1) {
+    state.winner = alive[0];
+    logEvent(state, 'victory', _vicName(alive[0]) + ' outlasts every rival power');
     return;
   }
 

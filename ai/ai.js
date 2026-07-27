@@ -44,6 +44,26 @@
 //     join has already been decided. It is not reinforcement, it is a second
 //     army fed in piecemeal.
 //
+// STAGING is the third kind of decision, and it exists because those two
+// mechanisms, working correctly, produced a frozen board. A power whose best
+// target needs more force than its ETA-eligible sources hold has, with only
+// attack and hold available, no move at all: it cannot attack (the odds are
+// not there) and holding does nothing (its interior is at capacity, and
+// logistic growth means a full station has stopped paying dividends, §2). It
+// stands still forever while holding most of Europe.
+//
+// A human in that position marches the rear forward. So does this: a decision
+// of kind 'stage' sends rear garrisons INTO the border station that anchors
+// the volley — the one already inside the ETA window — until the arithmetic
+// deficit is covered. Same applyCommand, same many-to-one gesture, same
+// garrison floor. The cost is real and already in the sim: mass parked above a
+// station's capacity bleeds at OVERSTACK_DECAY, so hoarding is not free and
+// the AI attacks as soon as the odds clear rather than piling forever.
+//
+// Staging is NOT a way around the odds floor. It never sends anything at the
+// enemy; it changes where the AI's own units are standing, which is the only
+// honest way to make an unaffordable attack affordable.
+//
 // TESTABILITY. aiDecide() must not mutate state (beyond drawing from
 // state.rng, which is state and therefore reproducible): a test builds a
 // board, calls aiDecide, and inspects what the power WOULD do without it
@@ -71,19 +91,36 @@
 //   no-candidates      the scorer offered nothing inside TARGET_MAX_HOPS
 //   already-held       the scorer offered a station this power already owns
 //   not-at-war         only enemy targets on offer and the Concert holds (§6)
+//   peace-exhausted    carried by an ATTACK, not a hold: nothing was reachable
+//                      except ground held by a power at peace, so the AI broke
+//                      the peace rather than stand still on a partitioned board
 //   already-committed  a stack or a wave of this power is already on that
 //                      target; a second volley now would arrive after the
 //                      fight it was meant to join (§8)
 //   no-sources         nothing owned within SOURCE_MAX_HOPS of any candidate
 //   garrison-floor     every nearby source is at or under its garrison floor
 //   too-few-units      the affordable share is below BAL.MIN_SEND_UNITS
+//   no-route           sources were in reach and could pay, but every path to
+//                      the target runs through ground another power holds, so
+//                      applyCommand would refuse the send (sim/movement.js)
 //   odds-too-low       best power ratio found was under MIN_ODDS x personality
+//                      AND no staging march could be built either
+//   stage-massed       the deficit is already standing in, or walking to, the
+//                      depot; the fist is assembling and there is nothing to
+//                      add this tick
+//   stage-no-feeders   nothing in the rear within STAGE_MAX_HOPS of the depot
+//                      can spare units — the power is genuinely spent, not idle
 //   rate-capped        MAX_ORDERS_PER_MINUTE backstop tripped
 //   command-rejected   applyCommand refused the volley — see .rejected
+//
+// `staging` is not a hold reason: it is the reason carried by a decision of
+// kind 'stage', which is an ORDER, not an absence of one. It is listed here so
+// the log stays greppable from one place.
 var AI_HOLD_REASONS = [
   'no-scoring-module', 'no-candidates', 'already-held', 'not-at-war',
   'already-committed', 'no-sources', 'garrison-floor', 'too-few-units',
-  'odds-too-low', 'rate-capped', 'command-rejected',
+  'no-route', 'odds-too-low', 'stage-massed', 'stage-no-feeders',
+  'rate-capped', 'command-rejected', 'staging', 'peace-exhausted',
 ];
 
 // ---------------------------------------------------------------------------
@@ -155,9 +192,16 @@ function _aiActCandSid(c) {
 // would mean a power that failed a dozen good targets on odds logs whatever
 // the twelfth-best target happened to trip over. The hold carries the
 // deepest-reached obstacle instead, because that is the one worth acting on.
+// Ordered by how far into _aiActPlanVolley the candidate got: neighbourhood,
+// then affordability, then routing, then odds. 'no-route' sits above
+// 'too-few-units' because routing is only attempted once a source can pay.
+// 'stage-massed' and 'stage-no-feeders' sit above 'odds-too-low' because they
+// are only reachable by first failing on odds and THEN failing to mass — they
+// are strictly further into the decision than the odds check that produced them.
 var _AI_ACT_REASON_DEPTH = {
   'already-held': 0, 'not-at-war': 1, 'already-committed': 2,
-  'no-sources': 3, 'garrison-floor': 4, 'too-few-units': 5, 'odds-too-low': 6,
+  'no-sources': 3, 'garrison-floor': 4, 'too-few-units': 5, 'no-route': 6,
+  'odds-too-low': 7, 'stage-no-feeders': 8, 'stage-massed': 9,
 };
 
 function _aiActReasonDepth(reason) {
@@ -239,7 +283,20 @@ function _aiActDefenderPower(state, sid) {
 //
 // A station currently under attack is never a source: stripping a garrison
 // that is presently in a battle loses that station to win somewhere else.
+//
+// The sweep runs outward through PASSABLE ground only (own or neutral — the
+// routeFor rule in sim/movement.js, read backwards from the target). A station
+// two hops away on the far side of a rival's city cannot deliver, and counting
+// it produces a volley that applyCommand rejects source by source. The target
+// itself is always expanded: attacking INTO enemy ground is the point.
 // ---------------------------------------------------------------------------
+
+// Mirrors _moveCanTraverse in sim/movement.js — see the note on
+// _aiScoreCanTraverse. Only ground this power holds may be marched through.
+function _aiActCanTraverse(state, pid, sid) {
+  var st = state.stations[sid];
+  return !!st && st.owner === pid;
+}
 
 function _aiActSourcesNear(state, pid, target) {
   var adj = _aiActAdjacency();
@@ -255,7 +312,7 @@ function _aiActSourcesNear(state, pid, target) {
         var sid = nbrs[j];
         if (seen[sid]) continue;
         seen[sid] = true;
-        next.push(sid);
+        if (_aiActCanTraverse(state, pid, sid)) next.push(sid);
         var st = state.stations[sid];
         if (!st || st.owner !== pid) continue;
         if (_aiActUnderAttack(state, sid, pid)) continue;
@@ -384,9 +441,14 @@ function _aiActPlanVolley(state, pid, target, oddsFloor) {
   // routeEtaTicks(commandRoute(...)) is pinned precisely so nobody
   // re-estimates travel time; the AI reads the same number the preview lines
   // show the player (§8).
+  //
+  // state and pid are passed so this is the OWNERSHIP-AWARE route — the exact
+  // route applyCommand will validate against. Estimating on the geographic path
+  // would mean planning a volley down a road the sender is not allowed to use,
+  // and every such order comes straight back as 'no-route'.
   var elig = [];
   for (i = 0; i < considered.length; i++) {
-    var route = commandRoute(considered[i].sid, target);
+    var route = commandRoute(considered[i].sid, target, state, pid);
     if (!route || route.length < 2) continue;
     var eta = routeEtaTicks(route, splitUnits(state.stations[considered[i].sid].units,
                                               considered[i].allowed));
@@ -394,7 +456,11 @@ function _aiActPlanVolley(state, pid, target, oddsFloor) {
     considered[i].eta = eta;
     elig.push(considered[i]);
   }
-  if (!elig.length) return { reason: 'no-sources' };
+  // Sources existed and could afford the send, but not one of them has a legal
+  // road to the target. That is a different fact from 'no-sources' and the log
+  // has to be able to tell them apart, or "why is Austria doing nothing?"
+  // becomes unanswerable.
+  if (!elig.length) return { reason: 'no-route' };
 
   // Drop stragglers against the earliest arrival. See _aiActSpreadWindow.
   var window = _aiActSpreadWindow(oddsFloor);
@@ -446,7 +512,189 @@ function _aiActPlanVolley(state, pid, target, oddsFloor) {
   var def = _aiActDefenderPower(state, target);
   best.odds = (def > BAL.ANNIHILATION_EPSILON) ? best.power / def
             : (best.power > 0 ? Infinity : 0);
+
+  // Handed out so a failed volley can be STAGED for rather than merely
+  // regretted. `window` is the set that can actually arrive together — the
+  // only stations worth reinforcing, because anything outside it gets dropped
+  // as a straggler no matter how full it is. `def` saves _aiActPlanStage
+  // recomputing the defender it would otherwise have to guess at.
+  best.window = together;
+  best.def = def;
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// Staging — moving force toward a target the power cannot yet afford
+//
+// Everything here is PURE. It plans a march; aiTick issues it, through the
+// same applyCommand the player uses.
+// ---------------------------------------------------------------------------
+
+// Units of this power already walking to `sid`. Without this the AI reorders
+// the same march every ACTION_INTERVAL_TICKS for the whole of a 2,000-tick
+// approach and strips its interior twenty times over for one assault — the
+// staging equivalent of feeding a battle piecemeal.
+function _aiActInflightUnitsTo(state, pid, sid) {
+  var n = 0;
+  for (var i = 0; i < state.waves.length; i++) {
+    var w = state.waves[i];
+    if (w.owner === pid && w.to === sid) n += totalUnits(w.units);
+  }
+  return n;
+}
+
+// The depot is chosen from the volley's ETA WINDOW, never from the wider
+// neighbourhood. A station outside the window cannot deliver to this target no
+// matter how much is standing in it, so reinforcing one would move units to a
+// place they can never be spent from — activity that looks like progress and
+// is not. Largest capacity wins: the same mass parked in a bigger city sits
+// less far above capacity and therefore bleeds less to OVERSTACK_DECAY.
+// Ties break on id so the choice cannot depend on iteration order.
+function _aiActStageDepot(plan) {
+  var w = plan.window || [];
+  var best = null, bestCap = -1;
+  for (var i = 0; i < w.length; i++) {
+    var sid = w[i].sid;
+    var cap = (typeof STATIONS !== 'undefined' && STATIONS[sid]) ? STATIONS[sid].capacity : 0;
+    if (cap > bestCap || (cap === bestCap && best !== null && sid < best)) {
+      bestCap = cap;
+      best = sid;
+    }
+  }
+  return best;
+}
+
+// Own stations within `maxHops` of the depot, over the power's OWN ground.
+// `exclude` holds the volley's window: those stations can already deliver, and
+// draining one to fill another member of the same fist is pure churn.
+function _aiActStageFeeders(state, pid, depot, exclude, maxHops) {
+  var adj = _aiActAdjacency();
+  var seen = {}, frontier = [depot], out = [];
+  seen[depot] = true;
+
+  for (var depth = 1; depth <= maxHops; depth++) {
+    var next = [];
+    for (var i = 0; i < frontier.length; i++) {
+      var nbrs = adj[frontier[i]] || [];
+      for (var j = 0; j < nbrs.length; j++) {
+        var sid = nbrs[j];
+        if (seen[sid]) continue;
+        seen[sid] = true;
+        // Own ground only, both to march through and to draw from: a staging
+        // march is an interior movement and must never plan a road through
+        // somebody else's city (the same _moveCanTraverse rule as everywhere).
+        if (!_aiActCanTraverse(state, pid, sid)) continue;
+        next.push(sid);
+        if (exclude[sid]) continue;
+        if (_aiActUnderAttack(state, sid, pid)) continue;
+        out.push({ sid: sid, hops: depth });
+      }
+    }
+    frontier = next;
+    if (!frontier.length) break;
+  }
+  return out;
+}
+
+// Plan one staging march for `target`, given the volley that came up short.
+// Returns { depot, sources, fraction, need, sent } or { reason }.
+//
+// THE DEFICIT IS ARITHMETIC, NOT A GUESS. The volley delivers `plan.power`
+// from `totalUnits(plan.stack)` units, so it is worth plan.power/units per
+// unit sent; clearing `minOdds` needs minOdds x defenderPower. The shortfall
+// in power therefore converts to a shortfall in units standing at the depot,
+// divided by the fraction a volley actually ships. That is the number this
+// walks forward — and it is why staging cannot become a way of attacking at
+// bad odds: it stops the moment the odds clear, because the attack branch in
+// aiDecide is tried first on every candidate, every decision.
+function _aiActPlanStage(state, pid, target, plan, minOdds) {
+  if (!plan || !plan.window || !plan.window.length) return { reason: 'no-sources' };
+
+  var depot = _aiActStageDepot(plan);
+  if (!depot) return { reason: 'no-sources' };
+
+  var stackUnits = totalUnits(plan.stack);
+  var perUnit = (stackUnits > BAL.ANNIHILATION_EPSILON && plan.power > 0)
+    ? plan.power / stackUnits : 0;
+  if (!(perUnit > 0)) return { reason: 'stage-no-feeders' };
+
+  var deficit = minOdds * plan.def - plan.power;
+  if (!(deficit > 0)) return { reason: 'stage-massed' };
+
+  var frac = (plan.fraction > 0) ? plan.fraction : BAL.AI.COMMIT_FRACTION;
+  var need = (deficit / (perUnit * frac)) * BAL.AI.STAGE_OVERSHOOT
+           - _aiActInflightUnitsTo(state, pid, depot);
+  if (!(need >= BAL.MIN_SEND_UNITS)) return { reason: 'stage-massed' };
+
+  var exclude = {}, i;
+  for (i = 0; i < plan.window.length; i++) exclude[plan.window[i].sid] = true;
+
+  var feeders = _aiActStageFeeders(state, pid, depot, exclude, BAL.AI.STAGE_MAX_HOPS);
+  if (!feeders.length) return { reason: 'stage-no-feeders' };
+
+  // Same garrison-floor arithmetic as an attack: a staging march is not
+  // allowed to strip the interior any harder than a volley is.
+  var afford = [];
+  for (i = 0; i < feeders.length; i++) {
+    var sid = feeders[i].sid;
+    var allowed = _aiActAllowedFraction(state, sid);
+    if (allowed <= 0) continue;
+    var units = totalUnits(state.stations[sid].units);
+    if (units * allowed < BAL.MIN_SEND_UNITS) continue;
+    var route = commandRoute(sid, depot, state, pid);
+    if (!route || route.length < 2) continue;
+    afford.push({ sid: sid, allowed: allowed, units: units, hops: feeders[i].hops });
+  }
+  if (!afford.length) return { reason: 'stage-no-feeders' };
+
+  // FULLEST FIRST, then nearest. Not nearest-first, and the difference is not
+  // cosmetic — it was measured. applyCommand takes ONE fraction for the whole
+  // volley and the volley's fraction is the smallest allowance among its
+  // sources, so a single half-drained neighbour drags every other source down
+  // to its own allowance. Ordering by proximity put exactly those stations
+  // first: the front cities that the last staging march already emptied. The
+  // AI then re-drained the same four exhausted towns at a fraction of 0.08
+  // while three thousand units stood at capacity behind them, and the depot
+  // stalled at odds 1.57 against a floor of 1.89 forever. Fullest first is the
+  // same ordering _aiActPlanVolley uses, and for the same reason.
+  afford.sort(function (a, b) {
+    if (b.units !== a.units) return b.units - a.units;
+    if (a.hops !== b.hops) return a.hops - b.hops;
+    return a.sid < b.sid ? -1 : 1;
+  });
+
+  // Prefix search, exactly as in _aiActPlanVolley: adding a source adds units
+  // but can drag the shared fraction down to that source's allowance, so more
+  // sources is not monotonically more force. Take the prefix that DELIVERS
+  // most, and stop as soon as one covers the deficit — reinforcing a front is
+  // not the same act as emptying the country into it.
+  var limit = afford.length < BAL.AI.MAX_SOURCES_PER_VOLLEY
+    ? afford.length : BAL.AI.MAX_SOURCES_PER_VOLLEY;
+  var best = null, k, m;
+  for (k = 1; k <= limit; k++) {
+    var frac2 = BAL.AI.COMMIT_FRACTION;
+    for (m = 0; m < k; m++) if (afford[m].allowed < frac2) frac2 = afford[m].allowed;
+
+    // A source whose share at that fraction falls under MIN_SEND_UNITS would
+    // be rejected by applyCommand, so drop it here rather than let the
+    // estimate count units that never ship.
+    var kept = [], sent = 0;
+    for (m = 0; m < k; m++) {
+      if (afford[m].units * frac2 < BAL.MIN_SEND_UNITS) continue;
+      kept.push(afford[m].sid);
+      sent += afford[m].units * frac2;
+    }
+    if (!kept.length) continue;
+    if (!best || sent > best.sent) {
+      kept.sort();
+      best = { sources: kept, fraction: frac2, sent: sent };
+    }
+    if (best.sent >= need) break;
+  }
+  if (!best) return { reason: 'stage-no-feeders' };
+
+  return { depot: depot, sources: best.sources, fraction: best.fraction,
+           need: need, sent: best.sent };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +716,12 @@ function _aiActDecision(state, pid, fields) {
     fraction: 0,
     reason: null,
     rejected: [],
+
+    // Only meaningful on kind 'stage': `target` is then the DEPOT being
+    // reinforced and `stageFor` is the enemy station the mass is being
+    // assembled against. Declared here rather than only on stage decisions so
+    // every entry in the log has the same shape and no reader needs a guard.
+    stageFor: null,
   };
   if (fields) for (var k in fields) if (fields.hasOwnProperty(k)) d[k] = fields[k];
   return d;
@@ -516,10 +770,61 @@ function aiDecide(state, pid) {
     return _aiActDecision(state, pid, { reason: 'no-candidates', minOdds: minOdds });
   }
 
-  var inflight = _aiActInflightTargets(state, pid);
+  var d = _aiActWalk(state, pid, cands, minOdds, true);
+
+  // THE PEACE OF THE PARTITION. `not-at-war` as the DEEPEST reason means no
+  // candidate got past the war gate at all: there is no neutral ground in
+  // reach and every station this power could take belongs to somebody it is
+  // formally at peace with. Measured over 48 games, that state accounted for
+  // 13 of the 14 remaining draws — two survivors, the board carved between
+  // them, the Concert holding a peace with nothing left to preserve, and
+  // neither able to end the game.
+  //
+  // The gate is ours alone: applyCommand imposes no war check, so a HUMAN in
+  // this position simply attacks (§8 — "there is no other verb"). An AI that
+  // cannot is not being diplomatic, it is being shackled. So when peace is the
+  // only thing left standing between a power and any move at all, it moves,
+  // and takes the consequence through the existing machinery — AGGRESSION_HIT
+  // hands the victim 25 points of hostility and sim/relations.js latches a
+  // real war on the next update.
+  //
+  // Deliberately NOT a general relaxation: it fires only when the first pass
+  // reached the gate and nothing else, so every power with a neutral village
+  // or an existing war in reach still prefers those, and the Concert still
+  // holds everywhere the board is not already partitioned.
+  if (d.reason === 'not-at-war') {
+    var forced = _aiActWalk(state, pid, cands, minOdds, false);
+    if (forced.kind === 'attack') {
+      forced.reason = 'peace-exhausted';       // the peace was broken, and says so
+      return forced;
+    }
+    if (forced.kind === 'stage') {
+      // The peace ran out but the fist is not assembled yet, so the power
+      // marches instead of declaring. Its reason stays 'staging' — the pinned
+      // reason for that kind — and `stageFor` naming a station held by a power
+      // it is NOT at war with is what marks this as the partition case in the
+      // log. Overwriting the reason here would have made every stage decision
+      // in the game ambiguous to satisfy one of them.
+      return forced;
+    }
+  }
+  return d;
+}
+
+// The candidate walk. `warGate` false means "the peace has run out" — see the
+// block above aiDecide's call. Split out of aiDecide only so it can be run
+// twice; nothing else calls it and nothing else should.
+function _aiActWalk(state, pid, cands, minOdds, warGate) {
   var logRejected = !!BAL.AI.LOG_REJECTED;
+  var inflight = _aiActInflightTargets(state, pid);
   var rejected = [];
   var bestOdds = 0, bestScore = 0, deepReason = 'no-candidates';
+
+  // The best-scoring target that was refused ON ODDS — the front this power
+  // wants and cannot yet pay for, and therefore the one worth massing toward.
+  // Candidates arrive score-sorted, so the FIRST such candidate is the best
+  // such candidate and nothing later can displace it.
+  var wantSid = null, wantPlan = null, wantScore = 0, wantTerms = null;
 
   // Candidates arrive sorted by score descending; walk them best-first and
   // take the first that clears. One target, one commitment budget — "think in
@@ -535,7 +840,8 @@ function aiDecide(state, pid) {
 
     if (owner === pid) {
       why = 'already-held';
-    } else if (owner !== 'neutral' && typeof atWar === 'function' && !atWar(state, pid, owner)) {
+    } else if (warGate && owner !== 'neutral' &&
+               typeof atWar === 'function' && !atWar(state, pid, owner)) {
       // Powers are at war or they are not, and nobody negotiates (§6).
       // Neutral is never gated: taking neutral ground is the whole opening.
       why = 'not-at-war';
@@ -550,6 +856,9 @@ function aiDecide(state, pid) {
       } else if (!(plan.odds >= minOdds)) {
         why = 'odds-too-low';
         if (plan.odds > bestOdds) { bestOdds = plan.odds; bestScore = score; }
+        if (!wantPlan) {
+          wantSid = sid; wantPlan = plan; wantScore = score; wantTerms = terms;
+        }
       } else {
         return _aiActDecision(state, pid, {
           kind: 'attack',
@@ -570,10 +879,37 @@ function aiDecide(state, pid) {
     if (logRejected) rejected.push({ target: sid, score: score, reason: why });
   }
 
+  // No attack cleared. Before settling for a hold: if the power WANTS a target
+  // and merely cannot pay for it, march the rear forward instead of standing
+  // still. This is the branch that unfreezes a board — an empire whose
+  // interior is at capacity has nothing to gain by waiting, because logistic
+  // growth has already stopped paying it (§2).
+  if (wantPlan) {
+    var stage = _aiActPlanStage(state, pid, wantSid, wantPlan, minOdds);
+    if (stage.reason) {
+      deepReason = stage.reason;
+    } else {
+      return _aiActDecision(state, pid, {
+        kind: 'stage',
+        target: stage.depot,          // where the units are going
+        stageFor: wantSid,            // what they are being assembled against
+        score: wantScore,
+        terms: wantTerms || {},
+        odds: wantPlan.odds,
+        minOdds: minOdds,
+        sources: stage.sources,
+        fraction: stage.fraction,
+        reason: 'staging',
+        rejected: logRejected ? rejected : [],
+      });
+    }
+  }
+
   // Nothing cleared. The reason names the furthest the power got on any
   // candidate — "odds-too-low" if it costed a volley and came up short,
   // "garrison-floor" if it never had the units to cost one, "not-at-war" if
-  // the Concert is still holding and there is nothing legal to hit.
+  // the Concert is still holding and there is nothing legal to hit,
+  // "stage-massed"/"stage-no-feeders" if it also tried to mass and could not.
   return _aiActDecision(state, pid, {
     reason: deepReason,
     odds: bestOdds,
@@ -676,7 +1012,13 @@ function aiTick(state) {
     _aiActSchedule(state, memo, pid, false);
     if (!decision) continue;
 
-    if (decision.kind === 'attack') {
+    // 'stage' is issued exactly like 'attack' — same command, same entry
+    // point, same feedback channel. The ONLY difference is that its target is
+    // a station this power already holds, so the wave merges into that
+    // garrison instead of fighting (sim/movement.js _moveDeposit). Sharing the
+    // branch is deliberate: a staging march that applyCommand refuses must
+    // show up as 'command-rejected' in the log exactly like a refused volley.
+    if (decision.kind === 'attack' || decision.kind === 'stage') {
       // The same many-to-one volley the player commits (§8), through the same
       // entry point. applyCommand's `rejected` array is the only feedback
       // channel the AI gets, so it is recorded whether or not LOG_REJECTED is

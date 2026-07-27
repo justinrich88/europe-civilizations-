@@ -330,6 +330,50 @@ const BAL = {
   // than spawning a wave of 0.3 infantry that clutters the map.
   MIN_SEND_UNITS: 0.5,
 
+  // BEACHHEADS (02-visibility-and-sea.md §3b). A wave whose FINAL hop is a sea
+  // link comes ashore in echelons over this many ticks, 1/N of its ORIGINAL
+  // strength per tick, instead of all at once. Units still at sea are not in
+  // the battle and cannot be hit. A land final hop is unaffected.
+  //
+  // This constant only has meaning against COMBAT_RATE, because the mechanic is
+  // a race between how fast you can land and how fast the beach kills what has
+  // landed — and the beach kills SLOWLY. A battle at odds r runs
+  // atanh(1/r)/COMBAT_RATE ticks: 250 at 2:1, 366 at 1.5:1. A landing that
+  // finishes in a fraction of that is barely a landing at all, and the sweep
+  // says so. Measured on a live sea link (aal->got) against 30 defenders, with
+  // the same fight run overland as the control:
+  //
+  //     N   sim-s   break-even odds   vs overland   2:1 survivors   3:1
+  //     1     0.1     1.23 : 1            +0%           79%         91%   <- old
+  //    30       3     1.27 : 1            +3%           77%         90%
+  //    60       6     1.33 : 1            +8%           74%         88%
+  //   120      12     1.40 : 1           +14%           68%         85%   <- ship
+  //   180      18     1.50 : 1           +22%           63%         83%
+  //   240      24     1.60 : 1           +30%           56%         80%
+  //
+  // 60 — the value this feature was sketched with — buys +8% odds and five
+  // points of survivors. That is inside the BATTLE_VARIANCE band (0.12) and a
+  // player would never see it; the feature would exist and do nothing. 120 is
+  // the first value where a landing is visibly a worse deal than a march:
+  // a 2:1 assault pays 32% of its force instead of 21%, half again as much.
+  //
+  // Capped below 180 by the other clocks, in both directions:
+  //   * 180 ticks is the Dover crossing for infantry (see SEA_SPEED_MUL). A
+  //     landing must not take as long as the voyage — the water is supposed to
+  //     be the commitment, the beach the consequence.
+  //   * 250 ticks is a decisive 2:1 battle. 120 is half of that, so echelons
+  //     span the opening of the fight and are done before it is decided, which
+  //     is what "chewed piecemeal on the way in" should feel like rather than
+  //     "fed in over the whole war".
+  //   * 120 is two BATTLE_WOBBLE_PERIODs (60), so a landing covers a full swing
+  //     of the momentum wobble in each direction instead of riding one of them.
+  //
+  // The break-even ratio is very nearly scale-free — the echelon is a fraction
+  // of the force, so it scales with it. Measured at N=60: 1.40:1 against 10
+  // defenders, 1.33:1 against 30, 1.28:1 against 60, 1.27:1 against 120. Small
+  // landings pay slightly more, which is the right way round.
+  LANDING_TICKS: 120,
+
   // Persistent send proportion, per §8: "a persistent 25/50/75/All setting
   // applies to the whole volley; default 75%". 0.75 is the value that makes
   // the core tension bite — you keep enough to regrow, but a serious attack
@@ -509,6 +553,43 @@ const BAL = {
     // Fraction of eligible units an AI volley sends. Matches the player's
     // default (SEND_FRACTION_DEFAULT) so neither side has a hidden edge.
     COMMIT_FRACTION: 0.75,
+
+    // --- Staging: massing forward when the volley does not yet clear ---
+    //
+    // Without these the AI has exactly two behaviours, attack and hold, and
+    // `hold` is INERT. Measured on seed 101: France held 106 of 108 stations
+    // with 3,534 units and stood still forever, because the only two stations
+    // that could reach Constantinople inside the ETA window (Smyrna, the
+    // Dardanelles) held 52 units between them and everything else on the
+    // approach is across a sea crossing at 1,500-3,600 ticks. 22 owned
+    // stations with 653 units sat within SOURCE_MAX_HOPS and could not
+    // contribute — sending them anyway is defeat in detail (§8), so the AI
+    // was right to refuse and had no third option.
+    //
+    // The third option is what a human does: walk the rear echelons forward
+    // into the border city that CAN deliver, eat OVERSTACK_DECAY while they
+    // sit there, and attack once the fist is assembled. It needs no new sim
+    // rule — a send to a station you already own merges into its garrison
+    // (sim/movement.js _moveDeposit), and OVERSTACK_DECAY's own comment
+    // already calls this out: "long enough to stage an assault out of an
+    // overstuffed border city, short enough that hoarding is not a strategy."
+
+    // How far behind the depot staging feeders are drawn from, in link-hops
+    // over the power's OWN ground. This is NOT SOURCE_MAX_HOPS and must not be
+    // confused with it: a staging march does not have to arrive together with
+    // anything, so distance costs march time rather than risking the volley.
+    // 4 was measured against 3 and 6; see the sweep in the AI notes. Bigger
+    // mostly drains the deep interior into a queue of waves that are still
+    // walking when the war is decided somewhere else.
+    STAGE_MAX_HOPS: 4,
+
+    // How much more than the arithmetic deficit to walk forward. The deficit
+    // is computed exactly — (minOdds x defenderPower - volleyPower) converted
+    // to units at the volley's own power-per-unit — but the mass then bleeds
+    // at OVERSTACK_DECAY for the whole of a 1,500-3,000 tick march, so aiming
+    // at exactly enough arrives at not enough and the power stages forever.
+    // 1.4 clears the bleed over a typical approach with margin to spare.
+    STAGE_OVERSHOOT: 1.4,
 
     // --- Target valuation weights ---
     // Utility = sum of these times normalised terms. Multiplier stations are
