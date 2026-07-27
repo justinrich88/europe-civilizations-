@@ -95,3 +95,31 @@ ticks = atanh(1 / r) / COMBAT_RATE
 
 so `COMBAT_RATE` alone is the clock for every fight on the map. See the block
 comment above `COMBAT_RATE` in `data/tuning.js`.
+
+---
+
+## 6. A subagent can burn its whole output budget on thinking and write nothing
+
+The first attempt at `data/map.js` asked one agent to author all ~48 territories
+of the 1914 map in one pass. After 45 minutes it died with:
+
+```
+API Error: Claude's response exceeded the 32000 output token maximum
+```
+
+The trap is that **thinking tokens count toward the output cap.** The agent
+emitted four consecutive reasoning blocks totalling ~111,000 characters while
+deriving the shared-vertex topology, then had no budget left to write the file.
+The file itself would have been ~20,000 characters — it was never the problem.
+
+Two lessons, both structural:
+
+1. **Size a subagent slice by how much it must *derive*, not how much it must
+   write.** Whole-map geometry is a single tightly-coupled constraint problem;
+   splitting it into eight regions with the cross-region boundaries pre-authored
+   (`data/map-seams.js`) makes each slice's reasoning bounded.
+2. **An agent that never calls a tool cannot receive a `SendMessage`.** Messages
+   are delivered "at the next tool round". This one made no tool call for 36
+   minutes, so a mid-flight correction was structurally impossible to deliver.
+   Instruct agents to checkpoint to disk *in the original prompt* — you may get
+   no second chance to say it.

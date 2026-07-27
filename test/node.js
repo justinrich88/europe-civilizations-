@@ -7,7 +7,14 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const root = path.join(__dirname, '..');
 const SCRIPTS = [
   'core/rng.js', 'core/util.js', 'core/state.js',
-  'data/tuning.js', 'data/map.js', 'data/stations.js', 'data/scenario.js',
+  'data/tuning.js',
+  // Map geometry: seams declare VERTS/TERRITORIES, regions Object.assign into
+  // them. Seams MUST load first. See data/map-seams.js for why it is split.
+  'data/map-seams.js',
+  'data/map-isles.js', 'data/map-iberia.js', 'data/map-west.js',
+  'data/map-north.js', 'data/map-central.js', 'data/map-east.js',
+  'data/map-italy.js', 'data/map-balkans.js',
+  'data/stations.js', 'data/scenario.js',
   'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
   'sim/relations.js', 'sim/victory.js', 'sim/step.js', 'ai/ai.js',
   'test/asserts.js', 'test/runner.js',

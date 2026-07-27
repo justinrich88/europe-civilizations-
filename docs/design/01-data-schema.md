@@ -15,7 +15,28 @@ Cross-references `00-vision.md`.
 
 ---
 
-## `data/map.js`
+## `data/map-*.js`
+
+Map geometry is **split across one seam file and eight regional files**, not the single `data/map.js` originally specified. The reason is recorded in `docs/testing/known-issues.md #6`: a single agent asked to derive all of Europe's shared-border topology at once exhausted its entire output budget on reasoning and wrote nothing. The slice was too large to *think* about, not too large to write.
+
+| File | Contributes |
+|---|---|
+| `data/map-seams.js` | Declares `VERTS`, `TERRITORIES`, `SEAMS`, `SEAM_REGIONS`. Loads first. |
+| `data/map-isles.js` | Ireland, Scotland, England, Wales |
+| `data/map-iberia.js` | Portugal, Castile, Catalonia, Andalusia |
+| `data/map-west.js` | France, Low Countries, Switzerland |
+| `data/map-north.js` | Norway, Sweden, Finland |
+| `data/map-central.js` | Germany, Austria-Hungary, Bohemia, Denmark |
+| `data/map-east.js` | Russia, Poland, Baltics, Ukraine |
+| `data/map-italy.js` | Piedmont south to Sicily |
+| `data/map-balkans.js` | Croatia, Serbia, Greece, Anatolia |
+
+Regional files `Object.assign()` into `VERTS` and `TERRITORIES`; they never redeclare them. **Seams must load before regions** — enforced by script order in `index.html`, `tests.html` and `test/node.js`.
+
+### Vertex id namespacing
+
+- **Seam vertices** — authored once in `map-seams.js`, prefix `s`. A regional file may *reference* these but must never redefine one.
+- **Interior vertices** — owned by exactly one regional file, prefixed with that region's letter: `i` isles, `b` iberia, `w` west, `n` north, `c` central, `e` east, `t` italy, `k` balkans. Collisions are impossible by construction.
 
 ### `VERTS` — shared vertex table
 
