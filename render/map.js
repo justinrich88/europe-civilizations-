@@ -91,23 +91,45 @@ function stationGarrison(D, stationId) {
   return total;
 }
 
-// Territory control is derived, never authored (00-vision.md §3): a territory
-// belongs to a power when every station inside it does. Mixed -> contested,
-// empty or unowned -> neutral.
-function territoryController(D, territoryId) {
-  if (!D.STATIONS) return { owner: null, contested: false };
-  let owner;
-  let seen = 0;
-  for (const sid in D.STATIONS) {
+// Territory control is derived, never authored (00-vision.md §3), and comes in
+// three tiers:
+//
+//   full       every station         -> solid tint
+//   majority   more than half        -> lighter wash of the same colour
+//   contested  nobody past half      -> hatched, no owner
+//
+// This mirrors territoryControl() in core/state.js. The renderer keeps its own
+// copy because it draws from the static SETUP before a game state exists; the
+// two must agree, so if the rule changes it changes in both.
+function territoryControl(D, territoryId) {
+  const out = { owner: null, tier: 'contested', held: 0, total: 0 };
+  if (!D.STATIONS) return out;
+
+  const counts = Object.create(null);
+  for (const sid of Object.keys(D.STATIONS).sort()) {
     const st = D.STATIONS[sid];
     if (!st || st.territory !== territoryId) continue;
-    seen++;
-    const o = stationOwner(D, sid);
-    if (seen === 1) owner = o;
-    else if (o !== owner) return { owner: null, contested: true };
+    out.total++;
+    const o = stationOwner(D, sid) || 'neutral';
+    counts[o] = (counts[o] || 0) + 1;
   }
-  if (!seen || !owner || owner === 'neutral') return { owner: null, contested: false };
-  return { owner: owner, contested: false };
+  if (!out.total) return out;
+
+  let best = null;
+  let bestN = 0;
+  for (const pid of Object.keys(counts).sort()) {
+    if (counts[pid] > bestN) { bestN = counts[pid]; best = pid; }
+  }
+
+  if (bestN * 2 <= out.total) return out;          // no strict majority
+  // `neutral` holding a majority is not an owner — it renders as empty ground,
+  // not as somebody's territory.
+  if (best === 'neutral') { out.tier = 'neutral'; return out; }
+
+  out.owner = best;
+  out.held = bestN;
+  out.tier = bestN === out.total ? 'full' : 'majority';
+  return out;
 }
 
 // ── geometry helpers ────────────────────────────────────────────────────
@@ -208,14 +230,20 @@ function drawTerritories(D, layer) {
       console.warn('[render/map] territory "' + tid + '" has an unusable shape; skipped');
       continue;
     }
-    const ctrl = territoryController(D, tid);
+    const ctrl = territoryControl(D, tid);
     const color = powerColor(D, ctrl.owner);
-    const cls = 'territory' + (ctrl.contested ? ' is-contested'
-      : (color ? '' : ' is-neutral'));
-    const poly = el('polygon', cls, { points: pointsAttr(pts), 'data-territory': tid });
+    const cls = 'territory is-' + ctrl.tier +
+      ((color || ctrl.tier === 'neutral') ? '' : ' is-neutral');
+    const poly = el('polygon', cls, {
+      points: pointsAttr(pts),
+      'data-territory': tid,
+      'data-tier': ctrl.tier,
+    });
+    // A majority holding is the SAME colour at lower opacity, never a
+    // different colour — colour carries ownership only (§8).
     if (color) poly.setAttribute('fill', color);
     layer.appendChild(poly);
-    if (ctrl.contested) {
+    if (ctrl.tier === 'contested') {
       layer.appendChild(el('polygon', 'territory-hatch', { points: pointsAttr(pts) }));
     }
     drawn++;

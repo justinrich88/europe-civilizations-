@@ -152,6 +152,12 @@ html, body {
 
 .territory.is-neutral { fill: var(--neutral); }
 
+/* Three control tiers (00-vision.md §3). Same hue throughout — only the
+   opacity changes, so a half-held country reads as "yours, but not settled"
+   rather than as a different power. */
+.territory.is-full     { fill-opacity: var(--territory-fill-alpha); }
+.territory.is-majority { fill-opacity: calc(var(--territory-fill-alpha) * 0.45); }
+
 .territory.is-contested {
   fill: var(--neutral);
   /* hatch overlay is drawn as a sibling path so the tint stays readable */
