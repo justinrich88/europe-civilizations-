@@ -199,6 +199,30 @@ which is what makes headless testing and replay free.
 | `stepTick(state)` | `sim/step.js` | Advance exactly one `BAL.TICK_MS` tick. The only tick entry point. Never takes a `dt` — variable timesteps are what the fixed-timestep accumulator exists to prevent. |
 | `applyCommand(state, cmd)` | `sim/commands.js` | The sole mutation entry point for both player and AI input. |
 
+### Sim internals — phase functions
+
+`stepTick` calls these **in this exact order**, once per tick. Each takes `(state)` and mutates it in place. The order is load-bearing and is itself part of the contract:
+
+| # | Global | File | Responsibility |
+|---|---|---|---|
+| 1 | `growthTick(state)` | `sim/growth.js` | Logistic growth, multiplier reach scaled by control tier, disconnection decay |
+| 2 | `movementTick(state)` | `sim/movement.js` | Advance waves along links; resolve arrivals |
+| 3 | `combatTick(state)` | `sim/combat.js` | Square-law attrition wherever hostile forces share a station; flip stations |
+| 4 | `relationsTick(state)` | `sim/relations.js` | Balance-of-power drift (throttled, not every tick) |
+| 5 | `victoryTick(state)` | `sim/victory.js` | Capitulation and win detection |
+
+**Why this order.** Growth before movement so a station's send is based on units that already grew this tick. Movement before combat so arrivals fight on the tick they land (`progress >= 1` resolves immediately, never deferred). Combat before victory so a capital captured this tick is seen this tick.
+
+Helper contracts other files may rely on:
+
+| Global | File | Contract |
+|---|---|---|
+| `stationPower(state, sid, side)` | `sim/combat.js` | Total combat Power for one side at a station, including defense, terrain and matchup |
+| `growthMultiplier(state, sid)` | `sim/growth.js` | Product of all multiplier effects reaching this station, capped at `BAL.GROWTH_MUL_CAP` |
+| `routeBetween(fromSid, toSid)` | `sim/movement.js` | Shortest path as an array of station ids, `null` if unreachable. Pure — depends only on `LINKS`. |
+
+Nothing in `sim/` may touch `document`, call `Math.random`, or read `Date.now`. Randomness comes only from the seeded PRNG in `core/rng.js` threaded through `state.rng`.
+
 **Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
 
 If any of this needs to change, change it *here first*, then update `simFns()` in `test/runner.js`, then the sim.
