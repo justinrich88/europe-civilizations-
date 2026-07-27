@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Concert of Europe — test harness</title>
+<!--
+  Headless assertion + balance harness (00-vision.md §11).
+
+  Loads the same scripts index.html does, in the same order, plus the runner —
+  no rendering, no app/loop.js, nothing that touches the canvas. Results print
+  into <pre data-testid="results"> so they can be read straight out of the DOM
+  with browser tools.
+
+  Scripts that do not exist yet are simply 404s: every suite guards on the
+  globals it needs and reports SKIP rather than throwing, so this page is
+  useful from the first day of the project. Keep the list below in sync with
+  the SCRIPTS array in test/node.js.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 16px;
+    background: #14161a; color: #d8dee9;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: #8fa1b3; }
+  pre { margin: 0; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Concert of Europe — test harness</h1>
+<pre data-testid="results">running…</pre>
+
+<!-- core -->
+<script src="core/rng.js"></script>
+<script src="core/util.js"></script>
+<script src="core/state.js"></script>
+
+<!-- data -->
+<script src="data/tuning.js"></script>
+<script src="data/map.js"></script>
+<script src="data/stations.js"></script>
+<script src="data/scenario.js"></script>
+
+<!-- sim (inert until authored; suites guard on applyCommand) -->
+<script src="sim/commands.js"></script>
+<script src="sim/growth.js"></script>
+<script src="sim/movement.js"></script>
+<script src="sim/combat.js"></script>
+<script src="sim/relations.js"></script>
+<script src="sim/victory.js"></script>
+<script src="sim/step.js"></script>
+
+<!-- ai -->
+<script src="ai/ai.js"></script>
+
+<!-- harness -->
+<script src="test/asserts.js"></script>
+<script src="test/runner.js"></script>
+
+<script>
+(function () {
+  var out = document.querySelector('[data-testid="results"]');
+  try {
+    if (typeof indexIds === 'function') indexIds();   // core/state.js, needs data loaded
+    runAllTests();
+    out.textContent = formatResults();
+    // Mirror the headline into the title and a data attribute so a browser
+    // driver can assert on it without parsing the <pre>.
+    var sum = summarizeTests();
+    out.setAttribute('data-pass', sum.fail === 0 ? 'true' : 'false');
+    out.setAttribute('data-counts', sum.pass + '/' + sum.fail + '/' + sum.skip);
+    document.title = (sum.fail === 0 ? 'PASS' : 'FAIL') + ' — Concert of Europe tests';
+  } catch (e) {
+    out.setAttribute('data-pass', 'false');
+    out.textContent = 'FAIL — the harness itself threw before reporting\n\n' +
+      (e && e.stack ? e.stack : String(e));
+    document.title = 'FAIL — Concert of Europe tests';
+  }
+})();
+</script>
+</body>
+</html>

@@ -174,3 +174,18 @@ applyCommand(state, { type:'send', owner, sources:[…], target, fraction })
 ```
 
 which is what makes headless testing and replay free.
+
+---
+
+## Sim API — pinned names
+
+`test/runner.js` probes for these by name. **If the sim exports something else, the six sim suites stay silently SKIPPED instead of failing** — the worst possible outcome, since the suite list still reads green. These names are therefore contractual.
+
+| Global | File | Contract |
+|---|---|---|
+| `stepTick(state)` | `sim/step.js` | Advance exactly one `BAL.TICK_MS` tick. The only tick entry point. Never takes a `dt` — variable timesteps are what the fixed-timestep accumulator exists to prevent. |
+| `applyCommand(state, cmd)` | `sim/commands.js` | The sole mutation entry point for both player and AI input. |
+
+**Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
+
+If any of this needs to change, change it *here first*, then update `simFns()` in `test/runner.js`, then the sim.
