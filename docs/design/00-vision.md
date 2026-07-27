@@ -98,12 +98,29 @@ Because the source is TopoJSON, adjacent countries share arcs, so borders are ga
 
 Countries are still drawn, still coloured by controller, still the thing you're conquering — they're what makes this read as a world-conquest game rather than an abstract node graph.
 
-Their mechanical role is deliberately thin:
+### Control is a majority, and it comes in tiers
 
-- **Control is derived** — you control a territory when you hold every station in it. Contested territories render hatched.
-- **Multiplier effects scope to territories** — a farm boosts its own territory and adjacent ones, so borders matter.
-- **Terrain scopes to territories** — mountains, forest and rivers slow marches and boost defense on links crossing them.
-- **Victory is counted in territories**, not stations.
+**A country belongs to whoever holds more than half its stations.** Not all of them.
+
+| tier | condition | benefits |
+|---|---|---|
+| **Full** | you hold every station | full |
+| **Majority** | you hold more than half | reduced (`BAL.CONTROL.MAJORITY`, currently ½) |
+| **Contested** | nobody holds more than half | none, to anyone |
+
+So taking one city in a country is a **foothold, not a conquest** — you get a garrison and a staging point, and nothing country-wide. And flipping a country doesn't require mopping up every last station: the final holdout is a nuisance rather than a veto.
+
+The middle tier is doing real work. Without it, one stubborn fortress in a corner of France denies the entire country to an occupier holding eight cities of nine — which reads as absurd, and makes large countries effectively unflippable. It also means **contested is a real state with a cost**: while a country is split down the middle, its farms feed nobody, so a stalemate is expensive for both sides rather than merely slow.
+
+Control is **derived, never stored** — computed on read from who holds what. Storing it would mean two sources of truth that drift.
+
+Rendering follows the tiers: full control is a solid tint, majority a lighter wash, contested hatched.
+
+Their remaining mechanical role is deliberately thin:
+
+- **Multiplier effects scope to territories** — a farm boosts its own territory and adjacent ones, so borders matter — and they are **scaled by the control tier**, so a country you only half-hold only half-feeds you.
+- **Terrain scopes to territories** — mountains, forest and rivers slow marches and boost defense on links crossing them. Terrain is geography, so it applies regardless of who controls the country.
+- **Victory is counted in territories** at majority or better, not stations.
 
 Between stations there are **links** — roads within a territory, border crossings between them, and a handful of **sea crossings** (Dover, the Baltic, Skagerrak, Adriatic, Gibraltar, Aegean) that are simply slow and punishing rather than a naval system.
 

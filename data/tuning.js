@@ -116,6 +116,33 @@ const BAL = {
 
 
   // ===================================================================
+  // 3b. TERRITORY CONTROL TIERS  (00-vision.md §3)
+  // ===================================================================
+  //
+  // A country is owned by whoever holds a MAJORITY of its stations, not all of
+  // them. Three tiers, and these weights scale every territory-scoped benefit
+  // (multiplier reach today; anything country-wide added later).
+  //
+  //   full       every station          benefits at FULL
+  //   majority   more than half         benefits at MAJORITY
+  //   contested  nobody past half       nothing, for anyone
+  //
+  // Why the middle tier earns its keep: without it, one stubborn fortress in a
+  // corner of France denies the whole country to an occupier holding eight of
+  // nine cities, which reads as absurd and makes big countries unflippable.
+  // With it, taking a single city is a foothold rather than a conquest, and the
+  // last holdout is a nuisance rather than a veto.
+  //
+  // MAJORITY at 0.5 is the lever to watch. Too high and full control is
+  // pointless; too low and partial control feels like nothing was gained.
+  CONTROL: {
+    FULL: 1.0,
+    MAJORITY: 0.5,
+    CONTESTED: 0.0,
+  },
+
+
+  // ===================================================================
   // 4. COMBAT  (00-vision.md §5 — "overwhelming force")
   //
   // Lanchester square law. Casualties per tick are proportional to the

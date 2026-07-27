@@ -129,8 +129,17 @@ function newGame(seed) {
 // Derived reads
 //
 // Control is DERIVED, never stored -- storing it would mean two sources of
-// truth that drift. A territory belongs to a power when that power holds every
-// station in it; anything else is contested. See 00-vision.md section 3.
+// truth that drift.
+//
+// Control has THREE tiers (00-vision.md section 3):
+//
+//   full       holds every station in the country    -> full benefits
+//   majority   holds more than half, but not all     -> reduced benefits
+//   contested  nobody holds more than half           -> no benefits to anyone
+//
+// So taking one city in a country does not flip it, and flipping a country
+// does not require mopping up every last station. The middle tier is the whole
+// point: a country can be meaningfully yours while still being fought over.
 // ---------------------------------------------------------------------------
 
 function stationsIn(territoryId) {
@@ -139,20 +148,62 @@ function stationsIn(territoryId) {
   });
 }
 
-function territoryController(state, territoryId) {
+// Returns { owner, tier, held, total }.
+// `owner` is null when contested; `tier` is 'full' | 'majority' | 'contested'.
+function territoryControl(state, territoryId) {
   var ids = stationsIn(territoryId);
-  if (!ids.length) return null;
-  var owner = state.stations[ids[0]].owner;
-  for (var i = 1; i < ids.length; i++) {
-    if (state.stations[ids[i]].owner !== owner) return null; // contested
+  var out = { owner: null, tier: "contested", held: 0, total: ids.length };
+  if (!ids.length) return out;
+
+  var counts = {};
+  for (var i = 0; i < ids.length; i++) {
+    var o = state.stations[ids[i]].owner;
+    counts[o] = (counts[o] || 0) + 1;
   }
-  return owner;
+
+  // Deterministic: iterate POWER_IDS in fixed order, never Object.keys.
+  var best = null, bestN = 0;
+  for (var p = 0; p < POWER_IDS.length; p++) {
+    var n = counts[POWER_IDS[p]] || 0;
+    if (n > bestN) { bestN = n; best = POWER_IDS[p]; }
+  }
+
+  if (bestN * 2 <= ids.length) return out;          // no strict majority
+  out.owner = best;
+  out.held = bestN;
+  out.tier = bestN === ids.length ? "full" : "majority";
+  return out;
 }
 
+// Benefit weight for territory-scoped effects -- multiplier reach, and any
+// other per-country bonus. Sourced from BAL so it stays tunable in one place.
+function controlWeight(tier) {
+  var c = (typeof BAL !== "undefined" && BAL.CONTROL) || null;
+  if (!c) return tier === "full" ? 1 : tier === "majority" ? 0.5 : 0;
+  return tier === "full" ? c.FULL : tier === "majority" ? c.MAJORITY : c.CONTESTED;
+}
+
+// Back-compat shim: the owner alone, or null when contested. Callers that need
+// the tier must use territoryControl().
+function territoryController(state, territoryId) {
+  return territoryControl(state, territoryId).owner;
+}
+
+// Counts territories at majority or better -- the victory metric.
 function countTerritories(state, powerId) {
   var n = 0;
   for (var i = 0; i < TERRITORY_IDS.length; i++) {
-    if (territoryController(state, TERRITORY_IDS[i]) === powerId) n++;
+    if (territoryControl(state, TERRITORY_IDS[i]).owner === powerId) n++;
+  }
+  return n;
+}
+
+// Counts only fully-held territories -- used for readouts and AI valuation.
+function countFullTerritories(state, powerId) {
+  var n = 0;
+  for (var i = 0; i < TERRITORY_IDS.length; i++) {
+    var c = territoryControl(state, TERRITORY_IDS[i]);
+    if (c.owner === powerId && c.tier === "full") n++;
   }
   return n;
 }

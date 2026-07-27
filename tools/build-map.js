@@ -342,18 +342,11 @@ for (const tid of TIDS) {
 }
 
 // ------------------------------------------------- project (Albers) + fit ---
-const D = Math.PI / 180;
-const P1 = 43 * D, P2 = 62 * D, L0 = 15 * D, P0 = 52 * D;
-const n = (Math.sin(P1) + Math.sin(P2)) / 2;
-const C = Math.cos(P1) ** 2 + 2 * n * Math.sin(P1);
-const rho0 = Math.sqrt(C - 2 * n * Math.sin(P0)) / n;
-function albers(lon, lat) {
-  const rho = Math.sqrt(C - 2 * n * Math.sin(lat * D)) / n;
-  const th = n * (lon * D - L0);
-  // y is negated: the projection is north-up (y grows with latitude) but the
-  // viewBox is y-down. Without this the whole map comes out upside down.
-  return [rho * Math.sin(th), -(rho0 - rho * Math.cos(th))];
-}
+// Projection and fit live in tools/lib/project.js so that tools/build-stations.js
+// can place cities in EXACTLY this pixel space. The fit computed here is written
+// to tools/lib/fit.json and read back there — never recomputed.
+const PROJ = require('./lib/project');
+const albers = PROJ.albers;
 
 const live = new Set();
 for (const tid of TIDS) for (const v of shapes[tid]) live.add(v);
@@ -361,20 +354,13 @@ for (const tid of TIDS) for (const v of shapes[tid]) live.add(v);
 const XY = new Map();
 for (const v of live) { const ll = V.get(v); XY.set(v, albers(ll[0], ll[1])); }
 
-let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-for (const [, p] of XY) {
-  if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
-  if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
-}
-const k = Math.min((VIEW.w - 2 * VIEW.margin) / (maxX - minX),
-                   (VIEW.h - 2 * VIEW.margin) / (maxY - minY));
-const offX = (VIEW.w - (maxX - minX) * k) / 2 - minX * k;
-const offY = (VIEW.h - (maxY - minY) * k) / 2 - minY * k;
+const FIT = PROJ.computeFit([...XY.values()]);
+PROJ.saveFit(FIT);
 // Round to the emitted precision NOW, so the prune/weld passes below see the
 // exact same numbers verify-map.js will: a pair 4.02px apart can round to 3.99
 // and trip the near-duplicate check if welding works on unrounded values.
-const rnd = x => Math.round(x * 10) / 10;
-for (const [v, p] of XY) XY.set(v, [rnd(p[0] * k + offX), rnd(p[1] * k + offY)]);
+const rnd = PROJ.rnd;
+for (const [v, p] of XY) XY.set(v, [rnd(p[0] * FIT.k + FIT.offX), rnd(p[1] * FIT.k + FIT.offY)]);
 
 // ------------------------------------ topology-preserving prune (pixels) ----
 // Simplifying each ring on its own would tear shared borders. Instead a vertex
