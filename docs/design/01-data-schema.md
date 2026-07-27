@@ -15,28 +15,20 @@ Cross-references `00-vision.md`.
 
 ---
 
-## `data/map-*.js`
+## `data/map.js` — **generated, do not hand-edit**
 
-Map geometry is **split across one seam file and eight regional files**, not the single `data/map.js` originally specified. The reason is recorded in `docs/testing/known-issues.md #6`: a single agent asked to derive all of Europe's shared-border topology at once exhausted its entire output budget on reasoning and wrote nothing. The slice was too large to *think* about, not too large to write.
+Produced by `node tools/build-map.js` from `tools/source/countries-50m.json` (world-atlas v2 / Natural Earth 1:50m, TopoJSON). To change the map, change the build script and re-run it.
 
-| File | Contributes |
-|---|---|
-| `data/map-seams.js` | Declares `VERTS`, `TERRITORIES`, `SEAMS`, `SEAM_REGIONS`. Loads first. |
-| `data/map-isles.js` | Ireland, Scotland, England, Wales |
-| `data/map-iberia.js` | Portugal, Castile, Catalonia, Andalusia |
-| `data/map-west.js` | France, Low Countries, Switzerland |
-| `data/map-north.js` | Norway, Sweden, Finland |
-| `data/map-central.js` | Germany, Austria-Hungary, Bohemia, Denmark |
-| `data/map-east.js` | Russia, Poland, Baltics, Ukraine |
-| `data/map-italy.js` | Piedmont south to Sicily |
-| `data/map-balkans.js` | Croatia, Serbia, Greece, Anatolia |
+Two earlier approaches failed and are recorded so they are not retried:
 
-Regional files `Object.assign()` into `VERTS` and `TERRITORIES`; they never redeclare them. **Seams must load before regions** — enforced by script order in `index.html`, `tests.html` and `test/node.js`.
+1. **One agent hand-authoring all of Europe** — exceeded the 32,000-token output cap on reasoning alone and wrote nothing (`known-issues.md #6`).
+2. **Eight agents hand-authoring regions against a seam contract** — worked, verified clean, and produced a map that did not read as Europe. Correct by every check and still wrong.
 
-### Vertex id namespacing
+TopoJSON is the fix because **its arcs are shared between adjacent polygons**. Two countries that border each other reference the same arc index, so they necessarily reference the same vertex ids. Gap-free borders and exact `neighbors` fall out of the data rather than being asserted after the fact. The build script dedupes **by arc identity, never by coordinate proximity** — that distinction is the whole reason this works.
 
-- **Seam vertices** — authored once in `map-seams.js`, prefix `s`. A regional file may *reference* these but must never redefine one.
-- **Interior vertices** — owned by exactly one regional file, prefixed with that region's letter: `i` isles, `b` iberia, `w` west, `n` north, `c` central, `e` east, `t` italy, `k` balkans. Collisions are impossible by construction.
+The projection (Albers equal-area conic, φ1=43° φ2=62° λ0=15° φ0=52°) and the viewBox fit live in `tools/lib/project.js` and are shared with `tools/build-stations.js`, so stations placed from real city lon/lat land inside their country by construction.
+
+Territories are real countries — 30 of them. The 1914 setting is carried by `data/scenario.js`, not by the shapes.
 
 ### `VERTS` — shared vertex table
 

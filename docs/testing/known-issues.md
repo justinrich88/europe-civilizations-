@@ -123,3 +123,26 @@ Two lessons, both structural:
    minutes, so a mid-flight correction was structurally impossible to deliver.
    Instruct agents to checkpoint to disk *in the original prompt* — you may get
    no second chance to say it.
+
+---
+
+## 7. Geometry that passes every check can still be the wrong geometry
+
+The eight-region hand-authored map passed `test/verify-map.js` completely: no
+dangling refs, no near-duplicate vertices, adjacency derived from shared edges
+matching the declared list in both directions, all 31 assertions green.
+
+It still had to be thrown away. Rendered, it did not read as Europe — Italy had
+no boot, Sicily sat northwest of the toe, the Gulf of Bothnia looked like a hole
+punched in Scandinavia. Every *stated* invariant held; the unstated one — "looks
+like the place" — is the one that mattered, and no assertion encoded it.
+
+Two lessons:
+
+1. **Put a rendered screenshot in front of a human before building on generated
+   geometry.** The verifier can only check what it was told to check. A visual
+   gate catches the class of error that assertions structurally cannot.
+2. **Prefer real data over hand-authoring for anything with a ground truth.**
+   `tools/build-map.js` derives the map from Natural Earth in one pass and is
+   both more accurate and less code than the nine files it replaced. The seam
+   contract was an elaborate solution to a problem TopoJSON does not have.

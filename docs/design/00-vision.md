@@ -90,7 +90,13 @@ Station mix per country loosely tracks real 1914 size, urbanisation and industry
 
 ## 3. Territories
 
-Countries and provinces are still drawn, still coloured by controller, still the thing you're conquering — they're what makes this read as a world-conquest game rather than an abstract node graph.
+**A territory is a real country.** Geometry comes from Natural Earth 1:50m via `tools/build-map.js`, not from hand-authored shapes — an earlier attempt to draw 1914 provinces by hand produced a map that did not read as Europe. Thirty countries, real borders, generated.
+
+Because the source is TopoJSON, adjacent countries share arcs, so borders are gap-free and `neighbors` is exact rather than asserted. The hand-authored vertex-seam machinery that used to guarantee this is gone.
+
+**The 1914 setting lives in the scenario, not the shapes.** Modern outlines carry the period through *who owns what*, which is also what makes the map legible — you recognise the countries.
+
+Countries are still drawn, still coloured by controller, still the thing you're conquering — they're what makes this read as a world-conquest game rather than an abstract node graph.
 
 Their mechanical role is deliberately thin:
 
@@ -154,6 +160,30 @@ If that proves insufficient in playtesting, the next lever is making freshly tak
 ---
 
 ## 6. The powers — balance of power without diplomacy
+
+### Starting position — one country each
+
+**Every power begins holding exactly one territory: its homeland. Everything else on the map starts neutral.**
+
+| power | homeland | capital |
+|---|---|---|
+| German Empire | Germany | Berlin |
+| French Republic | France | Paris |
+| British Empire | United Kingdom | London |
+| Russian Empire | Russia | Moscow |
+| Austria-Hungary | Austria | Vienna |
+| Kingdom of Italy | Italy | Rome |
+| Ottoman Empire | Turkey | Constantinople |
+
+So the powers are *named* for their 1914 empires but do not begin with them — Austria-Hungary starts as Austria alone and has to take Hungary, Bohemia and Croatia like anyone else. **Expansion is the entire game rather than a starting position to defend.**
+
+Three consequences worth stating, because they shape everything downstream:
+
+- **The neutral map is the real opponent early.** Most of Europe is unclaimed, so the opening is a land grab against garrisons rather than a war between powers. Powers meet each other only once they have grown into contact — which is exactly when the balance-of-power relations below start to matter.
+- **Geography is destiny at the start.** Germany opens surrounded by soft neutrals and hard powers; Britain opens behind water and must spend on a sea crossing before it can take anything; Russia opens enormous and nearly alone. No national trait stats are needed to produce this.
+- **It rewrites the snowball problem.** A power that takes its neighbours early compounds fastest, so the `§5` brakes — connection, logistic growth, and hostility toward the leader — carry more weight than they would from historical starting extents.
+
+### Relations
 
 You were right that negotiation doesn't fit. There is no inbox, no proposal, no deal, no trust score. Powers are simply at war or not, and **relations move on their own**, driven by:
 
