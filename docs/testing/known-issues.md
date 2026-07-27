@@ -217,3 +217,33 @@ Rules that follow:
    layers that are supposed to be independent. `render/` may not *mutate* state,
    but reading a derived value from `core/` is not a layering violation — it is
    the only way to be sure the two agree.
+
+---
+
+## 10. The Browser pane reports `visibilityState: "hidden"`, so `requestAnimationFrame` never fires
+
+Anything driven by rAF appears completely dead when tested through the preview
+pane: `setSpeed(1)` returns cleanly, `GAME.paused` goes false, and the tick
+counter sits at 0 forever. It looks exactly like a broken game loop.
+
+The page is not broken. Browsers throttle rAF to zero in a hidden document, and
+the pane reports itself hidden. In a real browser tab it runs normally.
+
+**Test rAF-driven code by calling the frame function directly** with synthetic
+timestamps — the same input rAF would supply:
+
+```js
+let t = performance.now();
+for (let i = 0; i < 900; i++) { t += 16.67; loopFrame(t); }   // 15s at 60fps
+```
+
+This is also *better* than waiting on real time: it is exact, instant, and
+reproducible, which is how the 1x-vs-4x tick ratio was measured as precisely
+4.00 rather than something jittery.
+
+Two traps inside the workaround:
+
+- `loopFrame` still honours `GAME.paused`, so `setSpeed(1)` must come first.
+  Driving frames on a paused game advances nothing and reads as the same
+  failure.
+- Verify with `document.visibilityState` before concluding a loop is broken.

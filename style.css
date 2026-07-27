@@ -389,6 +389,12 @@ html, body {
 
 #g-ui { pointer-events: none; }
 
+/* Same reasoning for the wave layer, which now paints above #g-stations so
+   in-transit markers are not swallowed by a nearby node's silhouette. Any
+   layer that sits over the stations must be click-transparent, or it eats the
+   click that commits an attack and the game silently stops responding. */
+#g-waves { pointer-events: none; }
+
 .sel-caret {
   fill: var(--accent);
   stroke: var(--garrison-halo);

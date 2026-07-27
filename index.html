@@ -39,9 +39,14 @@
       <g id="g-territories"></g>
       <g id="g-borders"></g>
       <g id="g-links"></g>
-      <g id="g-waves"></g>
       <g id="g-stations"></g>
       <g id="g-labels"></g>
+      <!-- Waves sit ABOVE stations: a marker on a short link next to a large
+           node was being swallowed by that node's silhouette, and §8 requires
+           in-transit strength to be legible at a glance. Both this layer and
+           #g-ui are pointer-events:none in style.css, so neither can eat the
+           click that commits an attack. -->
+      <g id="g-waves"></g>
       <g id="g-ui"></g>
     </svg>
     <div class="station-readout" id="station-readout" hidden></div>
