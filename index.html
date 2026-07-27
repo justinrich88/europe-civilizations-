@@ -31,11 +31,9 @@
 
   <!-- ── board ───────────────────────────────────────────────────────── -->
   <main class="board-wrap">
-    <!-- Authored geometry occupies x 48-790, y 40-544 of the nominal 1000x700
-         frame (see docs/design/01-data-schema.md), so a 0 0 1000 700 viewBox
-         wastes ~47% of the canvas. Framed to the content plus 20 units of
-         padding. Vertices are unchanged — this is presentation only. -->
-    <svg id="board" viewBox="28 20 782 544" preserveAspectRatio="xMidYMid meet"
+    <!-- tools/build-map.js fits the projected geometry to this frame with a
+         small margin, so the viewBox is fixed and the data does the framing. -->
+    <svg id="board" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet"
          role="img" aria-label="1914 Europe strategic map">
       <defs id="board-defs"></defs>
       <g id="g-territories"></g>
@@ -76,15 +74,7 @@
 <script src="core/rng.js"></script>
 <script src="core/util.js"></script>
 
-<script src="data/map-seams.js"></script>
-<script src="data/map-isles.js"></script>
-<script src="data/map-iberia.js"></script>
-<script src="data/map-west.js"></script>
-<script src="data/map-north.js"></script>
-<script src="data/map-central.js"></script>
-<script src="data/map-east.js"></script>
-<script src="data/map-italy.js"></script>
-<script src="data/map-balkans.js"></script>
+<script src="data/map.js"></script>
 <script src="data/stations.js"></script>
 <script src="data/scenario.js"></script>
 <script src="data/tuning.js"></script>

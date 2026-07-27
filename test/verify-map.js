@@ -15,12 +15,7 @@
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const root = path.join(__dirname, '..');
 
-const REGION_FILES = [
-  'data/map-seams.js', // must be first — declares VERTS/TERRITORIES/SEAMS
-  'data/map-isles.js', 'data/map-iberia.js', 'data/map-west.js',
-  'data/map-north.js', 'data/map-central.js', 'data/map-east.js',
-  'data/map-italy.js', 'data/map-balkans.js',
-];
+const REGION_FILES = ['data/map.js'];
 
 const loaded = [], missing = [];
 for (const rel of REGION_FILES) {
@@ -42,10 +37,10 @@ for (const id of ids)
   for (const v of T[id].shape)
     if (!V[v]) note('dangling', id + ' references undefined vertex ' + v);
 
-// --- 2. vertex id prefix discipline ----------------------------------------
-// s=seam, i=isles, b=iberia, w=west, n=north, c=central, e=east, t=italy, k=balkans
+// --- 2. vertex id shape -----------------------------------------------------
+// Generated ids are v<n>. The old hand-authored per-region prefixes are gone.
 for (const v of Object.keys(V))
-  if (!/^[sibwncetk]/.test(v)) note('prefix', 'vertex ' + v + ' uses an unassigned prefix');
+  if (!/^v\d+$/.test(v)) note('vertex-id', v + ' is not of the form v<number>');
 
 // --- 3. near-duplicate vertices --------------------------------------------
 // The cardinal sin: two vertices at almost the same coordinate mean a shared
