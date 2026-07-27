@@ -1,0 +1,372 @@
+/* Concert of Europe — one fixed dark theme.
+   Colour carries ownership only (00-vision.md §8); shape carries station type,
+   so nothing in here may tint a node by what it does. */
+
+:root {
+  /* surfaces */
+  --bg:            #0c0f14;
+  --sea:           #0f1620;
+  --panel:         #141a23;
+  --panel-hi:      #1d2530;
+  --line:          #262f3c;
+
+  /* text */
+  --ink:           #e6ebf2;
+  --ink-dim:       #8a97a8;
+  --ink-faint:     #5a6675;
+
+  /* map */
+  --neutral:       #4a5261;   /* unowned or contested territory tint */
+  --neutral-node:  #6c7686;
+  --border-inner:  #0b0e13;   /* internal territory borders — thin */
+  --border-coast:  #33465e;   /* coastline — thicker, cooler */
+  --link:          #3c4756;
+  --link-sea:      #35526b;
+
+  /* the number is the interface */
+  --garrison:      #ffffff;
+  --garrison-halo: #05070a;
+
+  --accent:        #d8b25a;   /* selection carets, active controls */
+  --warn:          #d1604a;
+
+  /* geometry */
+  --territory-fill-alpha: 0.42;
+  --hud-h:         44px;
+  --bottom-h:      52px;
+  --radius:        4px;
+
+  --font: "Inter", "Helvetica Neue", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-num: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── top HUD ──────────────────────────────────────────────────────────── */
+
+.hud {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: var(--hud-h);
+  flex: 0 0 var(--hud-h);
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.hud-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.hud-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.hud-label {
+  color: var(--ink-dim);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hud-value {
+  font-family: var(--font-num);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* ── buttons ──────────────────────────────────────────────────────────── */
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel-hi);
+  color: var(--ink-dim);
+  font-family: var(--font-num);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.btn:hover { color: var(--ink); border-color: #3a4757; }
+
+.btn.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #14100a;
+  font-weight: 600;
+}
+
+.speed { gap: 4px; }
+
+/* ── board ────────────────────────────────────────────────────────────── */
+
+.board-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--sea);
+}
+
+#board {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--sea);
+  user-select: none;
+}
+
+/* territories */
+
+.territory {
+  stroke: none;
+  fill-opacity: var(--territory-fill-alpha);
+}
+
+.territory.is-neutral { fill: var(--neutral); }
+
+.territory.is-contested {
+  fill: var(--neutral);
+  /* hatch overlay is drawn as a sibling path so the tint stays readable */
+}
+
+.territory-hatch {
+  fill: url(#hatch-contested);
+  stroke: none;
+  pointer-events: none;
+}
+
+/* borders — internal thin, coastline thicker (00-vision.md §3) */
+
+.border-inner {
+  stroke: var(--border-inner);
+  stroke-width: 0.8;
+  stroke-opacity: 0.75;
+  fill: none;
+}
+
+.border-coast {
+  stroke: var(--border-coast);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  fill: none;
+}
+
+.hatch-line {
+  stroke: #000;
+  stroke-opacity: 0.45;
+  stroke-width: 2;
+}
+
+/* links */
+
+.link {
+  stroke: var(--link);
+  stroke-width: 1.4;
+  stroke-opacity: 0.7;
+  fill: none;
+}
+
+.link.is-sea {
+  stroke: var(--link-sea);
+  stroke-dasharray: 5 5;
+  stroke-width: 1.6;
+  stroke-opacity: 0.85;
+}
+
+/* stations — shape is type, colour is ownership, nothing else */
+
+.station { cursor: pointer; }
+
+.station-shape {
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.station-garrison {
+  fill: var(--garrison);
+  stroke: var(--garrison-halo);
+  stroke-width: 3;
+  paint-order: stroke fill;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+/* modifiers labelled in place, not buried in a panel (§8) */
+.station-modifier {
+  fill: var(--accent);
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-weight: 600;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.station-name {
+  fill: var(--ink-faint);
+  font-size: 8px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+/* selection is a caret above the node, never a highlight ring (§8) */
+.select-caret {
+  fill: var(--accent);
+  pointer-events: none;
+}
+
+/* territory labels */
+
+.territory-label {
+  fill: var(--ink-faint);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+/* in-flight trails and wave markers (drawn by later milestones) */
+
+.wave-trail {
+  stroke: #ffffff;
+  stroke-width: 2.5;
+  stroke-opacity: 0.55;
+  fill: none;
+}
+
+/* board-level messaging, e.g. missing data */
+
+.board-message {
+  fill: var(--ink-dim);
+  font-family: var(--font-num);
+  font-size: 15px;
+  text-anchor: middle;
+}
+
+.board-message-sub {
+  fill: var(--ink-faint);
+  font-family: var(--font-num);
+  font-size: 11px;
+  text-anchor: middle;
+}
+
+/* ── station readout ──────────────────────────────────────────────────── */
+
+.station-readout {
+  position: absolute;
+  min-width: 150px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.station-readout[hidden] { display: none; }
+
+/* ── bottom bar ───────────────────────────────────────────────────────── */
+
+.bottombar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  height: var(--bottom-h);
+  flex: 0 0 var(--bottom-h);
+  padding: 0 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.send-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.powers {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.power-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.power-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--neutral-node);
+}
+
+.power-chip.is-dead { opacity: 0.35; text-decoration: line-through; }
+
+.ticker {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--line);
+  padding-left: 14px;
+}
+
+.ticker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+  height: 100%;
+  overflow: hidden;
+}
+
+.ticker-list li {
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ticker-list li:first-child { color: var(--ink); }

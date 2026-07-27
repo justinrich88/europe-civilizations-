@@ -1,0 +1,639 @@
+// data/tuning.js — every balance constant in the game, and nothing else.
+//
+// This is the single file balance work happens in. Nothing here may reference
+// anything in sim/, render/ or ai/ (01-data-schema.md "Conventions"), and
+// nothing outside this file may hard-code a number that a designer would want
+// to change. If you find a magic number in sim/, it belongs here.
+//
+// Convention (matching the 0ad-levers prototype): every constant carries a
+// one-line rationale for the value chosen, not just a description of what it
+// does. "Why 0.0022 and not 0.05" is the part that is expensive to
+// reconstruct six weeks from now.
+//
+// Units used throughout:
+//   tick        one simulation step, BAL.TICK_MS milliseconds of sim time
+//   sim-second  ten ticks at TICK_MS=100; wall-clock seconds only at 1x speed
+//   unit        one soldier-equivalent; counts are FLOATS (01-data-schema.md)
+//   dist        map distance in viewBox units (the map is 1000 x 700)
+//   power       the combat currency: units x strength x modifiers
+
+const BAL = {
+
+  // ===================================================================
+  // 1. TIME
+  // ===================================================================
+
+  // Fixed timestep. 100ms is the coarsest step at which 10 attrition
+  // applications per second still look continuous, and it keeps a 20-minute
+  // game inside 12k ticks so Monte Carlo batches stay cheap.
+  // Speed controls multiply ticks-consumed-per-frame, never this value —
+  // physics must be identical at 1x and 4x (00-vision.md §9).
+  TICK_MS: 100,
+
+  // Ticks per sim-second. Derived, but referenced often enough that it is
+  // worth having a name rather than an open-coded 1000/TICK_MS.
+  TICKS_PER_SEC: 10,
+
+  // Catch-up cap: the most ticks one animation frame may consume before the
+  // loop gives up and drops sim time. Prevents a death spiral when the tab is
+  // backgrounded. 4x speed at 60fps needs ~7, so 40 is ~6x headroom.
+  MAX_TICKS_PER_FRAME: 40,
+
+  // Speeds offered by the HUD. Pause is a separate flag, not a 0 here, so
+  // that unpausing restores the previous speed.
+  SPEEDS: [1, 2, 4],
+
+
+  // ===================================================================
+  // 2. GROWTH  (00-vision.md §2)
+  //
+  //   growth_per_tick = GROWTH_BASE * station.rate * growthMul
+  //                     * units * (1 - units / capacity)
+  //
+  // Logistic, so an emptied station recovers slowly and a full one has
+  // stopped paying dividends. "Full stations should be spent."
+  // ===================================================================
+
+  // The master growth coefficient. Chosen so a station climbing from 10% to
+  // 90% of capacity takes ln(81) / (GROWTH_BASE * rate) ticks — at rate 0.9
+  // that is ~1220 ticks, about two sim-minutes. Deliberately slow relative to
+  // combat (~20s) and marches (~10-40s): rebuilding must cost real time or
+  // the "units sent away don't multiply" tension evaporates.
+  // Note the logistic timescale is independent of capacity, so a 25-unit town
+  // and an 80-unit metropolis refill in the same wall time — capacity buys
+  // volume, not speed. That is intentional and worth keeping.
+  GROWTH_BASE: 0.004,
+
+  // Logistic growth is multiplicative in `units`, so a station at exactly 0
+  // can never recover. Floor the growth term (not the garrison) at this many
+  // units so a scoured city crawls back instead of dying permanently.
+  // 1.0 gives a ~10-15s "nothing visible is happening" beat after a wipe,
+  // which reads as recovery rather than as a bug.
+  GROWTH_SEED: 1.0,
+
+  // Growth is disabled entirely above this fraction of capacity. Pure
+  // logistic asymptotes and leaves a station wobbling at 99.7% forever,
+  // which makes the HUD's growth readout look broken. Snap it shut.
+  GROWTH_CAP_EPSILON: 0.995,
+
+  // A station over capacity (reinforced past its ceiling) bleeds back down at
+  // this fraction of the excess per tick. Half-life ~14 sim-seconds — long
+  // enough to stage an assault out of an overstuffed border city, short
+  // enough that hoarding is not a strategy.
+  OVERSTACK_DECAY: 0.0005,
+
+
+  // ===================================================================
+  // 3. MULTIPLIER STATIONS  (00-vision.md §2, the most novel mechanic)
+  //
+  // A multiplier raises `rate` at every station in its OWN territory and in
+  // all ADJACENT territories. Several multipliers stack multiplicatively.
+  // ===================================================================
+
+  // How far a multiplier's effect travels, in territory hops. 1 = own
+  // territory plus direct neighbours, exactly as specced. Flagged in
+  // 00-vision.md §12.4 as the first thing to examine in playtesting — this is
+  // the constant to change when we do. 0 makes farms local and dull, 2 makes
+  // Ukraine boost half of Russia.
+  MULTIPLIER_REACH: 1,
+
+  // Multipliers are strongest at home and diluted at range. Own territory
+  // gets the station's full `multiplier` value; each hop outward applies this
+  // exponent to the bonus above 1.0. 0.6 means a 1.6x farm gives 1.6x at home
+  // and ~1.36x next door — clearly worth capturing, not overwhelming.
+  MULTIPLIER_FALLOFF: 0.6,
+
+  // Hard ceiling on the product of all multipliers affecting one station.
+  // The Ukrainian breadbasket can plausibly stack three farms on one city;
+  // uncapped that is 4x+ growth and the game is decided by one province.
+  // 3.0 still makes stacked farmland the best real estate on the map.
+  GROWTH_MUL_CAP: 3.0,
+
+  // A multiplier only projects while its owner actually holds it. A contested
+  // multiplier station (hostile forces present) projects at this fraction —
+  // not zero, so the map does not strobe during every skirmish.
+  MULTIPLIER_CONTESTED: 0.5,
+
+
+  // ===================================================================
+  // 4. COMBAT  (00-vision.md §5 — "overwhelming force")
+  //
+  // Lanchester square law. Casualties per tick are proportional to the
+  // ENEMY's power, which is what makes a bigger force win nearly intact:
+  //
+  //   lossesA_per_tick = COMBAT_RATE * powerB
+  //   lossesB_per_tick = COMBAT_RATE * powerA
+  //
+  // Integrating gives A0^2 - A^2 = B0^2 - B^2, so at 2:1 the winner keeps
+  // sqrt(4-1)/2 = 86.6% — the ~87% in the design table falls straight out of
+  // the square law. Do not "tune" the survival percentages: they are a
+  // consequence of the model, and COMBAT_RATE only sets the clock.
+  // ===================================================================
+
+  // Casualty scale per tick. Time for a battle at odds r is
+  //   atanh(1/r) / COMBAT_RATE ticks
+  // and is independent of army size, so this constant alone sets battle
+  // length everywhere on the map. At 0.0022 and TICK_MS=100:
+  //     3.0 : 1  ->  ~16 sim-seconds   (a formality, 94% survive)
+  //     2.0 : 1  ->  ~25 sim-seconds   (decisive, 87% survive)
+  //     1.5 : 1  ->  ~37 sim-seconds   (decisive but costly, 75% survive)
+  //     1.2 : 1  ->  ~55 sim-seconds   (bloody, 55% survive)
+  //    1.05 : 1  ->  ~84 sim-seconds   (a grind, a reinforcement race)
+  // That puts every decisive battle in the 15-40 sim-second window the design
+  // asks for, while even fights visibly grind. The 0.05 in the schema sketch
+  // resolved a 2:1 in 1.1 seconds — far too fast to watch or reinforce.
+  COMBAT_RATE: 0.0022,
+
+  // Below this many units a side is considered destroyed and the remainder is
+  // dropped. Float attrition asymptotes toward zero and would otherwise leave
+  // 1e-9 infantry holding Berlin forever.
+  ANNIHILATION_EPSILON: 0.01,
+
+  // Fraction of its garrison a side must fall to before it withdraws.
+  // 0 = FIGHT TO ANNIHILATION, which is the shipped behaviour (00-vision.md
+  // §5: "a station flips the instant one side has nothing left in it").
+  // *** This is the single constant to change to try routing. *** Set it to
+  // e.g. 0.25 and sim/combat.js turns the losing side into a retreating wave
+  // back down the link it arrived on. Left at 0 because routing adds a
+  // second failure mode to every battle and the square law already makes
+  // outcomes legible; revisit if playtesting says battles feel merciless.
+  ROUT_THRESHOLD: 0,
+
+  // Battle variance, rolled ONCE per engagement and held for its duration —
+  // never per tick. A +/-12% band re-rolled every 100ms averages out to ~0.6%
+  // across a 300-tick battle and is mathematically meaningless (§5). One roll
+  // at engagement start is what makes an attack feel like a gamble.
+  // Applied as attackerPower *= 1 + uniform(-BATTLE_VARIANCE, +BATTLE_VARIANCE).
+  BATTLE_VARIANCE: 0.12,
+
+  // A slow sine wobble layered on top of the fixed roll so momentum swings
+  // are visible in a long battle. Amplitude and period, in fraction and
+  // ticks. 60 ticks = 6 sim-seconds: fast enough to see the numbers breathe,
+  // slow enough not to be noise. Amplitude is deliberately half the
+  // engagement roll — flavour, not a second dice throw.
+  BATTLE_WOBBLE: 0.06,
+  BATTLE_WOBBLE_PERIOD: 60,
+
+  // Station defense is ADDITIVE, not multiplicative (§5): a fortress adds a
+  // FLAT block of power rather than scaling its garrison. Multiplicative
+  // defense means a full fortress is mathematically untakeable and the map
+  // freezes; additive means enough attackers always crack it.
+  // Each +1.0 of `defense` above the 1.0 baseline (plus terrain defense) adds
+  // this much power. 6.0 makes a 3.5-defense citadel worth +15 power, about
+  // 12 extra infantry — a serious toll on any assault, and still crackable
+  // by a 2:1 volley.
+  DEFENSE_BONUS_POWER: 6.0,
+
+  // The additive fortress block only applies while the defender still has
+  // troops to man it; it scales in over the first few units so an empty fort
+  // is not a ghost army. Full bonus at this many defenders.
+  DEFENSE_BONUS_FULL_AT: 5.0,
+
+  // Artillery strips fortification (§4). The defender's additive bonus is
+  // reduced by UNITS.artillery.fortStrip * (artillery share of attacking
+  // power), capped here. 0.85 leaves a fortress with 15% of its advantage
+  // even against a pure-artillery siege — forts stay worth building around,
+  // and artillery stays the answer rather than the erasure.
+  FORT_STRIP_CAP: 0.85,
+
+  // Attackers who arrived this tick fight immediately (§8: "units fight the
+  // moment they arrive"), but a stack that lands into an ongoing battle
+  // inherits the engagement's existing variance roll rather than re-rolling.
+  // Expressed here as a flag so sim/combat.js has no policy of its own.
+  REINFORCE_INHERITS_VARIANCE: true,
+
+  // Matchup triangle (§4): artillery beats entrenched infantry, armour beats
+  // exposed artillery, infantry beats armour. MATCHUP[attacker][defender].
+  // 1.35 / 0.78 is close to reciprocal (product 1.053), so the triangle is
+  // near zero-sum — no unit type is quietly the best on average. The spread
+  // is wide enough that bringing the wrong type is a real mistake and narrow
+  // enough that a 2:1 numeric edge still beats a type edge.
+  MATCHUP: {
+    infantry:  { infantry: 1.00, artillery: 0.78, armour:    1.35 },
+    artillery: { infantry: 1.35, artillery: 1.00, armour:    0.78 },
+    armour:    { infantry: 0.78, artillery: 1.35, armour:    1.00 },
+  },
+
+  // Matchup is resolved against the enemy's power-weighted MIX, not against a
+  // single "dominant" type — otherwise a 51/49 split flips the whole battle.
+  // Below this share a type is ignored in the mix to keep one straggler from
+  // dragging the average.
+  MATCHUP_MIN_SHARE: 0.05,
+
+
+  // ===================================================================
+  // 5. UNITS  (00-vision.md §4)
+  //
+  // Three types, few enough that a stack reads at a glance.
+  //   atk       power multiplier when attacking a station
+  //   def       power multiplier when defending a station
+  //   speed     multiplier on MOVE_BASE
+  //   fortStrip artillery only; fraction of the defender's fort bonus removed
+  // ===================================================================
+
+  UNITS: {
+    // The baseline, and the only thing holding stations produce. def > atk
+    // (1.2 vs 1.0) is what makes "arrives in volume, good defending" true and
+    // gives the defender a real edge at parity — attacking should need mass.
+    infantry:  { atk: 1.0, def: 1.2, speed: 1.0 },
+
+    // Strong attacking, weak if caught alone, slow. atk/def of 3:1 is the
+    // widest spread in the roster: artillery caught without escort should
+    // evaporate, which is what makes armour's counter meaningful. speed 0.6
+    // means guns arrive last in a mixed volley — the staggered-arrival
+    // mistake (§8) has teeth because of this number.
+    artillery: { atk: 1.8, def: 0.6, speed: 0.6, fortStrip: 0.5 },
+
+    // Fast, strong in the open, poor against fortifications. speed 1.8 is
+    // triple artillery's, which is what lets armour cut links and arrive
+    // before the defender can react. fortStrip is absent by design: armour
+    // takes ground, it does not reduce forts.
+    armour:    { atk: 1.5, def: 0.9, speed: 1.8 },
+  },
+
+  // Armour is poor against fortifications: its attack power is scaled by this
+  // when the defending station carries a defense bonus, scaled by how
+  // fortified that station is. 0.7 makes throwing tanks at Verdun a clear
+  // error without making it impossible.
+  ARMOUR_VS_FORT: 0.7,
+
+  // Rendering / readout order. Not cosmetic — sim/ iterates unit types in a
+  // fixed sorted order for determinism (00-vision.md §9) and this is it.
+  UNIT_ORDER: ['infantry', 'artillery', 'armour'],
+
+
+  // ===================================================================
+  // 6. MOVEMENT  (00-vision.md §8)
+  //
+  //   dist_per_tick = MOVE_BASE * UNITS[type].speed * terrainMove * seaMul
+  //
+  // A wave moves at the speed of its SLOWEST type, so mixed stacks travel
+  // together; the stagger the design wants comes from different SOURCES, not
+  // from a stack splitting apart mid-march.
+  // ===================================================================
+
+  // Map distance covered per tick at speed 1.0. 0.6 dist/tick = 6 dist/sec.
+  // A typical intra-country link (dist ~42, Berlin-Leipzig) is 7 sim-seconds
+  // for infantry, 4 for armour, 12 for artillery; a six-hop cross-map march
+  // is ~45 seconds. That is the ratio the design needs: marching is
+  // comparable to fighting (~25s) and much cheaper than regrowing (~120s),
+  // so distance genuinely matters instead of being flavour.
+  MOVE_BASE: 0.6,
+
+  // Sea crossings are "simply slow and punishing rather than a naval system"
+  // (§3). Halving speed turns Dover (dist 55) into an 18-second commitment
+  // for infantry — long enough that Britain is safe and must plan, short
+  // enough that it can still matter.
+  SEA_SPEED_MUL: 0.5,
+
+  // ...and punishing for artillery specifically (01-data-schema.md LINKS).
+  // A further speed penalty plus a flat loss of guns per crossing. 10% is
+  // enough to make shipping artillery a deliberate cost, not a rounding
+  // error, without needing a transport system to model it.
+  SEA_ARTILLERY_SPEED_MUL: 0.6,
+  SEA_ARTILLERY_LOSS: 0.10,
+
+  // Waves that would arrive at a station already flipped to their own side
+  // simply merge into the garrison. Waves whose whole path is cut mid-march
+  // keep going — a march is a committed one-shot decision (§8), there is
+  // nothing to cancel. Flag kept here so the rule is visible to balance work.
+  WAVE_REROUTE_ON_LOSS: false,
+
+  // Minimum units a send may carry. Below this the order is dropped rather
+  // than spawning a wave of 0.3 infantry that clutters the map.
+  MIN_SEND_UNITS: 0.5,
+
+  // Persistent send proportion, per §8: "a persistent 25/50/75/All setting
+  // applies to the whole volley; default 75%". 0.75 is the value that makes
+  // the core tension bite — you keep enough to regrow, but a serious attack
+  // visibly guts the source.
+  SEND_FRACTION_DEFAULT: 0.75,
+  SEND_FRACTIONS: [0.25, 0.5, 0.75, 1.0],
+
+  // Terrain scopes to the whole territory (§3).
+  //   move     multiplier on march speed for links ENTERING this territory
+  //   defense  ADDED to the defending station's defense value
+  // Mountains at 0.55/+0.9 make the Alps and the Carpathians real walls
+  // without needing special-case links; urban is slow-ish and defensible so
+  // cities are sticky. Values are deliberately mild: terrain should colour a
+  // decision, not decide it — station type carries the bigger spread.
+  TERRAIN: {
+    plains:    { move: 1.00, defense: 0.0 },
+    hills:     { move: 0.80, defense: 0.4 },
+    forest:    { move: 0.75, defense: 0.3 },
+    urban:     { move: 0.90, defense: 0.6 },
+    mountains: { move: 0.55, defense: 0.9 },
+  },
+
+
+  // ===================================================================
+  // 7. CONNECTION  (00-vision.md §5, "keeping the snowball honest")
+  //
+  // A station with no path back to its owner's capital, over stations that
+  // owner holds, stops growing and decays. This is the main anti-snowball
+  // system and the reason armour exists.
+  // ===================================================================
+
+  // Decay per tick as a fraction of the garrison while disconnected.
+  // Half-life ln(2)/0.002 = ~347 ticks = ~35 sim-seconds. Deliberately
+  // aggressive: cutting a link should feel as decisive as winning a battle
+  // (which takes about the same 25-35 seconds), otherwise nobody ever bothers
+  // to cut and the square law runs away with the game.
+  DISCONNECT_DECAY: 0.002,
+
+  // Disconnected stations get this growth multiplier. 0 = none at all; a
+  // pocket must be relieved, not waited out.
+  DISCONNECT_GROWTH: 0.0,
+
+  // Grace period before decay starts, in ticks. 50 = 5 sim-seconds, enough
+  // that a link flickering during a contested battle does not immediately
+  // start melting a province the player is about to relieve.
+  DISCONNECT_GRACE: 50,
+
+  // A capital is connected to itself by definition. A power that has LOST its
+  // capital has no anchor — rather than melting its whole empire at once, the
+  // largest connected component it still holds becomes the anchor. Set false
+  // to make capital loss immediately catastrophic.
+  FALLBACK_ANCHOR_ON_CAPITAL_LOSS: true,
+
+  // Connectivity is a graph flood over ~100 stations; recomputing it every
+  // tick is affordable but wasteful. Recompute every N ticks and on any
+  // ownership change. 10 = once per sim-second.
+  CONNECTIVITY_INTERVAL: 10,
+
+
+  // ===================================================================
+  // 8. CAPTURE
+  // ===================================================================
+
+  // Growth multiplier applied to a freshly captured station for
+  // CAPTURE_PENALTY_TICKS. 00-vision.md §5 names this as the NEXT lever to
+  // pull if the snowball proves too strong ("making freshly taken stations
+  // slow to recover"). Shipped at 1.0 = OFF, so the three primary brakes
+  // (connection, balance-of-power AI, logistic growth) get measured on their
+  // own first. Try 0.4 / 600 before touching anything else.
+  CAPTURE_GROWTH_PENALTY: 1.0,
+  CAPTURE_PENALTY_TICKS: 600,
+
+  // Territory control threshold (00-vision.md §12.3). 1.0 = all-or-nothing,
+  // hold every station in a territory to control it, which is the shipped
+  // rule. 0.5 would make the map flip faster and feel less grindy — the open
+  // question is explicitly flagged as "easy to try both", so it lives here as
+  // a fraction rather than as an `every()` in the renderer.
+  TERRITORY_CONTROL_FRACTION: 1.0,
+
+
+  // ===================================================================
+  // 9. VICTORY  (00-vision.md §7)
+  // ===================================================================
+
+  // A power capitulates when it has lost its capital AND holds fewer than
+  // this fraction of the territories it started with. All its remaining
+  // stations transfer to whoever holds its capital. 0.25 removes the tedious
+  // last-20% mop-up while still requiring a real conquest first.
+  CAPITULATE_FRACTION: 0.25,
+
+  // Both conditions are required. Set false to let territory collapse alone
+  // trigger capitulation — much faster games, much cheaper wins.
+  CAPITULATE_REQUIRES_CAPITAL: true,
+
+  // Capitulation is checked on this cadence rather than every tick; it is a
+  // whole-board scan and nothing about it is time-critical. 50 = every 5
+  // sim-seconds.
+  CAPITULATE_CHECK_INTERVAL: 50,
+
+  // Transferred stations arrive at this fraction of their garrison — the
+  // surrendering army is not handed over intact. 0.5 keeps the reward large
+  // without making capitulation a bigger prize than the war that caused it.
+  CAPITULATE_UNIT_KEEP: 0.5,
+
+  // Hard stop for headless batches so a stalemated Monte Carlo run cannot
+  // hang the harness. 36000 ticks = one sim-hour. A game that reaches this
+  // is scored as a draw and should be reported as such in balance runs.
+  MAX_GAME_TICKS: 36000,
+
+
+  // ===================================================================
+  // 10. AI  (00-vision.md §6)
+  //
+  // Balance of power WITHOUT diplomacy: relations move on their own, driven
+  // by borders, aggression and relative standing. Personalities weight those
+  // terms differently on top of very different national maps.
+  // ===================================================================
+
+  AI: {
+
+    // --- Action budget (§6: "it cannot out-click you") ---
+
+    // Ticks between one power's orders. 40 = one order per 4 sim-seconds,
+    // against a human who can comfortably issue one every 2-3. Seven AI
+    // powers at this cadence produce ~1.75 orders/sec across the board, which
+    // is a readable amount of activity rather than a swarm.
+    ACTION_INTERVAL_TICKS: 40,
+
+    // Random +/- jitter on that interval, so seven powers do not all fire on
+    // the same tick and produce a visible pulse.
+    ACTION_JITTER_TICKS: 12,
+
+    // Ticks between relation recomputations. Relations move slowly by design;
+    // once every 5 sim-seconds is far more often than they meaningfully
+    // change and keeps the cost off the hot path.
+    RELATION_INTERVAL_TICKS: 50,
+
+    // Hard ceiling on orders per power per minute, as a backstop independent
+    // of the interval above. Catches any future code path that tries to fire
+    // outside the cadence.
+    MAX_ORDERS_PER_MINUTE: 20,
+
+    // --- Target selection: "think in fronts" ---
+
+    // The AI picks ONE target station and a commitment budget, rather than
+    // micromanaging stacks. This is how many candidate targets it scores per
+    // decision; beyond ~12 the extra candidates are all bad and the log
+    // becomes unreadable.
+    CANDIDATES_PER_DECISION: 12,
+
+    // Only stations within this many link-hops of a station the power holds
+    // are considered. 2 keeps the AI fighting on its own borders instead of
+    // launching quixotic cross-map expeditions.
+    TARGET_MAX_HOPS: 2,
+
+    // Sources are drawn from stations within this many hops of the target, so
+    // a volley lands together rather than being defeated in detail (§8). This
+    // is the single most important AI competence constant — raise it and the
+    // AI starts making the defining mistake of the game.
+    SOURCE_MAX_HOPS: 3,
+
+    // Cap on stations in one volley. Matches what a human comfortably
+    // marquee-selects, and bounds the pathfinding per decision.
+    MAX_SOURCES_PER_VOLLEY: 6,
+
+    // Minimum estimated power ratio before the AI commits. 1.4 is above the
+    // 1.2 "bloody, close" band and below the 2.0 "decisive" band: the AI
+    // attacks when it is genuinely ahead but does not wait for a sure thing,
+    // which is the difference between a live opponent and a statue.
+    MIN_ODDS: 1.4,
+
+    // A turtle-flavoured floor: never send so much that a source station
+    // drops below this fraction of its capacity. Stops the AI from stripping
+    // its own interior to feed one front.
+    HOME_GARRISON_FLOOR: 0.25,
+
+    // Fraction of eligible units an AI volley sends. Matches the player's
+    // default (SEND_FRACTION_DEFAULT) so neither side has a hidden edge.
+    COMMIT_FRACTION: 0.75,
+
+    // --- Target valuation weights ---
+    // Utility = sum of these times normalised terms. Multiplier stations are
+    // weighted highest because they are the most valuable and the cheapest to
+    // take (barely garrisoned, §5) — an AI that ignores farms looks stupid in
+    // exactly the way the design is trying to make interesting.
+    VALUE: {
+      multiplier:   3.0,  // spills across borders; hurts the enemy everywhere
+      producer:     2.2,  // the only source of artillery and armour
+      defensive:    1.4,  // gates a chokepoint; worth taking, painful to try
+      holding:      1.0,  // the baseline
+      capital:      2.5,  // bonus on top of type; capitulation needs it (§7)
+      capacityTerm: 0.02, // per unit of capacity — size matters, mildly
+      weakness:     1.8,  // per unit of favourable odds above MIN_ODDS
+      proximity:    1.2,  // per hop closer; near targets are cheaper to hold
+      cutsLink:     1.5,  // taking it disconnects enemy stations (§5)
+      relationTerm: 2.0,  // scaled by how hostile the AI is to the owner
+    },
+
+    // --- Relations (§6) ---
+    // Scale is -100 (total war) to +100 (aligned). Nobody negotiates; these
+    // move on their own.
+    RELATION_MIN: -100,
+    RELATION_MAX: 100,
+
+    // Powers go to war below this and stop attacking above it. The gap
+    // between the two is hysteresis — without it, powers oscillate in and out
+    // of war every few seconds and the ticker becomes noise.
+    WAR_THRESHOLD: -40,
+    PEACE_THRESHOLD: -15,
+
+    // Everyone starts here: mildly wary, nobody at war. The Concert holds
+    // until somebody moves.
+    RELATION_START: 10,
+
+    // Per relation update, relations drift back toward RELATION_START by this
+    // fraction. Grudges fade; without decay the board locks into permanent
+    // alliances by minute three.
+    RELATION_DRIFT: 0.02,
+
+    // --- Relation drivers, per update, before personality weighting ---
+
+    // Shared border pressure: hostility added per enemy unit massed on a
+    // shared frontier, normalised by the AI's own frontier strength. Where
+    // you mass is a statement (§6).
+    BORDER_PRESSURE: 6.0,
+
+    // Hostility added when this power's station is attacked, scaled by the
+    // fraction of the garrison lost. Recent aggression should dominate the
+    // short term — being hit is the loudest signal available.
+    AGGRESSION_HIT: 25.0,
+
+    // How fast the memory of an attack fades, per relation update.
+    AGGRESSION_MEMORY: 0.9,
+
+    // *** The Concert of Europe in one number. *** Hostility added toward the
+    // leader, scaled by how far ahead of the field they are in territory
+    // count. Heavy by design (§6: "a heavy term pushing everyone toward
+    // hostility with the leader") — this is the entire replacement for
+    // diplomacy, and it is what makes running away with the game turn the
+    // board against you. If snowballing survives playtesting, raise this
+    // before touching combat.
+    LEADER_WEIGHT: 45.0,
+
+    // Only powers above this share of the leader's territory count join the
+    // pile-on; a power down to two provinces has bigger problems.
+    LEADER_PILE_ON_MIN_SHARE: 0.15,
+
+    // --- Personalities (§6) ---
+    // Multipliers on the terms above, per 00-vision.md's three archetypes.
+    // Each set is deliberately lopsided: a personality that is 1.1x on
+    // everything is indistinguishable from the default in play.
+    PERSONALITIES: {
+      // Attacks early, at worse odds, and cares least who the leader is —
+      // frequently BECOMES the leader and gets piled on. Germany's "must win
+      // fast" map plays to this.
+      expansionist: {
+        aggression:   1.4,
+        minOddsMul:   0.85,  // commits at ~1.2:1 — bloody, close fights
+        leaderWeight: 0.7,
+        borderWeight: 1.2,
+        revengeWeight: 1.0,
+        expandBias:   1.5,
+        defenseBias:  0.7,
+      },
+      // Barely initiates, holds a deep garrison, and reacts hard when hit.
+      // Suits France's fortress belt and the Ottoman chokepoints.
+      turtle: {
+        aggression:   0.6,
+        minOddsMul:   1.35,  // needs ~1.9:1 before it moves
+        leaderWeight: 1.2,
+        borderWeight: 1.4,
+        revengeWeight: 1.3,
+        expandBias:   0.5,
+        defenseBias:  1.6,
+      },
+      // Ignores relations and hits whatever is weakest right now, including
+      // the leader. The board's self-correcting element.
+      opportunist: {
+        aggression:   1.0,
+        minOddsMul:   1.0,
+        leaderWeight: 1.5,
+        borderWeight: 0.8,
+        revengeWeight: 0.7,
+        expandBias:   1.0,
+        defenseBias:  1.0,
+      },
+    },
+
+    // --- Debuggability (§6: "a passive AI is otherwise undebuggable") ---
+
+    // Every decision is logged with its utility score. Ring buffer size —
+    // large enough to cover a whole game at ~1.75 decisions/sec for several
+    // minutes, small enough not to leak memory in a Monte Carlo batch.
+    LOG_MAX: 400,
+
+    // Also log the candidates that were REJECTED and why. Off in batch runs
+    // (it is 12x the volume), on when a power is behaving like a statue.
+    LOG_REJECTED: false,
+  },
+
+
+  // ===================================================================
+  // 11. HEADLESS BALANCE HARNESS  (00-vision.md §11)
+  //
+  // Three numbers are the dashboard: win-rate spread across the seven
+  // powers, mean game length, mean time-to-first-station-flip.
+  // ===================================================================
+
+  BATCH: {
+    // Games per Monte Carlo batch. 200 puts the standard error on a 1-in-7
+    // win rate at about +/-2.5 points — enough to see a broken power, cheap
+    // enough to run between edits.
+    GAMES: 200,
+
+    // Base seed. Fixed so a balance table is reproducible; bump it to confirm
+    // a result is not an artefact of one seed family.
+    SEED: 19140628,
+
+    // The pass condition for the win-rate dashboard: no power may win more
+    // than this share of games. 1/7 = 14.3%, so 0.25 allows a strong power
+    // without allowing a dominant one.
+    MAX_WIN_SHARE: 0.25,
+
+    // ...and none may fall below this. A power that never wins is a bug in
+    // the map, not a personality.
+    MIN_WIN_SHARE: 0.04,
+
+    // Target mean game length in sim-seconds, and the tolerance band. 15
+    // minutes is the design's implied session; the band is wide because game
+    // length is the least sensitive of the three dashboard numbers.
+    TARGET_GAME_SECONDS: 900,
+    GAME_SECONDS_TOLERANCE: 300,
+  },
+};

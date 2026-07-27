@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concert of Europe — 1914</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ── top HUD ─────────────────────────────────────────────────────── -->
+  <header class="hud" id="hud">
+    <div class="hud-group">
+      <span class="hud-stat"><span class="hud-label">Territories</span><span class="hud-value" id="stat-territories">—</span></span>
+      <span class="hud-stat"><span class="hud-label">Forces</span><span class="hud-value" id="stat-forces">—</span></span>
+    </div>
+
+    <div class="hud-group speed" id="speed-controls">
+      <button type="button" class="btn speed-btn is-active" data-speed="0" id="speed-pause" title="Pause">&#9208;</button>
+      <button type="button" class="btn speed-btn" data-speed="1">1x</button>
+      <button type="button" class="btn speed-btn" data-speed="2">2x</button>
+      <button type="button" class="btn speed-btn" data-speed="4">4x</button>
+    </div>
+
+    <div class="hud-group">
+      <span class="hud-stat"><span class="hud-label">Day</span><span class="hud-value" id="stat-day">0</span></span>
+    </div>
+  </header>
+
+  <!-- ── board ───────────────────────────────────────────────────────── -->
+  <main class="board-wrap">
+    <svg id="board" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet"
+         role="img" aria-label="1914 Europe strategic map">
+      <defs id="board-defs"></defs>
+      <g id="g-territories"></g>
+      <g id="g-borders"></g>
+      <g id="g-links"></g>
+      <g id="g-waves"></g>
+      <g id="g-stations"></g>
+      <g id="g-labels"></g>
+      <g id="g-ui"></g>
+    </svg>
+    <div class="station-readout" id="station-readout" hidden></div>
+  </main>
+
+  <!-- ── bottom bar ──────────────────────────────────────────────────── -->
+  <footer class="bottombar">
+    <div class="send-control" id="send-control">
+      <span class="hud-label">send</span>
+      <button type="button" class="btn send-btn" data-fraction="0.25">25</button>
+      <button type="button" class="btn send-btn" data-fraction="0.5">50</button>
+      <button type="button" class="btn send-btn is-active" data-fraction="0.75">75</button>
+      <button type="button" class="btn send-btn" data-fraction="1">All</button>
+    </div>
+
+    <div class="powers" id="powers-strip"></div>
+
+    <div class="ticker" id="ticker" aria-live="polite">
+      <ul class="ticker-list" id="ticker-list"></ul>
+    </div>
+  </footer>
+
+</div>
+
+<!-- ── scripts: core -> data -> render -> app ───────────────────────────
+     Loaded in dependency order as plain globals. No modules, no bundler.
+     The data/ files are authored separately; render/map.js reports clearly
+     and draws a placeholder if any global is still missing. -->
+
+<script src="core/rng.js"></script>
+<script src="core/util.js"></script>
+
+<script src="data/map.js"></script>
+<script src="data/stations.js"></script>
+<script src="data/scenario.js"></script>
+<script src="data/tuning.js"></script>
+
+<script src="render/map.js"></script>
+
+<!-- app/ layer lands here once it exists:
+<script src="app/loop.js"></script>
+<script src="app/main.js"></script>
+-->
+
+</body>
+</html>

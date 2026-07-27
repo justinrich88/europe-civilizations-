@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "concert-dev",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8761", "--directory", "/Users/justinrich/Downloads/concert-of-europe"],
+      "port": 8761
+    }
+  ]
+}
