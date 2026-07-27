@@ -45,7 +45,7 @@ const SETUP = {
   mos: { owner: "rus", units: { infantry: 33, artillery: 0, armour: 0 } },
   stp: { owner: "rus", units: { infantry: 36, artillery: 0, armour: 0 } },
   niz: { owner: "rus", units: { infantry: 21, artillery: 0, armour: 0 } },
-  kaz: { owner: "rus", units: { infantry: 17, artillery: 0, armour: 0 } },
+  sar: { owner: "rus", units: { infantry: 19, artillery: 0, armour: 0 } },
   ros: { owner: "rus", units: { infantry: 17, artillery: 0, armour: 0 } },
   tsa: { owner: "rus", units: { infantry: 19, artillery: 0, armour: 0 } },
   tul: { owner: "rus", units: { infantry: 3, artillery: 8, armour: 0 } },

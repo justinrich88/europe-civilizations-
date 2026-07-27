@@ -105,7 +105,7 @@ const CITIES = [
   H('mos', 'Moscow',        37.62, 55.75, 'rus', 70, 1.0),
   H('stp', 'St Petersburg', 30.31, 59.94, 'rus', 60, 0.95),
   H('niz', 'Nizhny Novgorod', 44.00, 56.33, 'rus', 40, 0.85),
-  H('kaz', 'Kazan',         49.12, 55.79, 'rus', 36, 0.8),
+  H('sar', 'Saratov',       46.03, 51.53, 'rus', 36, 0.8),
   H('ros', 'Rostov',        39.72, 47.24, 'rus', 38, 0.85),
   H('tsa', 'Tsaritsyn',     44.52, 48.71, 'rus', 32, 0.8),
   P('tul', 'Tula Arsenal',  37.62, 54.20, 'rus', 26, 0.45, 'artillery', 1.0),
@@ -305,6 +305,10 @@ const order = [];
 const centroids = {};
 for (const tid of Object.keys(TERRITORIES)) centroids[tid] = centroidOf(polyOf(tid));
 
+// True projected city position, kept so the relaxation pass below can bound how
+// far a station is ever allowed to drift from where the city actually is.
+const RAWPOS = {};
+
 for (const c of CITIES) {
   if (!TERRITORIES[c.terr]) throw new Error(c.id + ' names unknown territory ' + c.terr);
   const poly = polyOf(c.terr);
@@ -323,6 +327,7 @@ for (const c of CITIES) {
   }
   if (!pointInPoly(pos, poly)) throw new Error('could not place ' + c.id + ' inside ' + c.terr);
   if (steps) nudged.push({ id: c.id, name: c.name, terr: c.terr, px: r1(dist(raw, pos)) });
+  RAWPOS[c.id] = pos.slice();   // post-nudge truth: the anchor drift is measured from
 
   STATIONS[c.id] = {
     id: c.id, name: c.name, territory: c.terr, pos,
@@ -331,6 +336,130 @@ for (const c of CITIES) {
   };
   order.push(c.id);
 }
+
+// -------------------------------------------- constrained relaxation pass ---
+// Real 1914 Europe is not evenly populated: Germany, Bohemia, the Alps and the
+// Balkans pile a dozen cities into the space Russia spends on two. Projected
+// honestly, those nodes overlap badly enough that the garrison numbers become
+// unreadable. So: a few dozen passes of pairwise repulsion, under three hard
+// constraints —
+//   1. a station may NEVER leave its own territory polygon (verify-stations.js
+//      enforces this, and a station outside its country is a lie);
+//   2. no station drifts more than MAX_DRIFT px from its true projected spot,
+//      so the map stays geographically honest;
+//   3. fully deterministic — sorted ids, no rng, no clock. Two runs of this
+//      script must produce a byte-identical data/stations.js.
+// Anything that would break (1) or (2) is clamped or skipped, never forced.
+
+// Node radii: this MUST mirror stationRadius() in render/map.js (NODE_R_MIN 9,
+// NODE_R_MAX 19, sqrt so node AREA tracks capacity). If that formula changes,
+// change it here too — these two are the only places the numbers live.
+const NODE_R_MIN = 9, NODE_R_MAX = 19;
+const NODE_PAD = 6;        // extra breathing room so the garrison label clears
+const MAX_DRIFT = 25;      // px a station may move from its true position
+const RELAX_PASSES = 150;
+const RELAX_RATE = 0.35;   // fraction of the overlap resolved per pass, per node
+
+const relaxed = (() => {
+  const ids = order.slice().sort();
+  let capMin = Infinity, capMax = -Infinity;
+  for (const sid of ids) {
+    const c = STATIONS[sid].capacity;
+    if (c < capMin) capMin = c;
+    if (c > capMax) capMax = c;
+  }
+  const radiusOf = cap => {
+    if (capMax <= capMin) return (NODE_R_MIN + NODE_R_MAX) / 2;
+    let t = (cap - capMin) / (capMax - capMin);
+    t = Math.sqrt(t < 0 ? 0 : t > 1 ? 1 : t);
+    return NODE_R_MIN + (NODE_R_MAX - NODE_R_MIN) * t;
+  };
+
+  const R = {}, poly = {}, cur = {};
+  for (const sid of ids) {
+    R[sid] = radiusOf(STATIONS[sid].capacity);
+    poly[sid] = polyOf(STATIONS[sid].territory);
+    cur[sid] = STATIONS[sid].pos.slice();
+  }
+  const want = (a, b) => R[a] + R[b] + NODE_PAD;
+
+  // legal(): inside its own territory, with the same clearance the nudge pass
+  // demands, and within MAX_DRIFT of the true projected city.
+  const legal = (sid, p) =>
+    dist(p, RAWPOS[sid]) <= MAX_DRIFT + 1e-9 &&
+    pointInPoly(p, poly[sid]) && distToPoly(p, poly[sid]) >= INSET;
+
+  const countOverlaps = pos => {
+    let n = 0;
+    for (let i = 0; i < ids.length; i++)
+      for (let j = i + 1; j < ids.length; j++)
+        if (dist(pos[ids[i]], pos[ids[j]]) < want(ids[i], ids[j])) n++;
+    return n;
+  };
+  const before = countOverlaps(cur);
+
+  for (let pass = 0; pass < RELAX_PASSES; pass++) {
+    const push = {};
+    for (const sid of ids) push[sid] = [0, 0];
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = ids[i], b = ids[j];
+        const target = want(a, b);
+        let dx = cur[b][0] - cur[a][0], dy = cur[b][1] - cur[a][1];
+        let d = Math.hypot(dx, dy);
+        if (d >= target) continue;
+        if (d < 1e-6) {          // exactly coincident: split along +x, deterministically
+          dx = 1; dy = 0; d = 1;
+        }
+        // Non-linear on purpose. A plain linear spring lets a badly crowded
+        // pair (Brussels/Lille) settle at a stable-but-unreadable 8px while a
+        // dozen mild overlaps outvote it. Weighting by target/d makes a near
+        // collision dominate everything else pushing that node.
+        const shove = (target - d) * RELAX_RATE * 0.5 * Math.min(5, target / d);
+        const ux = dx / d, uy = dy / d;
+        push[a][0] -= ux * shove; push[a][1] -= uy * shove;
+        push[b][0] += ux * shove; push[b][1] += uy * shove;
+      }
+    }
+    for (const sid of ids) {
+      const [px, py] = push[sid];
+      if (px === 0 && py === 0) continue;
+      let cand = [cur[sid][0] + px, cur[sid][1] + py];
+      // Constraint 2 first: clamp the candidate back onto the drift disc.
+      const anchor = RAWPOS[sid];
+      const dd = dist(cand, anchor);
+      if (dd > MAX_DRIFT) {
+        const s = MAX_DRIFT / dd;
+        cand = [anchor[0] + (cand[0] - anchor[0]) * s, anchor[1] + (cand[1] - anchor[1]) * s];
+      }
+      // Constraint 1: if the clamped candidate is outside the territory, retreat
+      // along the step until it is legal again; if nothing is, skip this station.
+      if (legal(sid, cand)) { cur[sid] = cand; continue; }
+      let taken = null;
+      for (let k = 3; k >= 1; k--) {
+        const t = k / 4;
+        const p = [cur[sid][0] + (cand[0] - cur[sid][0]) * t,
+                   cur[sid][1] + (cand[1] - cur[sid][1]) * t];
+        if (legal(sid, p)) { taken = p; break; }
+      }
+      if (taken) cur[sid] = taken;
+    }
+  }
+
+  // Round to 0.1 exactly as the projection does, then re-check: rounding can
+  // shave a hundredth of a pixel, and this file's whole promise is that the
+  // written coordinate is inside the country.
+  let moved = 0, maxMove = 0;
+  const final = {};
+  for (const sid of ids) {
+    const rp = [r1(cur[sid][0]), r1(cur[sid][1])];
+    final[sid] = legal(sid, rp) ? rp : STATIONS[sid].pos.slice();
+    const m = dist(final[sid], STATIONS[sid].pos);
+    if (m > 0.05) { moved++; if (m > maxMove) maxMove = m; }
+    STATIONS[sid].pos = final[sid];
+  }
+  return { moved, maxMove: r1(maxMove), before, after: countOverlaps(final) };
+})();
 
 // Two stations closer than 6px cannot be told apart on screen.
 {
@@ -343,6 +472,20 @@ for (const c of CITIES) {
 }
 
 // =============================================================== LINKS ======
+// Link thresholds are GEOGRAPHIC, not pixel constants. They used to be raw px
+// (60 / 120), which meant that widening the map's clip changed the fit scale
+// and silently deleted 20 links — the same countries, the same cities, a
+// different number of roads. Distances are stated in km and converted through
+// the stored fit, so the graph is stable under any reframing of the viewBox.
+//
+// The Albers projection in tools/lib/project.js works on the unit sphere, so
+// one projected unit is one earth radius; fit.k px per unit gives px per km.
+const EARTH_R_KM = 6371;
+const km = d => d * FIT.k / EARTH_R_KM;
+
+const SHORT_INTRA_KM = 420;   // "these two cities are close enough to be one road"
+const SECOND_MAX_KM = 820;    // a second crossing on a wide land border
+
 const linkMap = new Map();   // "a~b" -> { a, b, dist, sea }
 function addLink(a, b, sea) {
   if (a === b) return;
@@ -364,7 +507,7 @@ for (const sid of order) (byTerr[STATIONS[sid].territory] = byTerr[STATIONS[sid]
 // The MST guarantees each territory is internally connected (which is what the
 // homeland-reachability rule in scenario.js depends on); the short edges stop
 // clustered cities from funnelling through one artificial bottleneck.
-const SHORT_INTRA = 60;
+const SHORT_INTRA = km(SHORT_INTRA_KM);
 for (const tid of Object.keys(byTerr)) {
   const ids = byTerr[tid];
   if (ids.length < 2) continue;
@@ -387,7 +530,7 @@ for (const tid of Object.keys(byTerr)) {
 // --- across land borders: closest pair, plus a second for bigger pairs ------
 // `neighbors` in data/map.js is derived from shared TopoJSON arcs, so it is
 // exact — no adjacency guesswork here.
-const SECOND_MAX = 120;
+const SECOND_MAX = km(SECOND_MAX_KM);
 const seenPair = new Set();
 for (const tid of Object.keys(TERRITORIES).sort()) {
   for (const n of (TERRITORIES[tid].neighbors || [])) {
@@ -551,3 +694,7 @@ if (nudged.length) {
 } else {
   console.log('nudged  : none');
 }
+console.log('relaxed : ' + relaxed.moved + ' station(s) moved to unclog central Europe, ' +
+  'largest displacement ' + relaxed.maxMove + 'px (cap ' + MAX_DRIFT + 'px)');
+console.log('          overlapping pairs ' + relaxed.before + ' -> ' + relaxed.after +
+  ' (target separation = both render radii + ' + NODE_PAD + 'px)');

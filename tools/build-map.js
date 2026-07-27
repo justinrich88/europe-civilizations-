@@ -30,7 +30,7 @@ const OUT = path.join(ROOT, 'data', 'map.js');
 
 // ---------------------------------------------------------------- knobs -----
 const DP_DEG = 0.02;      // Douglas-Peucker tolerance, degrees, per arc
-const CLIP = { lonMin: -25, lonMax: 70, latMin: 33, latMax: 72 };
+const CLIP = { lonMin: -25, lonMax: 48, latMin: 33, latMax: 72 };
 const VIEW = { w: 1000, h: 700, margin: 20 };
 const PRUNE_PX = 0.35;     // topology-preserving prune tolerance, viewBox units
 const MIN_SEG_PX = 4.05;   // collapse edges shorter than this (> WELD_PX)
