@@ -226,3 +226,31 @@ Nothing in `sim/` may touch `document`, call `Math.random`, or read `Date.now`. 
 **Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
 
 If any of this needs to change, change it *here first*, then update `simFns()` in `test/runner.js`, then the sim.
+
+---
+
+## Render / app API — pinned names
+
+Same contract discipline as the sim above, for the same reason: three agents built `sim/` in parallel without talking to each other and nothing collided, because every name they had to share was written down first.
+
+**The single global game state is `window.GAME`**, created by `app/main.js`. Nothing else creates a state. `sim/` never reads it — the sim only ever receives a state as an argument.
+
+| Global | File | Contract |
+|---|---|---|
+| `renderBoard()` | `render/map.js` | Full rebuild of the static layers: territories, borders, links, labels. Expensive. Called once at startup and after nothing else. |
+| `renderLive(state)` | `render/map.js` | Per-frame update of everything that changes: garrison numbers, station ownership colours, territory tint and control tier. Must **mutate existing DOM nodes, never rebuild them** — rebuilding 108 `<g>` elements every frame kills selection and hover state. |
+| `renderWaves(state)` | `render/waves.js` | Draw/update/remove in-transit stack markers into `#g-waves`, positioned by interpolating each wave's current hop. |
+| `renderHud(state)` | `render/hud.js` | Territory count, total forces, day counter, power strip, event ticker. |
+| `initSelection()` | `render/select.js` | Wire up marquee, click and keyboard selection on `#board`. Called once. |
+| `selectedSources()` | `render/select.js` | Sorted array of currently selected station ids. The only way other files read the selection. |
+| `clearSelection()` | `render/select.js` | Drop all selection and any preview lines. |
+| `startLoop()` / `setSpeed(n)` | `app/loop.js` | Fixed-timestep accumulator. `setSpeed(0)` pauses. Speed multiplies **time consumed, never the timestep** — 4x is literally "run more ticks", so physics is identical at every speed. Catch-up capped at `BAL.MAX_TICKS_PER_FRAME` so a backgrounded tab cannot death-spiral. |
+| `PLAYER` | `app/loop.js` | Which power the human plays (`'ger'`). Read by selection and the HUD to decide what is selectable and whose numbers are shown. |
+
+`state.speed` means **speed when not paused** — it never becomes 0, so pausing and resuming returns you to the speed you were at. `state.paused` is the separate flag. `index.html` encodes the pause button as `data-speed="0"` purely as a DOM convention.
+
+**Layer ownership.** `#g-territories`, `#g-borders`, `#g-links`, `#g-labels` belong to `render/map.js`. `#g-stations` belongs to `render/map.js` for creation and `renderLive` for updates. `#g-waves` belongs to `render/waves.js`. `#g-ui` belongs to `render/select.js` (marquee rectangle, preview lines, ETA labels). No file touches another's layer.
+
+**Input funnels to `applyCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls `applyCommand(GAME, cmd)` — the same entry point the AI uses. There is no second path by which the board changes, which is what keeps replay and headless testing free.
+
+Nothing in `render/` or `app/` may mutate state directly. Read freely, write only through `applyCommand`.

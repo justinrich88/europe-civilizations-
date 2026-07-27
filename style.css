@@ -376,3 +376,178 @@ html, body {
 }
 
 .ticker-list li:first-child { color: var(--ink); }
+
+/* ── selection ─────────────────────────────────────────────────────────
+   render/select.js only. 00-vision.md §8: selection is a caret above the
+   node, never a highlight ring — it stays legible with sixty nodes marked.
+   :root already reserves --accent "selection carets, active controls", so
+   this block introduces no new palette entries.
+
+   #g-ui must be pointer-events:none, or the carets and preview lines drawn
+   over a node would swallow the click that commits the volley. Every element
+   below inherits that; nothing here is ever a hit target. */
+
+#g-ui { pointer-events: none; }
+
+.sel-caret {
+  fill: var(--accent);
+  stroke: var(--garrison-halo);
+  stroke-width: 0.8;
+}
+
+/* A selected source with no route to the hovered target. applyCommand() will
+   reject it; saying so before the click is cheaper than the player noticing a
+   missing wave afterwards. */
+.sel-caret.is-noroute {
+  fill: var(--ink-faint);
+  stroke: none;
+}
+
+.sel-marquee-rect {
+  fill: rgba(216, 178, 90, 0.07);
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+/* Preview lines. §8: the ETA spread is the information needed to avoid defeat
+   in detail, so the slowest arrival is deliberately the loudest thing on
+   screen — a bad volley should LOOK bad before it is committed. */
+.sel-line {
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  stroke-opacity: 0.55;
+}
+
+.sel-line.is-slowest {
+  stroke: var(--warn);
+  stroke-width: 2.8;
+  stroke-opacity: 0.95;
+}
+
+.sel-line.is-noroute {
+  stroke: var(--ink-faint);
+  stroke-width: 1;
+  stroke-opacity: 0.5;
+  stroke-dasharray: 3 4;
+}
+
+.sel-eta {
+  fill: var(--accent);
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-weight: 700;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--garrison-halo);
+  stroke-width: 3;
+  stroke-linejoin: round;
+}
+
+.sel-eta.is-slowest { fill: var(--warn); font-size: 11.5px; }
+.sel-eta.is-noroute { fill: var(--ink-faint); font-weight: 500; }
+
+/* ══ live board ═══════════════════════════════════════════════════════════
+   Everything renderLive() and renderWaves() switch on. Appended at the end on
+   purpose: these rules must win over the static-board rules above, and this
+   file is being edited by more than one pair of hands.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Territory tiers. The hatch is built once per territory and toggled by class,
+   so the contested state costs a class change rather than a DOM insert. */
+.territory-hatch { display: none; }
+.territory-hatch.is-on { display: block; }
+
+/* The hatch was originally black-on-dark, which at map zoom was
+   indistinguishable from plain neutral ground — contested and unowned looked
+   identical, and they mean opposite things. Light strokes at low opacity:
+   still clearly not a tint, now clearly not nothing. */
+.hatch-line {
+  stroke: #d3dcea;
+  stroke-opacity: 0.24;
+  stroke-width: 1.7;
+}
+
+/* `neutral` is a real power id in POWERS, so a territory can come back held by
+   nobody at full or majority. That is empty ground, not somebody's country. */
+.territory.is-neutral { fill: var(--neutral); fill-opacity: var(--territory-fill-alpha); }
+
+/* Cut off from the capital: not growing, actively decaying (00-vision.md §5).
+   One of the three systems keeping the snowball honest, and the only one with
+   no other tell on the board — so it gets a dashed outline AND a mark. Reading
+   "this is bleeding" at a glance is the entire point. */
+.station.is-cut .station-shape {
+  stroke-dasharray: 3 2.5;
+  stroke-opacity: 0.85;
+}
+
+.station-cut {
+  display: none;
+  stroke: var(--warn);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  fill: none;
+  pointer-events: none;
+}
+
+.station.is-cut .station-cut { display: block; }
+
+/* A fight in progress. Animated rather than static because a battle is the one
+   thing on the board with a clock on it — movement catches the eye where a
+   static ring blends into the node outlines. */
+.station-battle {
+  display: none;
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 1.8;
+  pointer-events: none;
+}
+
+.station.is-fighting .station-battle {
+  display: block;
+  animation: battle-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes battle-pulse {
+  0%, 100% { stroke-opacity: 0.9;  stroke-width: 1.8; }
+  50%      { stroke-opacity: 0.25; stroke-width: 3.4; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .station.is-fighting .station-battle { animation: none; stroke-opacity: 0.9; }
+}
+
+/* In-flight stacks. The trail runs from the station just left to where the
+   marker is now — a streak, not a supply line, and it disappears with the
+   wave (00-vision.md §8). */
+.wave-trail {
+  stroke-width: 2.5;
+  stroke-opacity: 0.55;
+  stroke-linecap: round;
+  fill: none;
+  pointer-events: none;
+}
+
+.wave { pointer-events: none; }
+
+.wave-chip {
+  stroke: var(--garrison-halo);
+  stroke-width: 1.2;
+  fill-opacity: 0.95;
+}
+
+/* Same "number is the interface" rule as a garrison, one size down because a
+   stack is transient. */
+.wave-units {
+  fill: var(--garrison);
+  stroke: var(--garrison-halo);
+  stroke-width: 2.5;
+  paint-order: stroke fill;
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}

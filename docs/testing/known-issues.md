@@ -181,3 +181,39 @@ Two rules that follow:
 Also worth noting: no hand-written assertion found this. Hundreds of headless
 games did, and only because a stalled batch was investigated rather than
 written off as the placeholder AI being bad at its job.
+
+---
+
+## 9. A renderer's private helper silently replaced the sim's function of the same name
+
+`render/map.js` kept its own `territoryControl()` so it could tint the board
+from the static `SETUP` before a game state existed. `core/state.js` has a
+function of exactly that name implementing the same rule against live state.
+
+Both are top-level **function declarations** in classic scripts, and unlike
+`const`/`let` those *do* land on `window` (known-issues #3 is the other half of
+this asymmetry). `index.html` loads `render/map.js` after `core/state.js`, so
+the renderer's copy overwrote the sim's. Every unqualified
+`territoryControl(state, tid)` call in `core/` and `sim/` — including the one
+inside `countTerritories()`, which drives capitulation and victory — was
+resolving to a function that read the turn-zero snapshot instead of the live
+board.
+
+The node harness could not see it: `test/node.js` never loads `render/`, so all
+79 assertions passed against the correct function while the browser ran the
+wrong one. **A green headless suite says nothing about global collisions that
+only exist in the browser's script order.**
+
+Fixed by deleting the renderer's copy outright and having it call core's, with
+a state-shaped wrapper around `SETUP` for the pre-game case. Same rule, one
+implementation.
+
+Rules that follow:
+
+1. **In a globals-only project, a function name is a global claim.** Before
+   adding a top-level `function foo()`, grep the whole tree for `function foo`.
+   A "private helper" is not private.
+2. **Prefer calling the canonical implementation over copying it**, even across
+   layers that are supposed to be independent. `render/` may not *mutate* state,
+   but reading a derived value from `core/` is not a layering violation — it is
+   the only way to be sure the two agree.
