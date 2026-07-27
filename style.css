@@ -557,3 +557,259 @@ html, body {
   dominant-baseline: central;
   pointer-events: none;
 }
+
+/* ── ai log ───────────────────────────────────────────────────────────────
+   render/ailog.js. The debugging window onto the AI (00-vision.md §6).
+
+   It is a flex sibling of .board-wrap, NOT an overlay. Anything painted over
+   the board that is not pointer-events:none swallows the click that commits an
+   attack, and this panel needs pointer events for its filter and its
+   click-to-expand rows. Sitting in normal flow, it displaces the board instead
+   — the SVG has a viewBox and simply rescales — so it cannot eat a board
+   click by construction rather than by a rule someone has to remember. */
+
+.ailog {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  height: 232px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.ailog[hidden] { display: none; }
+
+.ailog-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ailog-title {
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+}
+
+.ailog-hint {
+  margin-left: auto;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+/* Filter. Seven powers at ~1.75 decisions/sec makes the unfiltered stream
+   unreadable, so one-power-at-a-time is not a nicety. The active chip carries
+   the power's ownership colour on its underline — same colour as the map. */
+.ailog-filter {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.ailog-fbtn {
+  padding: 2px 7px 3px;
+  background: transparent;
+  color: var(--ink-faint);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-family: var(--font-num);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.ailog-fbtn:hover { color: var(--ink); }
+
+.ailog-fbtn.is-active {
+  color: var(--ink);
+  background: var(--panel-hi);
+}
+
+.ailog-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.ailog-empty {
+  padding: 14px;
+  color: var(--ink-faint);
+}
+
+.ailog-empty[hidden] { display: none; }
+
+.ailog-row {
+  border-bottom: 1px solid var(--border-inner);
+  cursor: pointer;
+}
+
+.ailog-row:hover { background: var(--panel-hi); }
+.ailog-row.is-open { background: var(--panel-hi); }
+
+.ailog-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 14px;
+  white-space: nowrap;
+  font-family: var(--font-num);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ailog-tick {
+  width: 58px;
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+}
+
+/* Colour is set inline from POWERS[pid].color — ownership colour and nothing
+   else, the same rule the board follows (00-vision.md §8). */
+.ailog-pow {
+  width: 34px;
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+/* attack vs hold must be distinguishable without reading the word. */
+.ailog-kind {
+  width: 46px;
+  flex: 0 0 auto;
+  text-align: center;
+  border-radius: var(--radius);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.ailog-row[data-kind="attack"] .ailog-kind {
+  color: var(--bg);
+  background: var(--accent);
+}
+
+.ailog-row[data-kind="hold"] .ailog-kind {
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+}
+
+.ailog-target {
+  width: 120px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font);
+}
+
+.ailog-score {
+  width: 46px;
+  flex: 0 0 auto;
+  text-align: right;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.ailog-odds {
+  width: 92px;
+  flex: 0 0 auto;
+  text-align: right;
+  color: var(--ink-dim);
+}
+
+.ailog-odds.is-short { color: var(--warn); }
+
+.ailog-src {
+  width: 56px;
+  flex: 0 0 auto;
+  text-align: right;
+  color: var(--ink-faint);
+}
+
+/* Why a power did nothing is the entire point of the panel (§6: "a passive AI
+   is otherwise undebuggable"), so the reason takes the rest of the line and is
+   never truncated. */
+.ailog-reason {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-left: 4px;
+  color: var(--warn);
+  font-family: var(--font);
+  white-space: normal;
+}
+
+/* Terms breakdown — behind a click so the rows stay one line each. */
+.ailog-terms {
+  padding: 6px 14px 8px 72px;
+  border-top: 1px solid var(--border-inner);
+}
+
+.ailog-terms[hidden] { display: none; }
+
+.ailog-term {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 1px 0;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--ink-dim);
+}
+
+/* Sorted by absolute contribution descending, so the first row IS the answer to
+   "which term dominated". Marked so it reads that way at a glance. */
+.ailog-term.is-dominant { color: var(--ink); }
+
+.ailog-term-name {
+  width: 110px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ailog-term-track {
+  width: 180px;
+  flex: 0 0 auto;
+  height: 6px;
+  background: var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ailog-term-bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.ailog-term-bar.is-neg { background: var(--warn); }
+
+.ailog-term-val {
+  width: 56px;
+  flex: 0 0 auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ailog-term-none,
+.ailog-term-foot {
+  padding-top: 3px;
+  color: var(--ink-faint);
+  font-family: var(--font-num);
+  font-size: 10px;
+}
+
+/* The bottom bar's #ticker sits in an auto-height flex item taller than the
+   52px bar, so its older entries spill upward out of the bar. That spill used
+   to land on dark sea and go unnoticed; with the log open it lands on the rows.
+   A stacking context on the panel keeps the log legible without touching the
+   ticker's own rules. */
+.ailog {
+  position: relative;
+  z-index: 1;
+}

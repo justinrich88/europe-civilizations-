@@ -58,6 +58,23 @@ function _simPhaseFn(name) {
   return null;
 }
 
+// Phase 0 — AI input, before growth.
+//
+// This is deliberately NOT in SIM_PHASES. The other five phases are required
+// and stepTick throws if one is missing; the AI is OPTIONAL, because a build
+// with no ai/ directory must still run or every sim test becomes hostage to the
+// AI (01-data-schema.md, "AI API — pinned names").
+//
+// Before growth rather than after, because an AI order is the equivalent of a
+// player order arriving between ticks — and player orders are issued against
+// the numbers currently on screen, which are last tick's. Putting the AI after
+// growthTick would let it spend units the player could not yet see.
+function _simAiFn() {
+  var g = (typeof globalThis !== 'undefined') ? globalThis : null;
+  if (g && typeof g.aiTick === 'function') return g.aiTick;
+  return (typeof aiTick === 'function') ? aiTick : null;
+}
+
 function stepTick(state) {
   // A missing phase must FAIL LOUDLY. A no-op phase that reads as working is
   // the worst possible outcome here: growth that silently does not grow looks
@@ -74,6 +91,20 @@ function stepTick(state) {
   // that is already final, so a finished game is frozen and stepTick is a
   // no-op — safe to call from a loop that has not noticed yet.
   if (state.winner) return state;
+
+  // `state.aiEnabled === false` silences the AI for this state. Absent means
+  // enabled, so nothing that existed before phase 0 had to change.
+  //
+  // This exists for TEST ISOLATION. The moment aiTick joined the tick, every
+  // sim test became a test of "the sim plus an AI playing inside it" — and one
+  // of them started failing, because a fixture that set a capital's garrison
+  // and asserted it never shrank was watching the AI legitimately SPEND those
+  // units. The assertion was a proxy for "no decay" and the proxy broke; the
+  // AI was correct throughout (it stopped at 14.1 units against a
+  // HOME_GARRISON_FLOOR of 14.0). A sim test with an opponent in it is not
+  // testing the sim.
+  var ai = _simAiFn();
+  if (ai && state.aiEnabled !== false) ai(state);
 
   for (var i = 0; i < SIM_PHASES.length; i++) {
     _simPhaseFn(SIM_PHASES[i])(state);

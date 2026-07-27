@@ -223,6 +223,7 @@ function loopFrame(nowMs) {
     if (typeof renderLive === 'function') safeRender('renderLive', renderLive, state);
     if (typeof renderWaves === 'function') safeRender('renderWaves', renderWaves, state);
     if (typeof renderHud === 'function') safeRender('renderHud', renderHud, state);
+    if (typeof renderAiLog === 'function') safeRender('renderAiLog', renderAiLog, state);
   }
 }
 

@@ -9,16 +9,22 @@
 //   * mean game length
 //   * mean time-to-first-station-flip
 //
-// THE DRIVER HERE IS A PLACEHOLDER. ai/ai.js does not exist until Milestone 4.
-// Until it does, every power is played by `greedyOrder()` below: nearest weak
-// target, everything nearby thrown at it. It is deliberately stupid, and its
-// only job is to keep the board moving so the SIM's numbers can be read. Once
-// ai/ai.js lands this file should call it instead and the win-rate table
-// becomes a statement about strategy rather than about geography.
+// TWO DRIVERS, chosen automatically:
 //
-// Read the win-rate column as "how good is this power's starting position
-// against an opponent with no plan" — which is still exactly what you want to
-// know before tuning anything.
+//   * ai/ai.js if it loaded. sim/step.js calls aiTick() as phase 0, so this
+//     file does nothing but tick — the real AI plays every power and the
+//     win-rate column becomes a statement about STRATEGY.
+//
+//   * `greedyOrder()` below otherwise. Nearest weak target, everything nearby
+//     thrown at it. Deliberately stupid; its only job is to keep the board
+//     moving so the SIM's numbers can be read while ai/ is unwritten. Against
+//     it the win-rate column means "how good is this power's starting position
+//     against an opponent with no plan" — still worth knowing, but not balance.
+//
+// Which one ran is printed in the header of every report. Never read a table
+// without checking that line: the two drivers produce completely different
+// numbers and confusing them would send a balance pass in the wrong direction.
+// Force the placeholder with --greedy to compare the two.
 
 'use strict';
 
@@ -35,7 +41,8 @@ const SCRIPTS = [
   'data/tuning.js',
   'data/map.js', 'data/stations.js', 'data/scenario.js',
   'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
-  'sim/relations.js', 'sim/victory.js', 'sim/step.js', 'ai/ai.js',
+  'sim/relations.js', 'sim/victory.js', 'sim/step.js',
+  'ai/score.js', 'ai/ai.js',
 ];
 
 for (const rel of SCRIPTS) {
@@ -69,6 +76,12 @@ const GAMES = Number(argv[0]) > 0 ? Number(argv[0]) : 200;
 const SEED0 = flag('seed', 1000);
 const MAX_TICKS = flag('ticks', 60000);          // 100 sim-minutes; a hard stop
 const CSV = argv.includes('--csv');
+
+// The real AI drives itself from inside stepTick (phase 0), so when it is
+// present this harness must NOT also issue orders — doing both would double the
+// action budget and quietly invalidate BAL.AI.MAX_ORDERS_PER_MINUTE, which is
+// the constant that stops the AI out-clicking the player.
+const USE_AI = !argv.includes('--greedy') && typeof aiTick === 'function';
 
 // ── the placeholder driver ──────────────────────────────────────────────
 
@@ -155,7 +168,7 @@ function playGame(seed) {
   let t = 0;
 
   for (; t < MAX_TICKS && !state.winner; t++) {
-    for (const pid of players) {
+    for (const pid of USE_AI ? [] : players) {
       if (!state.powers[pid].alive) continue;
       if (t < nextAct[pid]) continue;
       const cmd = greedyOrder(state, pid);
@@ -248,7 +261,10 @@ function main() {
   console.log(line);
   console.log('  BALANCE  —  ' + GAMES + ' games, seeds ' + SEED0 + '..' +
     (SEED0 + GAMES - 1) + ', ' + secs.toFixed(1) + 's');
-  console.log('  driver: greedy placeholder (ai/ai.js not written yet)');
+  console.log('  driver: ' + (USE_AI
+    ? 'ai/ai.js — real AI, phase 0 of stepTick'
+    : 'greedy placeholder' +
+      (typeof aiTick === 'function' ? ' (forced with --greedy)' : ' (ai/ai.js not loaded)')));
   console.log(line);
   console.log('');
   console.log('  power                    wins   win rate   vs even');

@@ -265,3 +265,93 @@ The preview **must** call these rather than estimating, or the ETAs shown before
 **Input funnels to `applyCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls `applyCommand(GAME, cmd)` — the same entry point the AI uses. There is no second path by which the board changes, which is what keeps replay and headless testing free.
 
 Nothing in `render/` or `app/` may mutate state directly. Read freely, write only through `applyCommand`.
+
+---
+
+## AI API — pinned names
+
+Milestone 4. Same discipline, same reason. The AI is split across two files so
+the *scoring* question ("which station is worth taking?") and the *execution*
+question ("can I actually take it, and with what?") can be reasoned about — and
+changed — independently. `ai/score.js` loads first and knows nothing about
+commands or cadence; `ai/ai.js` loads second and owns everything that mutates.
+
+**The AI is optional.** `test/node.js` and `tools/balance.js` skip missing
+files, and `stepTick` calls `aiTick` only if it is defined. A build with no
+`ai/` directory must still run, or every sim test becomes hostage to the AI.
+
+| Global | File | Contract |
+|---|---|---|
+| `aiTick(state)` | `ai/ai.js` | **Phase 0**, before `growthTick`. Runs the cadence for every alive non-neutral power, calls `aiDecide`, and applies the result through `applyCommand`. The only thing in `ai/` that mutates. |
+| `aiDecide(state, pid)` | `ai/ai.js` | Returns a **decision object** (below) or `null` if this power is not eligible to act at all. **Must not mutate `state`** apart from drawing from `state.rng`, so a decision can be inspected in a test without playing it. |
+| `aiContext(state, pid)` | `ai/score.js` | Per-decision cached facts. Built once per decision and passed to every candidate, so scoring twelve targets does not redo the same BFS twelve times. |
+| `aiCandidates(state, pid, ctx)` | `ai/score.js` | Scored candidate targets, **sorted by score descending**, truncated to `BAL.AI.CANDIDATES_PER_DECISION`. |
+| `aiScoreTarget(state, pid, sid, ctx)` | `ai/score.js` | Utility of one target. Returns `{ score, terms }`. Pure — no state mutation, no rng. |
+| `aiDecisions(state, pid, n)` | `ai/ai.js` | The last `n` log entries, newest last. `pid` `null` means all powers. The debugging surface §6 demands. |
+
+### `aiContext(state, pid)` — the shared shape
+
+Both files read this, so it is contractual rather than an implementation detail:
+
+```js
+{
+  pid:         'ger',
+  personality: { aggression, minOddsMul, leaderWeight, ... },  // never null; a
+                                                               // power with no
+                                                               // declared type
+                                                               // gets neutral 1s
+  own:      ['aal', 'ber', ...],   // sorted station ids this power holds
+  hops:     { sid: n },            // link-hops from the NEAREST owned station.
+                                   // BFS capped at max(TARGET_MAX_HOPS,
+                                   // SOURCE_MAX_HOPS); absent means "further".
+  leader:      'rus' | null,       // current territory-count leader
+  leaderShare: 0.34,               // leader's share of all owned territories
+  ownForces:   1842,               // total units, for commitment sizing
+}
+```
+
+### The decision object
+
+```js
+{
+  tick, power,
+  kind:    'attack' | 'hold',
+  target:  'bru' | null,
+  score:   14.2,
+  terms:   { multiplier: 3.0, weakness: 2.1, proximity: 1.2, ... },
+  odds:    2.4,          // estimated attacker:defender POWER ratio, not units
+  minOdds: 1.19,         // BAL.AI.MIN_ODDS x personality.minOddsMul
+  sources: ['aal','col'],
+  fraction: 0.75,
+  reason:  null | 'no-candidates' | 'odds-too-low' | 'no-sources' | 'garrison-floor',
+  rejected: []           // populated only when BAL.AI.LOG_REJECTED
+}
+```
+
+`kind: 'hold'` with a `reason` is a **real, logged decision**, not an absence of
+one. A power that does nothing for two minutes must be able to say why it did
+nothing, or it is indistinguishable from a power whose code never ran — which
+is the single hardest AI bug to see (§6: *"a passive AI is otherwise
+undebuggable"*).
+
+### Log storage
+
+`state.aiLog` is a plain array used as a **ring buffer** capped at
+`BAL.AI.LOG_MAX`. It lives inside the state so a snapshot still explains
+itself, and so a Monte Carlo batch cannot leak memory across hundreds of games.
+Trim from the front on push.
+
+### Rules the AI inherits
+
+- **Orders go through `applyCommand` and nowhere else.** The AI has no
+  privileged path to the board. If a volley would be illegal for the player it
+  is illegal for the AI, and `applyCommand`'s `rejected` array is the AI's
+  feedback channel.
+- **Odds are a POWER ratio, not a unit ratio.** Infantry defends at 1.2 and
+  attacks at 1.0, so 2:1 in units is only 1.67:1 in power. Comparing unit counts
+  makes `MIN_ODDS` mean something different from what its comment says and the
+  AI attacks into fights it loses. Use `stationPower(state, sid, side)`.
+- **`neutral` is a real power id** in `POWERS` and a legitimate return from
+  `territoryControl(...).owner`. It is never an actor: it takes no decisions,
+  and `atWar` does not gate attacking it.
+- Nothing in `ai/` may touch `document`, `Math.random` or `Date.now`.

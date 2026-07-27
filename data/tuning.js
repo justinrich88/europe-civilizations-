@@ -551,10 +551,35 @@ const BAL = {
 
     // --- Relation drivers, per update, before personality weighting ---
 
-    // Shared border pressure: hostility added per enemy unit massed on a
-    // shared frontier, normalised by the AI's own frontier strength. Where
-    // you mass is a statement (§6).
-    BORDER_PRESSURE: 6.0,
+    // Shared border pressure: hostility from enemy force massed on a shared
+    // frontier. Where you mass is a statement (§6), and this is driver #1.
+    //
+    // DO THE ARITHMETIC BEFORE CHANGING THIS. The term is
+    // BORDER_PRESSURE x borderWeight x pressure, where `pressure` is a SHARE in
+    // 0..1 (theirs / (theirs + mine + 1)), not a unit count. So this constant is
+    // the most hostility a totally lopsided frontier can generate. Reaching war
+    // means moving RELATION_START (+10) to WAR_THRESHOLD (-40) — fifty points.
+    //
+    // It was 6.0, which is 12% of that. Driver #1 of three was therefore
+    // MATHEMATICALLY INCAPABLE of ever causing a war, and only the leader term
+    // (45.0) could — a term that fires at whoever is ahead regardless of whether
+    // you can reach them. tools/balance.js showed the consequence: powers ate
+    // the neutrals, then logged `not-at-war` forever. 0 of 12 games ended.
+    //
+    // Swept 6 / 25 / 45 / 55 / 65 / 80 / 110 over 6 games each:
+    //
+    //     BP    games finished   live wars   holds "not-at-war"
+    //      6         0/6            0.0            88%
+    //     45         0/6            3.3            81%
+    //     65         4/6            7.2            37%
+    //    110         6/6           10.2             1%
+    //
+    // 110 finishes every game and is WRONG: at 1% peacetime the Concert is
+    // decorative and §6's whole emergent-diplomacy idea is gone. 65 is the knee
+    // — games resolve, capitulations happen, and peace is still a real state the
+    // board can be in. This is the anti-snowball lever's counterweight; if the
+    // board ever freezes again, look here first.
+    BORDER_PRESSURE: 65.0,
 
     // Hostility added when this power's station is attacked, scaled by the
     // fraction of the garrison lost. Recent aggression should dominate the

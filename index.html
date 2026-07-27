@@ -94,10 +94,17 @@
 <script src="sim/victory.js"></script>
 <script src="sim/step.js"></script>
 
+<!-- ai/ is optional: sim/step.js calls aiTick only if it is defined, so the
+     game still runs with these two tags removed. score.js first — ai.js reads
+     aiCandidates/aiContext from it. -->
+<script src="ai/score.js"></script>
+<script src="ai/ai.js"></script>
+
 <script src="render/map.js"></script>
 <script src="render/waves.js"></script>
 <script src="render/hud.js"></script>
 <script src="render/select.js"></script>
+<script src="render/ailog.js"></script>
 
 <script src="app/loop.js"></script>
 <script src="app/main.js"></script>

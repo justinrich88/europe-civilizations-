@@ -278,9 +278,25 @@ function relationsTick(state) {
 
 // Convenience read for the AI and the HUD, so the hysteresis rule (§6) lives in
 // exactly one place instead of being re-derived at every call site.
+// WAR IS MUTUAL. The latch above is per-direction — each power's own relation
+// decides when IT wants a war and when IT will stand down — but the STATE of
+// war between two powers is symmetric, because being attacked is not something
+// you can decline.
+//
+// Read one-directionally this was a real deadlock, found by tools/balance.js:
+// Britain and Italy both declared on Russia (the leader term did its job) while
+// Russia, hostile to nobody, stayed formally at peace with them. Russia would
+// therefore neither retaliate nor expand, and the two powers at war with it
+// could not reach it. Every power logged `not-at-war` forever and no game in a
+// 12-game batch ever ended.
+//
+// The consequence of OR-ing is deliberate and correct: a war persists while
+// EITHER side still wants it, and ends only when both have drifted back above
+// PEACE_THRESHOLD. One side cannot unilaterally declare itself out of a war it
+// is losing.
 function atWar(state, a, b) {
-  var p = state.powers[a];
-  return !!(p && p.wars && p.wars[b]);
+  var pa = state.powers[a], pb = state.powers[b];
+  return !!((pa && pa.wars && pa.wars[b]) || (pb && pb.wars && pb.wars[a]));
 }
 
 // Display name, falling back to the id so the log never prints "undefined"

@@ -54,8 +54,24 @@ function collectData() {
 // Which sim entry points exist yet. Probing a few plausible names for the tick
 // function keeps this file from having to be edited the day sim/step.js lands.
 function simFns() {
+  var _ng = (typeof newGame === 'function') ? newGame : null;
   return {
-    newGame: (typeof newGame     === 'function') ? newGame     : null,
+    // Sim-suite boards are AI-QUIET BY CONSTRUCTION. aiTick runs as phase 0 of
+    // stepTick, so without this every sim fixture has seven opponents playing
+    // inside it and the suites stop measuring what they claim to.
+    //
+    // Done here rather than in _run() deliberately: four sim tests call
+    // fns.step() directly, so a flag set by the run helper would leave exactly
+    // those four confounded — the quiet ones, which is the worst place for a
+    // gap. Attaching it to state CREATION covers every path by which a suite
+    // can advance a board.
+    //
+    // test/ai-tests.js builds its own states and must NOT use this.
+    newGame: _ng ? function (seed) {
+      var s = _ng(seed);
+      s.aiEnabled = false;
+      return s;
+    } : null,
     apply:   (typeof applyCommand === 'function') ? applyCommand : null,
     step:    (typeof stepTick    === 'function') ? stepTick
            : (typeof simStep     === 'function') ? simStep
@@ -241,6 +257,9 @@ function runAllTests() {
   suiteSimDisconnect(d);
   suiteSimCapitulation(d);
   suiteSimCommands(d);
+
+  // AI family — test/ai-tests.js; skips loudly until ai/ lands.
+  if (typeof suiteAI === 'function') suiteAI(d);
 
   return TEST_RESULTS;
 }

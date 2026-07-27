@@ -247,3 +247,92 @@ Two traps inside the workaround:
   Driving frames on a paused game advances nothing and reads as the same
   failure.
 - Verify with `document.visibilityState` before concluding a loop is broken.
+
+---
+
+## 11. A tuning constant whose stated job is arithmetically impossible
+
+`BAL.AI.BORDER_PRESSURE` was `6.0`. Its comment called it driver #1 of the
+balance of power — *"where you mass is a statement"*. It could never once have
+caused a war.
+
+The term is `BORDER_PRESSURE × borderWeight × pressure`, where `pressure` is a
+**share in 0..1**, not a unit count. So 6.0 is the *most* hostility a totally
+one-sided frontier can generate. Reaching war means moving `RELATION_START`
+(+10) to `WAR_THRESHOLD` (−40) — **fifty points**. Driver #1 could contribute
+six of them, or 12%.
+
+Only `LEADER_WEIGHT` (45.0) could actually declare a war, and it fires at
+whoever is *ahead*, regardless of whether you can reach them. `tools/balance.js`
+showed the result: Britain and Italy declared on Russia across the map, could not
+touch it, and every power logged `not-at-war` forever. **0 of 12 games ended.**
+
+Nothing failed. All 102 assertions passed. The suite had no opinion about
+whether a constant could reach the threshold it existed to reach.
+
+**Before trusting a tuning constant, multiply it out against the thresholds it
+has to move.** A weight is only meaningful relative to the gap it must close,
+and the arithmetic belongs in the comment next to the number — the tuned value
+now carries its own sweep table so this cannot silently regress.
+
+---
+
+## 12. `_ai` was not a specific enough prefix — #9 happened again, live
+
+Two agents wrote `ai/score.js` and `ai/ai.js` in parallel, both told to prefix
+private helpers `_ai`. Both independently chose `_aiAdjacency`, `_aiPersonality`
+and `_aiCandSid`. `ai/ai.js` loads last, so **its copies silently won and the
+scorer ran against helpers it had never seen.**
+
+This is known-issue #9 recurring despite the rule written to prevent it, which
+means the rule was wrong: a shared prefix does not prevent collisions between
+files that share a *domain* — it concentrates them, because both authors are
+naming the same concepts.
+
+**Prefix by FILE, not by subsystem** (`_aiAct*` in ai.js, `_aiScore*` in
+score.js). And a duplicate-global sweep is now a standing check, not a habit:
+
+```sh
+grep -ho "^function [A-Za-z_][A-Za-z0-9_]*" core/*.js sim/*.js ai/*.js \
+  render/*.js app/*.js | sort | uniq -d
+```
+
+---
+
+## 13. Adding a phase to the tick silently confounded every existing test
+
+`aiTick` became phase 0 of `stepTick`. Instantly, every sim test was testing
+*the sim plus seven AIs playing inside it*.
+
+One test failed: a fixture set a capital's garrison and asserted it never
+shrank. It was watching the AI legitimately **spend** those units. The assertion
+was a proxy for "no decay" and the proxy broke — the AI was correct throughout
+(it stopped at 14.1 units against a `HOME_GARRISON_FLOOR` of 14.0).
+
+The failure was the lucky part. **The other 78 tests kept passing while
+measuring something different from what they claimed**, and nothing would have
+told us.
+
+Fixed by making sim-suite boards AI-quiet **at state creation**
+(`simFns().newGame` sets `state.aiEnabled = false`) rather than in the run
+helper — four sim tests call `fns.step()` directly, so a flag set by `_run()`
+would have left exactly those four confounded.
+
+**When you add a phase to a shared tick, every existing test of that tick
+changed meaning.** Isolate at construction, and verify the isolation is
+load-bearing by removing it and watching something fail.
+
+---
+
+## 14. War was stored one-directionally
+
+`atWar(state, a, b)` read `state.powers[a].wars[b]` only. Britain could be at
+war with Russia while Russia sat formally at peace with Britain — so Russia
+neither retaliated nor expanded, and the deadlock in #11 was deeper than the
+tuning alone.
+
+The per-direction *latch* is right (each power decides when it wants a war and
+when it will stand down). The *state of war* is not a per-direction fact:
+**being attacked is not something you can decline.** `atWar` now ORs both
+directions, so a war persists while either side still wants it and ends only
+when both have drifted back above `PEACE_THRESHOLD`.

@@ -179,6 +179,12 @@ function boot() {
 
   const seed = readSeed();
   window.GAME = newGame(seed);
+
+  // Hand the AI the one power it must NOT drive. ai/ai.js skips state.human;
+  // absent (headless tests, tools/balance.js) means every power is AI-driven,
+  // which is what a batch wants. Without this the player watches their own
+  // cities launch attacks they never ordered.
+  window.GAME.human = window.PLAYER;
   console.log('[app/main] new game, seed ' + seed + ', player ' + window.PLAYER);
 
   // Static layers first: renderBoard() is the expensive full rebuild and is
@@ -194,6 +200,10 @@ function boot() {
 
   // Written by another agent in parallel; may not exist yet.
   if (typeof initSelection === 'function') tryStep('initSelection', initSelection);
+
+  // AI decision log (render/ailog.js) — hidden until `L`. Optional like the AI
+  // it inspects, so it is guarded the same way.
+  if (typeof initAiLog === 'function') tryStep('initAiLog', initAiLog);
 
   wireSpeedControls();
   wireSendControls();
