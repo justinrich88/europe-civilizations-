@@ -146,3 +146,38 @@ Two lessons:
    `tools/build-map.js` derives the map from Natural Earth in one pass and is
    both more accurate and less code than the nine files it replaced. The seam
    contract was an elaborate solution to a problem TopoJSON does not have.
+
+---
+
+## 8. A test that passes with and without the fix is worse than no test
+
+`tools/balance.js` found a real defect: a capitulated France went on capturing
+stations ~40,000 ticks after surrendering, leaving a dead power holding ground
+no victory condition could clear. The game literally could not end.
+
+Cause: `capitulate()` cleared the power's in-flight `state.waves`, but a stack
+that has already LANDED lives in `station.attackers`, which is a different
+place. Those kept fighting for a country that no longer existed.
+
+The lesson is not the bug — it is the first test written for it. That test
+parked the dead power's stack on an **undefended** station, and it passed
+whether or not the fix was present. The tick order is growth → movement →
+combat → relations → victory, so against an empty station the capture resolves
+in phase 3 and the capitulation in phase 5 of the *same tick* cleans it up. The
+zombie only appears when the battle **outlives the surrender**, which needs a
+defended target.
+
+Two rules that follow:
+
+1. **Always run a new regression test against the unfixed code.** Removing the
+   fix and confirming the test goes red takes thirty seconds and is the only
+   evidence the test tests anything. Here it went from "3/3 passed" — identical
+   output with and without the fix — to a clean failure naming the station.
+2. **Bugs that live in phase ordering need a scenario that spans ticks.**
+   Anything resolving inside one tick gets swept up by a later phase and hides
+   the defect. The hand-written scenario picked the easy case precisely because
+   it was easy to construct.
+
+Also worth noting: no hand-written assertion found this. Hundreds of headless
+games did, and only because a stalled batch was investigated rather than
+written off as the placeholder AI being bad at its job.

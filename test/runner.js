@@ -1283,6 +1283,40 @@ function suiteSimCapitulation(d) {
     assert(s.powers[victim].alive === false, victim + ' should be marked dead');
   });
 
+  // Regression: a capitulated power must not go on conquering. Its landed-but-
+  // still-fighting stacks live in station.attackers, NOT in state.waves, so
+  // clearing waves alone left a dead power able to capture a station tens of
+  // thousands of ticks after surrendering. The result was a zombie holding
+  // ground no victory condition could clear, and games that never ended.
+  // Found by tools/balance.js, not by any hand-written scenario.
+  test('capitulation stands down landed stacks too, not just waves in flight', function () {
+    var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
+    var victim = pids[0], victor = pids[1];
+    var s = fns.newGame(23);
+    var sids = Object.keys(s.stations).sort();
+
+    // Strip the victim down to nothing and hand over its capital.
+    sids.forEach(function (sid) { if (s.stations[sid].owner === victim) s.stations[sid].owner = victor; });
+
+    // The target must be DEFENDED. Against an empty station the capture
+    // resolves in phase 3 and the capitulation in phase 5 of the SAME tick
+    // sweeps it up correctly — the bug does not appear. It takes a battle
+    // still running when the country falls, which is exactly the situation a
+    // hand-written test is least likely to construct.
+    var prey = sids.filter(function (sid) { return s.stations[sid].owner === 'neutral'; })[0];
+    assert(!!prey, 'need a neutral station to attack');
+    s.stations[prey].units = { infantry: 6, artillery: 0, armour: 0 };
+    s.stations[prey].attackers = { };
+    s.stations[prey].attackers[victim] = { infantry: 30, artillery: 0, armour: 0 };
+
+    _run(fns, s, B.CAPITULATE_CHECK_INTERVAL * 2 + 20);
+
+    assert(s.powers[victim].alive === false, victim + ' should be dead');
+    var held = sids.filter(function (sid) { return s.stations[sid].owner === victim; });
+    assertEqual(held.length, 0,
+      victim + ' capitulated but still holds ' + held.join(',') + ' — a dead power conquered ground');
+  });
+
   test('a power that keeps its capital does not capitulate', function () {
     var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
     var victim = pids[0], victor = pids[1];

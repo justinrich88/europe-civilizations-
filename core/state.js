@@ -142,10 +142,24 @@ function newGame(seed) {
 // point: a country can be meaningfully yours while still being fought over.
 // ---------------------------------------------------------------------------
 
+// Which stations sit in which territory never changes -- it is static map
+// data. Rebuilding the list on every call made territoryControl() O(stations)
+// and victoryTick() O(territories x stations) EVERY TICK, which dominated the
+// Monte Carlo harness. Cached against the id list it was built from, so
+// indexIds() invalidates it for free.
+var _stationsInCache = null;
+var _stationsInFor = null;
+
 function stationsIn(territoryId) {
-  return STATION_IDS.filter(function (sid) {
-    return STATIONS[sid].territory === territoryId;
-  });
+  if (_stationsInFor !== STATION_IDS) {
+    _stationsInCache = {};
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var t = STATIONS[STATION_IDS[i]].territory;
+      (_stationsInCache[t] || (_stationsInCache[t] = [])).push(STATION_IDS[i]);
+    }
+    _stationsInFor = STATION_IDS;
+  }
+  return _stationsInCache[territoryId] || [];
 }
 
 // Returns { owner, tier, held, total }.

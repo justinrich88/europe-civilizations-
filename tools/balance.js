@@ -54,6 +54,10 @@ if (typeof stepTick !== 'function' || typeof applyCommand !== 'function') {
   process.exit(2);
 }
 
+// POWER_IDS / STATION_IDS are empty until this runs. newGame() calls it too,
+// but the batch reads POWER_IDS before the first game exists.
+indexIds();
+
 // ── args ────────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2);
