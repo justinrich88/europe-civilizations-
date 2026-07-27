@@ -31,7 +31,11 @@
 
   <!-- ── board ───────────────────────────────────────────────────────── -->
   <main class="board-wrap">
-    <svg id="board" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet"
+    <!-- Authored geometry occupies x 48-790, y 40-544 of the nominal 1000x700
+         frame (see docs/design/01-data-schema.md), so a 0 0 1000 700 viewBox
+         wastes ~47% of the canvas. Framed to the content plus 20 units of
+         padding. Vertices are unchanged — this is presentation only. -->
+    <svg id="board" viewBox="28 20 782 544" preserveAspectRatio="xMidYMid meet"
          role="img" aria-label="1914 Europe strategic map">
       <defs id="board-defs"></defs>
       <g id="g-territories"></g>
