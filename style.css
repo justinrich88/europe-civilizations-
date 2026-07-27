@@ -464,7 +464,7 @@ html, body {
    still clearly not a tint, now clearly not nothing. */
 .hatch-line {
   stroke: #d3dcea;
-  stroke-opacity: 0.24;
+  stroke-opacity: 0.4;
   stroke-width: 1.7;
 }
 

@@ -251,6 +251,17 @@ Same contract discipline as the sim above, for the same reason: three agents bui
 
 **Layer ownership.** `#g-territories`, `#g-borders`, `#g-links`, `#g-labels` belong to `render/map.js`. `#g-stations` belongs to `render/map.js` for creation and `renderLive` for updates. `#g-waves` belongs to `render/waves.js`. `#g-ui` belongs to `render/select.js` (marquee rectangle, preview lines, ETA labels). No file touches another's layer.
 
+**`#g-ui` must be `pointer-events: none`.** It is the last `<g>` in `index.html`, so it paints over `#g-stations`. Without that rule the selection carets and preview lines sit on top of the very node you are trying to click and swallow the commit — the game becomes unplayable in a way that produces no error. This is a property of the *layer*, not of whichever file happens to draw into it, so it survives a change of owner or a change of layer order.
+
+Two more helper contracts, both in `sim/commands.js` and both load-bearing for the preview lines:
+
+| Global | File | Contract |
+|---|---|---|
+| `commandRoute(fromSid, toSid)` | `sim/commands.js` | Route a send will take; `null` if unreachable. Prefers `routeBetween` when `sim/movement.js` is loaded. |
+| `routeEtaTicks(route, units)` | `sim/commands.js` | Estimated ticks for a stack to walk a route, at the speed of its slowest unit type. |
+
+The preview **must** call these rather than estimating, or the ETAs shown before a commit will not match the waves the commit produces — which makes the preview worse than nothing, since avoiding defeat in detail is exactly what it exists for. A rename here degrades the preview to blank lines without failing any test.
+
 **Input funnels to `applyCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls `applyCommand(GAME, cmd)` — the same entry point the AI uses. There is no second path by which the board changes, which is what keeps replay and headless testing free.
 
 Nothing in `render/` or `app/` may mutate state directly. Read freely, write only through `applyCommand`.
