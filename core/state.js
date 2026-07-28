@@ -96,6 +96,26 @@ function newGame(seed) {
     waves: [],
     battles: {},
     log: [],
+    // FOG MEMORY — what each power has SEEN, and when. Written only by
+    // observeTick() (core/vision.js), read only by believedStation().
+    //
+    // This is the one part of fog that is stored, and the distinction is
+    // exact. VISIBILITY is derived and never stored: it is a pure function of
+    // ownership, LINKS and station vision, and core/vision.js recomputes it
+    // per call. MEMORY is a log of PAST observation, and no snapshot of the
+    // present can reconstruct it — "France saw Brussels at t=3120" is not a
+    // fact about the board today. Something unreconstructable has to be
+    // stored, and it lives HERE for the same three reasons state.rng does:
+    // the AI must get the same fog the player does (memory in the renderer
+    // would give the AI binary fog and the player ternary), tools/balance.js
+    // and test/node.js load no render/ file so anything outside state has
+    // zero headless coverage, and snapshot() is JSON of this object alone, so
+    // a restored game would otherwise diverge from the run it came from.
+    //
+    // SPARSE, BY POWER: { pid: { sid: { o, u, c, t } } }. An absent power or
+    // an absent station means "never seen" — level 0 — so the empty object a
+    // fresh game starts with is exactly correct, not a placeholder.
+    seen: {},
     // Standing-order accounting (sim/movement.js). Counters, not a log: they
     // live in state so a snapshot still explains itself and so a headless batch
     // can assert on them without instrumenting the sim.

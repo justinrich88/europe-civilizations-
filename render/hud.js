@@ -75,11 +75,26 @@ var _hudTickerLastTail = null; // identity of the newest log entry
 var _hudTickerKeys = [];       // per-row identity, so we only repaint on change
 var _hudTickerTopKey = null;   // identity of row 0, to fire the enter animation
 
-// Five rows, not eight. The ticker is auto-height and spills upward out of the
-// 52px bar over the sea, so more rows is not free real estate — it is a taller
-// column of grey text sitting on the board. Five is enough to see a burst and
-// short enough that the fade-by-age ramp in style.css still separates them.
-const HUD_TICKER_MAX = 5;
+// TWO rows, not five. This constant is the JS half of `--ticker-h` in
+// style.css: the slot is 32px and `.ticker-list li` has a 16px line-height, so
+// two is what the bar can show. Keep them in step — the DOM should contain
+// exactly what is on screen, or "how many events are visible" stops being a
+// thing anyone can measure, which is how this feature shipped invisible.
+//
+// It was five, and the header of this file already said why that was wrong:
+// more rows is not free real estate, it is a taller bar eating the board. It
+// was wrong in fact as well as in principle — five auto-height rows grew the
+// bottom bar from 52px to 109px at 1280px, spending 56px of Europe on gossip
+// (00-vision.md §8), while at the 800px window the game is actually played at
+// the ticker was `display:none` and showed nothing at all.
+const HUD_TICKER_MAX = 2;
+
+// How far back hudTickVisible() may reach to rescue a 'major'. Two rows is a
+// narrow window and the sim can put two captures through it in a second, so
+// without this a capitulation or an elimination — the loudest things that can
+// happen in a match — is gone before it can be read. Six rows of slack is about
+// a minute of a busy board at 4x.
+const HUD_TICKER_LOOKBACK = 6;
 
 // Consecutive captures by the same power inside this many ticks collapse into
 // one row. BAL.TICKS_PER_SEC is 10, so this is ~12 sim-seconds — the width of a
@@ -365,11 +380,14 @@ function hudTickMine(cap) {
 // Measured over 12 headless games (223,062 ticks): 4,356 landings, of which the
 // sim already discards the 2,219 that are sea-borne reinforcement into a port
 // the lander already holds. That leaves 178 opposed landings per game — one
-// every 104 ticks, ~10 sim-seconds. The ticker is five rows in a 52px bar over
-// the sea and the header of this file is explicit that more rows is not free
-// real estate, it is a taller bar eating the board. 178 rows a game through a
-// five-row window means the ticker is nothing but landings and a capitulation
-// never survives long enough to be read.
+// every 104 ticks, ~10 sim-seconds. The ticker is a TWO-row slot in a 57px bar
+// over the sea (HUD_TICKER_MAX, --ticker-h) and the header of this file is
+// explicit that more rows is not free real estate, it is a taller bar eating the
+// board. 178 rows a game through a two-row window means the ticker is nothing
+// but landings and a capitulation never survives long enough to be read.
+//
+// This argument was written against a five-row window and only got stronger when
+// the window shrank to two: the filter is what keeps the slot spendable at all.
 //
 // So landings are filtered by RELEVANCE, not rationed by rate:
 //
@@ -385,8 +403,10 @@ function hudTickMine(cap) {
 // Measured after the filter and the merge below, rows per game by chosen power:
 // GER 10.3, ITA 10.6, OTT 7.6, AUT 8.1, GBR 33.5, RUS 36.8, FRA 39.3 — against
 // a mean game of ~2,000 sim-seconds, i.e. one landing row every one to three
-// sim-minutes even for the most amphibious power on the board. That fits in
-// five rows alongside captures without the bar growing by a pixel.
+// sim-minutes even for the most amphibious power on the board. That fits in the
+// slot alongside captures without the bar growing by a pixel — and a landing on
+// the player's own beach is 'major', so hudTickVisible() will hold it on screen
+// past the captures that would otherwise have buried it.
 //
 // THE TIERS. Two, and they are the point of the feature:
 //
@@ -414,7 +434,7 @@ function hudTickLanding(e) {
 }
 
 // Whose landing is worth a row, and how loud. Returns null for "not the
-// player's business", which is what makes 178 events a game fit in five rows.
+// player's business", which is what makes 178 events a game fit in two rows.
 //
 // PLAYER unset (the empire picker, a harness) reads as "nobody's business" and
 // shows nothing, rather than as "everybody's". That is the safe direction: the
@@ -567,6 +587,43 @@ function hudTickRows(log, max) {
   return rows;
 }
 
+// The rows actually put on screen: the newest `max`, except that the OLDEST
+// VISIBLE SLOT is reserved for the loudest recent event.
+//
+// With five rows a capitulation had four rows of grace before it aged out. With
+// two it has one, and two unrelated powers taking a neutral city each will push
+// it off inside a sim-second — so the shrink that made the ticker fit the bar
+// would have quietly made it worse at the only job that matters. Hence: if
+// neither visible row is 'major', the most recent 'major' within
+// HUD_TICKER_LOOKBACK takes the bottom slot.
+//
+// Chronological order is preserved for free. `rows` is newest-first and the
+// promoted entry is by construction older than the one it replaces, so the array
+// stays sorted by tick descending and style.css's fade-by-age ramp keeps meaning
+// what it says. Row 0 is never touched, so the enter animation in hudTicker()
+// still fires on genuinely new events only.
+//
+// A 'major' is never SYNTHESISED here — it is only kept longer. The row already
+// existed, with its own key, tick and tokens; this decides which of the rows the
+// log produced survives the cut (known-issues #18: the readout answers the
+// question on screen or it says nothing).
+function hudTickVisible(log, max) {
+  const rows = hudTickRows(log, max + HUD_TICKER_LOOKBACK);
+  if (rows.length <= max) return rows;
+
+  const head = rows.slice(0, max);
+  for (const r of head) {
+    if (r.weight === 'major') return head;
+  }
+  for (let i = max; i < rows.length; i++) {
+    if (rows[i].weight === 'major') {
+      head[max - 1] = rows[i];
+      return head;
+    }
+  }
+  return head;
+}
+
 // Repaint one row. Children are rebuilt only when the row's identity changed,
 // which on a settled board is never — the same discipline as everything else
 // in this file.
@@ -604,7 +661,7 @@ function hudTicker(state, nodes) {
   _hudTickerLastLen = len;
   _hudTickerLastTail = tail;
 
-  const rows = hudTickRows(log, HUD_TICKER_MAX);
+  const rows = hudTickVisible(log, HUD_TICKER_MAX);
   const show = rows.length;
 
   // Grow/shrink the pool of <li> nodes to match. The list only ever changes by

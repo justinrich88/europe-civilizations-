@@ -41,6 +41,12 @@
   --territory-fill-alpha: 0.42;
   --hud-h:         44px;
   --bottom-h:      52px;
+  /* The event ticker's slot, and the ONLY thing that decides how many rows it
+     shows: two rows of the 16px line-height set on .ticker-list li. It is a
+     fixed height on purpose — an auto-height ticker grew the bottom bar to
+     109px at 1280px, i.e. 56px of Europe spent on gossip, while showing
+     nothing at all at 800px. See the ticker block for the measurements. */
+  --ticker-h:      32px;
   --radius:        4px;
 
   --font: "Inter", "Helvetica Neue", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -393,7 +399,14 @@ html, body {
   padding: 0;
   display: flex;
   flex-direction: column-reverse;
-  justify-content: flex-end;
+  /* column-reverse puts main-START at the BOTTOM, so flex-start pins the newest
+     row (DOM index 0) to the floor of the slot and stacks older ones upward.
+     Anything that does not fit overflows past the TOP and is clipped there —
+     i.e. the row that falls off is always the oldest. It used to be flex-end,
+     which only looked right because .ticker had no height to overflow; the
+     moment the slot became fixed that packed the stack to the ceiling and
+     dropped the NEWEST event off the bottom. */
+  justify-content: flex-start;
   height: 100%;
   overflow: hidden;
 }
@@ -1581,13 +1594,41 @@ html, body {
 /* ── event ticker (render/hud.js) ──────────────────────────────────────
    Peripheral awareness, not a log. render/ailog.js owns detail. */
 
-/* The bottom bar hands the ticker whatever the send control and the seven power
-   chips leave over. On a wide window that is plenty; the floor below just stops
-   a long power name from being the only thing that fits.
-   Deliberately NOT taken out of `.powers`: letting the chips shrink did buy the
-   ticker 90px and it clipped two powers off the strip, which is a worse trade —
-   who is on the board is permanent information and the ticker is transient. */
-.ticker { flex: 1 1 300px; }
+/* THE TICKER IS A FIXED SLOT, IN BOTH AXES. Measured before this rule existed:
+
+     window   .ticker width   bar height   board height   rows on screen
+     800px    0  (display:none)     53px      803px            0
+     1000px   0  (display:none)     53px      803px            0
+     1280px   603px               109px      747px            5
+     1600px   923px               109px      747px            5
+
+   Two failures, not one. Below 1080px the ticker was switched off outright, so
+   captures, capitulations, eliminations, relations AND landings were invisible
+   at the 800px window this game is played at (known-issues #17) — a whole class
+   of feature shipping unobservable. And above 1100px it was auto-height, so five
+   16px rows grew the bar to 109px and took 56px of Europe, which is exactly the
+   trade 00-vision.md §8 forbids: the board is the interface, the HUD is a thin
+   rail over the sea.
+
+   So: a HEIGHT that never depends on the window (--ticker-h, two rows), and a
+   WIDTH floor that applies at every size. The 240px floor is measured against
+   the sentences the ticker actually prints — the longest capture row is 191px at
+   11px, the longest landing row 197px, and a 'major' landing at 12px/600 is
+   228px — so 240px of box (225px of text after the rule and the padding) reads
+   the loudest events whole and ellipsises only the rare long one.
+
+   The room comes out of `.powers`, which the narrow-width block near .send-hint
+   compacts to swatch-and-count. The older note here said shrinking the chips was
+   "a worse trade — who is on the board is permanent information". That is still
+   true of DROPPING a chip; it was never true of dropping the three-letter code,
+   because the swatch is the map colour and render/hud.js already says out loud
+   that "the swatch is already carrying the identity". Seven chips still on the
+   strip, still counting territories, still struck through when a power dies. */
+.ticker {
+  flex: 1 1 300px;
+  min-width: 240px;
+  height: var(--ticker-h);
+}
 
 @media (min-width: 1100px) {
   .ticker { min-width: 300px; }
@@ -2190,11 +2231,64 @@ html, body {
   align-content: center;
 }
 
-/* The ticker is 15px wide at 800px — a border and an ellipsis. Below the width
-   where it can hold even one event it is not giving up anything it still had,
-   and the send control plus the power chips need the room. */
-@media (max-width: 1080px) {
-  .ticker { display: none; }
+/* NARROW REFLOW — the 800px window this game is played at.
+   Replaces `@media (max-width:1080px){ .ticker{display:none} }`, which was
+   written when the ticker was 15px wide there and correctly observed that 15px
+   holds no event. It fixed the symptom by deleting the feature: at 800px the
+   ticker had never once been seen, so landings, captures, capitulations,
+   eliminations and relations were all equally invisible in real play.
+
+   The arithmetic it was up against, measured at 800px (772px of content after
+   the bar's 14px padding, on the controls row — .send-hint is `flex: 1 0 100%`
+   and takes a row of its own):
+
+     send control  229px  +  power strip  383px  +  2 gaps  36px  =  648px
+     left for the ticker                                          =  124px
+
+   124px is a fifth of a sentence. So the room is taken from the strip, and from
+   the strip's LABELS rather than from its chips:
+
+     .power-name off        -7 x 21.4px  and  -7 x 5px of chip gap   -185px
+     .powers gap 10 -> 6                                              -24px
+     .bottombar gap 18 -> 10                                          -16px
+
+   which leaves the ticker ~305px at 800px — more than the 300px floor the wide
+   layout already treats as adequate. Nothing is dropped from the strip: seven
+   chips, seven live territory counts, seven map colours, and the full power name
+   still on each chip's `title`. render/hud.js's own note on those labels is that
+   they are a short code precisely because "the swatch is already carrying the
+   identity"; below 1100px we take it at its word.
+
+   The `is-dead` treatment survives the change: `line-through` now strikes the
+   count instead of the code, which is still the chip going visibly out.
+
+   NOT done, and why:
+   - Ticker on its own row. It is the obvious fix and it costs 33px of Europe at
+     the one width that cannot spare it (§8). This costs 5px — the slot is 32px
+     against a 27px controls row — and it hands 52px BACK at 1280px.
+   - Shrinking the send buttons. They are the primary control and the only click
+     target in the bar; a volley amount is not the thing to make harder to hit.
+   - Tiering the .send-hint away. Its natural width is 743px of the 772px at
+     800px, so it has nothing to give without deleting the only line on screen
+     that says the right button marches — and it already sheds its two basic
+     phrases at 700px, below the supported range. */
+@media (max-width: 1099px) {
+  .bottombar { column-gap: 10px; }
+
+  .powers { gap: 6px; }
+
+  /* The three-letter code goes; the swatch and the live territory count stay.
+     `title` on the chip (set in render/hud.js) still names the power in full. */
+  .power-chip .power-name { display: none; }
+
+  /* One extra pixel each way, so the swatch reads as the identity token it is
+     now carrying alone rather than as a bullet in front of a number. Costs 7px
+     of the 185px the labels gave back. */
+  .power-swatch { width: 10px; height: 10px; }
+
+  /* The rule and its gutter are 15px of a 305px box here; 8px is enough to keep
+     the ticker visibly separate from the strip without eating a word. */
+  .ticker { padding-left: 8px; }
 }
 
 /* Last-resort narrowing, below the supported range: drop the two phrases that

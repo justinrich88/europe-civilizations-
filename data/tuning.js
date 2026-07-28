@@ -947,6 +947,61 @@ const BAL = {
 
 
   // ===================================================================
+  // 11b. FOG OF WAR  (02-visibility-and-sea.md §1, milestone 5.7)
+  //
+  // Visibility itself has no constants: it is derived from ownership,
+  // LINKS and the `vision` field on the station record, and none of those
+  // three is tunable from here. What IS tunable is how often each power
+  // WRITES DOWN what it can see — the memory that mints level 1 (fogged:
+  // "the station as of when you last saw it").
+  // ===================================================================
+
+  FOG: {
+
+    // Ticks between observation sweeps. observeTick() runs at the top of
+    // aiTick for every alive power, so this is the fifth entry in the
+    // cadence table that ORDERS.INTERVAL documents:
+    //
+    //   CONNECTIVITY_INTERVAL       10   whole-board flood
+    //   FOG.OBSERVE_INTERVAL        10   <- this, whole-board per power
+    //   ORDERS.INTERVAL             25   standing-order sweep
+    //   AI.ACTION_INTERVAL_TICKS    40   one AI order per power
+    //   CAPITULATE_CHECK_INTERVAL   50   whole-board scan
+    //
+    // WHY IT IS THROTTLED AT ALL. A sweep is one visibleTo() plus one
+    // 108-station write pass per power. Measured on the live board, seed
+    // 100 at t=4000 (56 of 108 stations held by somebody):
+    //
+    //   one sweep, all 7 powers                  142.9us
+    //   an off-cadence call (the early return)     0.01us
+    //   amortised per tick at INTERVAL 10         14.4us
+    //   stepTick, same board                     671.5us
+    //
+    // So unthrottled it would be 21% of a tick, and at 10 it is 2.1%. A
+    // balance batch is 200 games of up to 60,000 ticks, where 19% of a
+    // tick is minutes of pure overhead on a run that already takes eight.
+    //
+    // WHY 10 IS THE RIGHT NUMBER. It costs one sim-second of extra
+    // staleness in the worst case, against an AI that only acts every 40
+    // ticks and a player reading a number that is already deliberately
+    // out of date. Nothing on the board can traverse a link in 10 ticks,
+    // so no station can change hands, be seen, and change back inside one
+    // observation gap.
+    //
+    // It is a divisor of nothing else on the list except
+    // CONNECTIVITY_INTERVAL, which it may safely phase-lock with: both are
+    // whole-board reads and neither draws from state.rng, so sharing a
+    // tick costs a slightly lumpier frame and nothing else.
+    //
+    // MUST BE AN INTEGER >= 1. The throttle is `state.tick % INTERVAL`,
+    // read off the sim clock and never off the wall clock, because a
+    // wall-clock throttle would make 1x and 4x observe on different ticks
+    // and the whole determinism guarantee would go with it.
+    OBSERVE_INTERVAL: 10,
+  },
+
+
+  // ===================================================================
   // 12. HEADLESS BALANCE HARNESS  (00-vision.md §11)
   //
   // Three numbers are the dashboard: win-rate spread across the seven

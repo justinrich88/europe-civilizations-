@@ -1058,7 +1058,27 @@ function _aiActOrderRateOk(state, memo, pid) {
 
 function aiTick(state) {
   if (!state || state.winner) return;
+
+  // FOG MEMORY, before anything else and for EVERY alive power — the human's
+  // included, which is why it sits above the decision loop and above that
+  // loop's `state.human` skip. observeTick writes state.seen and nothing else;
+  // it draws nothing from state.rng and takes no decision, so it cannot move
+  // the balance (core/vision.js).
+  //
+  // It rides aiTick rather than becoming a seventh sim phase because a new
+  // phase in the shared tick silently changes the meaning of every existing
+  // test of that tick — known-issues #13, where 78 of 79 tests kept passing
+  // while measuring something else. aiTick is already outside the six pinned
+  // phases and already runs every tick, so fog costs no new machinery.
+  //
+  // Guarded, because ai/ is declared optional and core/ must be allowed to be
+  // absent from a stripped build the same way ai/score.js is.
+  if (typeof observeTick === 'function') observeTick(state);
+
   // No scorer, no AI. A clean no-op, not a crash and not a log full of noise.
+  // Deliberately AFTER the observation sweep: a build with no scorer still has
+  // a board a player is looking at, and fog is a property of the board rather
+  // than of the AI.
   if (typeof aiContext !== 'function' || typeof aiCandidates !== 'function') return;
 
   var memo = _aiActMemo(state);
