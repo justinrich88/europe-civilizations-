@@ -264,6 +264,24 @@ var RDO_HEADER_PER_MIN = 60;
 // block collapses its working into a single sentence.
 var RDO_MAX_SOURCES = 2;
 
+// Destination lines the orders section will print under one city, INCLUDING the
+// "+N more" line when it has to cut. Not RDO_MAX_SOURCES: those two are a
+// WORKING (where a number came from) and can always be collapsed to a sentence,
+// while these are N independent facts about N different routes and collapsing
+// them is the bug this section was rewritten to fix.
+//
+// MEASURED AGAINST THE COLUMN, not guessed. .rail is 200px with 12px of padding
+// each side and .rdo-src adds a 7px rule-and-indent, so a destination line has
+// 169px; at .rdo-src's 9.5px that is ~34 characters before it wraps to a second
+// row. "× Ankara — no owned route" is 25. Four lines is ~53px of a rail that
+// measured 666px of empty column at the 800x900 window the game is played at
+// (docs/design/05-command-clarity.md §3), so the cap is not fighting for space —
+// it exists so that a player who has drawn twelve lines out of one city gets a
+// readable four and a count, rather than a wall.
+//
+// WHAT IS CUT IS NEVER ARBITRARY, and it is never silent: see _rdoOrdersLines.
+var RDO_ORDERS_MAX_LINES = 4;
+
 // A value equal to 1.0 within this is the baseline, and the baseline is not a
 // modifier. Floating-point slack rather than a design number.
 var RDO_MOD_EPS = 0.005;
@@ -695,6 +713,19 @@ function _rdoStyle(node, key, prop, value) {
   node.style[prop] = value;
 }
 
+// Same skip-if-unchanged contract as _rdoSet, for an ATTRIBUTE rather than text.
+// Needed because a 200px line has to put its full sentence somewhere, and that
+// somewhere is `title` — which is written per frame and therefore has to go
+// through the same cache as everything else in this file.
+function _rdoAttr(node, key, name, value) {
+  if (!node) return;
+  var k = key + '@@' + name;
+  if (_rdoLast[k] === value) return;
+  _rdoLast[k] = value;
+  if (value === null || value === undefined || value === '') node.removeAttribute(name);
+  else node.setAttribute(name, value);
+}
+
 function _rdoClass(node, key, cls, on) {
   if (!node) return;
   var k = key + '#' + cls;
@@ -1095,7 +1126,16 @@ function _rdoHeaderStats(state, pid) {
     // known-issues #18. supBlocked/supWhy/supWhyAt carry the explanation the
     // number on its own cannot: a zero with no reason is the same failure in a
     // smaller font.
+    //
+    // supStuck is counted PER EDGE, not per city, and it is the reason the
+    // header quotes when there is one. A city's edges disagree in the normal
+    // case: `nx.blocked` is `edges[0].blocked` — the first destination in sorted
+    // id order — so a city with two full destinations and one unreachable one
+    // used to report "no route over ground you hold" for all three, and a city
+    // shipping down two lines while a third was dead reported nothing wrong at
+    // all, because `nx.units > 0` cleared it. Both are known-issues #18.
     supN: 0, supSend: 0, supBlocked: 0, supWhy: null, supWhyAt: null,
+    supEdges: 0, supStuck: 0, supStuckWhy: null, supStuckAt: null,
   };
 
   // ONE plan for the whole power, not one per supplying city. standingOrderNext()
@@ -1136,6 +1176,17 @@ function _rdoHeaderStats(state, pid) {
         // The FIRST blocked source in sorted station order, so the summary line
         // is deterministic rather than "whichever the walk saw last".
         if (!e.supWhy) { e.supWhy = nx.blocked; e.supWhyAt = nx.target; }
+      }
+      // Per EDGE, and independent of whether the source ships anything at all.
+      var nxe = nx.edges || [];
+      for (var ei = 0; ei < nxe.length; ei++) {
+        e.supEdges++;
+        if (_rdoOrdersEdgeState(nxe[ei]) !== 'stuck') continue;
+        e.supStuck++;
+        if (!e.supStuckWhy) {
+          e.supStuckWhy = nxe[ei].blocked;
+          e.supStuckAt = nxe[ei].target;
+        }
       }
     }
 
@@ -1263,14 +1314,33 @@ function _rdoHeaderUpdate(state, n) {
   var src = [];
   if (anySupply) {
     var ships = e.supSend > 0;
+    // DEFECT 2. "nothing leaves" is a statement about the whole empire and it
+    // may only be printed when the whole empire really ships nothing. It is
+    // keyed to supSend — the SUM over every edge — so a single shipping edge
+    // anywhere puts a number here instead. Asserted, because "it is a sum so it
+    // cannot be wrong" is exactly the reasoning that produced this bug one level
+    // down, where `nx.blocked` was likewise "just the summary".
     _rdoSet(n.supply.v, 'hdrsupplyv',
       ships ? _rdoNum(e.supSend) + ' / sweep' : 'nothing leaves');
-    _rdoClass(n.supply.row, 'hdrsupplyrow', 'is-stalled',
-      !ships && _rdoOrdersActionable(e.supWhy));
+    // The alarm belongs to the STUCK EDGES, not to the total. A power shipping
+    // 40 units a sweep with one corridor cut is a power that has to do
+    // something, and `!ships` could never say so.
+    _rdoClass(n.supply.row, 'hdrsupplyrow', 'is-stalled', e.supStuck > 0);
     src.push(e.supN + ' cit' + (e.supN > 1 ? 'ies' : 'y') + ' supplying, one sweep every ' +
       BAL.ORDERS.INTERVAL + ' ticks');
-    if (e.supBlocked > 0) {
-      src.push(e.supBlocked + ' of them send nothing — ' +
+    // THE LINE THAT NEEDS THE PLAYER GOES FIRST AND IS COUNTED IN LINES. It used
+    // to be counted in CITIES and reasoned from `nx.blocked`, which is the first
+    // edge in alphabetical order — so Berlin, with Hamburg and Leipzig merely
+    // full and Ankara unreachable, read "1 of them send nothing — no route over
+    // ground you hold", which is Ankara's reason printed over all three.
+    if (e.supStuck > 0) {
+      src.push(e.supStuck + ' line' + (e.supStuck > 1 ? 's need' : ' needs') + ' you — ' +
+        _rdoOrdersWhyShort(e.supStuckWhy, e.supStuckAt));
+    }
+    // The self-recovering half, and it says so. Only printed when it is not
+    // already covered by the line above.
+    if (e.supBlocked > 0 && e.supStuck === 0) {
+      src.push(e.supBlocked + ' of them send nothing for now — ' +
         _rdoOrdersWhyShort(e.supWhy, e.supWhyAt));
     }
   }
@@ -2088,33 +2158,293 @@ function _rdoFightMarch(state, n, sid) {
 // a click. A per-station widget here would make supplying twelve cities twelve
 // trips to the right-hand column.
 
-// Does this block need the PLAYER, or only time?
+// ── THE VOCABULARY IS THE BOARD'S, READ FROM THE BOARD'S OWN TABLE ───────
 //
-// The warning colour is spent only on the first kind. A city at its keep floor,
-// or with a surplus under the minimum stream, is the rule working exactly as
-// designed and will ship as it grows; colouring those is crying wolf on the
-// normal case, and a rail that shouts about everything is a rail nobody reads.
-// A full destination, a cut corridor and a lost city are different: nothing
-// changes until the player does something.
-function _rdoOrdersActionable(reason) {
-  return reason === 'destination-full' || reason === 'unreachable' ||
-         reason === 'target-lost';
+// known-issues #18 in its purest form was this section: it collapsed a city's
+// edges into ONE summary reason (`_ordSummarise` hands back `edges[0].blocked`,
+// which is only ever a fair summary when every edge agrees) and printed the
+// scariest one for all of them. Berlin supplying Hamburg, Leipzig and Ankara —
+// two merely full, one genuinely unreachable — read as
+//
+//     nothing leaves · 1 of them send nothing — no route over ground you hold
+//
+// while render/map.js drew those same three edges in TWO visibly different
+// states. The board and the rail were answering different questions about the
+// same three lines, and the rail was picking the answer that panics.
+//
+// So this section reads the board's own classification rather than keeping a
+// second opinion:
+//
+//   MAP_ORDER_STUCK    needs the player. Nothing changes until they take ground
+//                      or redraw the line. render/map.js strikes a bar across it.
+//   everything else    recovers on its own. The throttle, the headroom ceiling
+//                      and the keep floor are the rule working as designed, and
+//                      colouring them is crying wolf on the normal case.
+//
+// GUARDED, BECAUSE THE LOAD ORDER IS REAL: index.html puts render/readout.js
+// above render/map.js so that railAddSection exists before anything registers
+// (known-issues #22), and `const MAP_ORDER_STUCK` is not a property of window
+// (known-issues #3), so a bare `typeof` is the only test that works. But the
+// guard is LOUD. known-issues #22 is exactly this shape: a quiet guard turns a
+// load-order mistake into a feature that silently stops working, and this one
+// would degrade to a fallback table that must be kept in step by hand — which
+// is the drift the guard exists to survive, not something to survive silently.
+var RDO_ORDERS_STUCK_FALLBACK = {
+  'unreachable': true,
+  'target-lost': true,
+};
+
+var _rdoOrdersVocabWarned = false;
+
+function _rdoOrdersStuck(reason) {
+  if (typeof MAP_ORDER_STUCK === 'undefined') {
+    if (!_rdoOrdersVocabWarned) {
+      _rdoOrdersVocabWarned = true;
+      console.error('[render/readout] MAP_ORDER_STUCK is not defined — render/map.js ' +
+        'has not run, or no longer exports it. The rail is falling back to its own ' +
+        'copy of the stuck list (RDO_ORDERS_STUCK_FALLBACK) and can now DRIFT from ' +
+        'what the board draws on the same routes. Load render/map.js.');
+    }
+    return RDO_ORDERS_STUCK_FALLBACK[reason] === true;
+  }
+  return MAP_ORDER_STUCK[reason] === true;
 }
 
-// The sim's machine-readable reasons as one short clause, naming the city when
-// the sim named one. A reason this file has not been taught falls through to the
-// bare statement rather than throwing, so a NEW sim reason degrades to "nothing
-// is getting through" instead of retiring the section.
-function _rdoOrdersWhyShort(reason, target) {
+// Does this block need the PLAYER, or only time? One question, one answer, and
+// the answer is render/map.js's.
+//
+// This used to carry its own list, and that list said `destination-full` needs
+// the player. The board says it does not — a full destination drains and the
+// stream resumes with no input at all, which is why MAP_ORDER_WAITING has it —
+// so the two surfaces disagreed about the single most common blocked reason on
+// the board. That disagreement is the bug, not a detail of it.
+function _rdoOrdersActionable(reason) {
+  return _rdoOrdersStuck(reason);
+}
+
+// ONE PHRASEBOOK, TWO RENDERINGS. `long` is the sentence; `tag` is the 2-4 word
+// form a 200px line can carry N times over. They are two FIELDS OF ONE RECORD
+// rather than two switch statements in two functions, because a second
+// phrasebook drifting from the first is known-issues #9 and this project has
+// logged that five times.
+//
+// A reason this file has not been taught falls through to a bare statement
+// rather than throwing, so a NEW sim reason degrades to "nothing is getting
+// through" instead of retiring the section — the same
+// degrade-safely-and-say-so contract render/map.js applies to an unclassified
+// reason, and test/scenarios-routeview.js already fails the day a sixth reason
+// lands unclassified.
+function _rdoOrdersWhy(reason, target) {
   var dest = target ? _rdoStationName(target) : null;
   switch (reason) {
-    case 'destination-full': return dest ? dest + ' is full' : 'every destination is full';
-    case 'target-lost':      return dest ? dest + ' is not yours any more' : 'a destination was lost';
-    case 'at-keep-floor':    return 'at the keep floor — a city never ships itself defenceless';
-    case 'below-min-send':   return 'the share is under the ' + BAL.ORDERS.MIN_SEND + '-unit minimum';
-    case 'unreachable':      return 'no route over ground you hold';
-    case 'no-order':         return 'no supply line set';
-    default:                 return 'nothing is getting through';
+    case 'destination-full':
+      return { tag: 'full', long: dest ? dest + ' is full' : 'every destination is full' };
+    case 'target-lost':
+      return { tag: 'not yours', long: dest ? dest + ' is not yours any more' : 'a destination was lost' };
+    case 'at-keep-floor':
+      return { tag: 'keep floor', long: 'at the keep floor — a city never ships itself defenceless' };
+    case 'below-min-send':
+      return { tag: 'under minimum', long: 'the share is under the ' + BAL.ORDERS.MIN_SEND + '-unit minimum' };
+    case 'unreachable':
+      return { tag: 'no owned route', long: 'no route over ground you hold' };
+    case 'no-order':
+      return { tag: 'no line set', long: 'no supply line set' };
+    default:
+      return { tag: 'blocked', long: 'nothing is getting through' };
+  }
+}
+
+// The long form, unchanged, for every caller that has room for a sentence — the
+// empire header's summary line and every destination line's `title`.
+function _rdoOrdersWhyShort(reason, target) {
+  return _rdoOrdersWhy(reason, target).long;
+}
+
+// ── ONE DESTINATION, THREE WORDS FOR IT ─────────────────────────────────
+//
+// 'flowing' | 'waiting' | 'stuck', the same three words and the same precedence
+// render/map.js's _mapRouteState uses, so a line the board strikes through is a
+// line this column marks `×` and never the other way round.
+//
+// It is deliberately NOT the whole of _mapRouteState. That function also
+// rescues an edge to 'flowing' on an in-flight wave and on four sweeps of
+// hysteresis, both of which exist to stop a LINE ON THE BOARD strobing at
+// 60fps; a text row that says "Hamburg — full" for one sweep and then a number
+// is not flickering, it is reporting. The half that matters is identical: a
+// STUCK reason beats everything in both, so the two surfaces cannot disagree
+// about which edges are in trouble, which is the only agreement this bug is
+// about. Where they differ, the rail is the STRICTER of the two — it will call
+// an edge waiting that the board is still holding as flowing — so the rail can
+// never be the one that says a dead line is fine.
+function _rdoOrdersEdgeState(e) {
+  if (e && e.units > 0) return 'flowing';
+  if (e && _rdoOrdersStuck(e.blocked)) return 'stuck';
+  return 'waiting';
+}
+
+// Leading glyph per state. `×` is the rail's echo of the bar render/map.js
+// strikes across a stuck route's middle hop, `→` is the same arrow the
+// destination list has always used, and `·` is the file's own separator doing
+// duty as a neutral bullet. ASCII-safe, and load-bearing: the state has to be
+// readable with no stylesheet at all, because .rdo-src carries no state classes
+// today and style.css belongs to another agent this milestone.
+var RDO_ORDERS_GLYPH = { flowing: '→', waiting: '·', stuck: '×' };
+
+var _rdoOrdersRank = { stuck: 0, waiting: 1, flowing: 2 };
+
+// Log key for the cap, so a truncation is stated once rather than 60 times a
+// second. Truncating in silence is the failure this whole section is about,
+// one layer down.
+var _rdoOrdersCapKey = null;
+
+// ════════════════════════════════════════════════════════════════════════
+// THE FIX, AS A PURE FUNCTION
+// ════════════════════════════════════════════════════════════════════════
+//
+// `next` is standingOrderNext(state, sid). Returns one record per destination:
+//
+//   { sid, state, text, title }
+//
+// plus, when the list had to be cut, a final record with `state: 'more'`.
+//
+// PURE — no DOM, no state, no cache, no sim call. That is not tidiness: it is
+// the only way the rule is assertable headlessly (test/scenarios-orderswhy.js),
+// and the two defects it fixes are both defects of a DECISION, not of a
+// rendering.
+//
+// THE TWO DEFECTS, NAMED.
+//
+//   1. A `units > 0` summary must not suppress a dead sibling. At HEAD this
+//      function's job was done by `if (next.units > 0)`, which then printed a
+//      comma list of destination NAMES — so a city shipping happily down two
+//      lines and permanently cut off from a third rendered as three names and a
+//      tick count, with nothing anywhere saying which one was dead. The city
+//      total was right. The line the player had to fix was invisible.
+//
+//   2. A single verdict must not be printed over edges that disagree. At HEAD
+//      the else-branch printed `_rdoOrdersWhyShort(next.blocked, next.target)`,
+//      and `next.blocked` is `edges[0].blocked` — the FIRST destination in
+//      sorted id order, chosen by the alphabet and by nothing else. Berlin's
+//      "no route over ground you hold" was Ankara's reason wearing Hamburg's and
+//      Leipzig's names.
+//
+// Both are answered the same way: walk the edges and say one thing per edge.
+//
+// ORDER. Sim order (sorted destination id) is kept EXACTLY as long as
+// everything fits, because a list that re-sorts itself every sweep as edges flip
+// between waiting and flowing is a list nobody can read. Only when the cap
+// actually binds does priority take over — stuck, then waiting, then flowing —
+// so the line that needs the player is the last thing that can ever be cut. The
+// sort is stable within a rank, so destination order survives inside each group.
+function _rdoOrdersLines(next, max) {
+  if (!isFinite(max) || max < 2) max = RDO_ORDERS_MAX_LINES;
+  var edges = (next && next.edges) || [];
+  var out = [], i, e;
+
+  // No edges at all is not a disagreement — it is the whole city's answer, and
+  // `_ordSummarise` gives it a reason of its own ('no-order'). One clause.
+  if (!edges.length) {
+    var w = _rdoOrdersWhy(next && next.blocked, next && next.target);
+    return [{
+      sid: (next && next.target) || null,
+      state: 'stuck',
+      text: RDO_ORDERS_GLYPH.stuck + ' ' + w.tag,
+      title: w.long,
+    }];
+  }
+
+  for (i = 0; i < edges.length; i++) {
+    e = edges[i];
+    var st = _rdoOrdersEdgeState(e);
+    var name = _rdoStationName(e.target);
+    var rec = { sid: e.target, state: st, text: '', title: '' };
+    if (st === 'flowing') {
+      rec.text = RDO_ORDERS_GLYPH.flowing + ' ' + name + '  ' + _rdoNum(e.units);
+      rec.title = name + ' — ' + _rdoNum(e.units) + ' units on the next sweep, one ' +
+        'sweep every ' + BAL.ORDERS.INTERVAL + ' ticks';
+    } else {
+      var why = _rdoOrdersWhy(e.blocked, e.target);
+      rec.text = RDO_ORDERS_GLYPH[st] + ' ' + name + ' — ' + why.tag;
+      // The full sentence, plus what the STATE means — which is a fact about the
+      // classification, not a second word for the reason.
+      rec.title = why.long + (st === 'stuck'
+        ? ' — this line needs you; nothing changes until you take ground or redraw it'
+        : ' — it clears itself, and the stream resumes');
+    }
+    out.push(rec);
+  }
+
+  if (out.length <= max) return out;
+
+  // The cap binds. Priority sort (stable), keep max-1, and SAY WHAT WAS CUT —
+  // both on screen as a count and in the console by name.
+  var ranked = out.map(function (r, idx) { return { r: r, idx: idx }; });
+  ranked.sort(function (a, b) {
+    var d = _rdoOrdersRank[a.r.state] - _rdoOrdersRank[b.r.state];
+    return d !== 0 ? d : a.idx - b.idx;
+  });
+  var keep = [], cut = [];
+  for (i = 0; i < ranked.length; i++) {
+    (i < max - 1 ? keep : cut).push(ranked[i].r);
+  }
+  var cutNames = [], cutStuck = 0;
+  for (i = 0; i < cut.length; i++) {
+    cutNames.push(_rdoStationName(cut[i].sid) + ' (' + cut[i].state + ')');
+    if (cut[i].state === 'stuck') cutStuck++;
+  }
+  var key = (keep.length ? keep[0].sid : '') + '|' + cutNames.join(',');
+  if (_rdoOrdersCapKey !== key) {
+    _rdoOrdersCapKey = key;
+    console.warn('[render/readout] orders: ' + (edges.length) + ' destinations, ' +
+      'the rail has room for ' + (max - 1) + '. Hidden behind "+' + cut.length +
+      ' more": ' + cutNames.join(', ') + '.' +
+      (cutStuck > 0
+        ? '  ' + cutStuck + ' of them NEED THE PLAYER and are not on screen — ' +
+          'raise RDO_ORDERS_MAX_LINES.'
+        : '  Nothing hidden is stuck.'));
+  }
+  keep.push({
+    sid: null,
+    state: 'more',
+    text: '+' + cut.length + ' more',
+    title: cut.length + ' further destination(s), not shown: ' + cutNames.join(', '),
+  });
+  return keep;
+}
+
+// Does any destination need the player? The row's own state, and the reason the
+// summary number cannot carry: a city shipping 30 units a sweep down two lines
+// while a third is cut off is a city with a problem, and "30.0 / sweep" says
+// the opposite.
+function _rdoOrdersAnyStuck(next) {
+  var edges = (next && next.edges) || [];
+  for (var i = 0; i < edges.length; i++) {
+    if (_rdoOrdersEdgeState(edges[i]) === 'stuck') return true;
+  }
+  return false;
+}
+
+// The same pool discipline as _rdoSources — GROW, never shrink, hide the
+// surplus — with a `title` and a state class per line, and its own cap. Kept
+// separate from _rdoSources rather than bolted onto it: that helper's two-line
+// limit is a statement about a WORKING, and quietly widening it for everybody
+// would let some other section's collapse-to-a-sentence rule lapse unnoticed.
+function _rdoOrdersRender(g, key, lines) {
+  var want = lines.length;
+  while (g.pool.length < want) {
+    var r = el('div', 'rdo-src rdo-ordline');
+    g.host.appendChild(r);
+    g.pool.push(r);
+  }
+  for (var i = 0; i < g.pool.length; i++) {
+    var node = g.pool[i];
+    var on = i < want;
+    _rdoStyle(node, key + '@' + i, 'display', on ? '' : 'none');
+    if (!on) continue;
+    _rdoSet(node, key + '~' + i, lines[i].text);
+    _rdoAttr(node, key + '~' + i, 'title', lines[i].title);
+    _rdoClass(node, key + '~' + i, 'is-stuck', lines[i].state === 'stuck');
+    _rdoClass(node, key + '~' + i, 'is-waiting', lines[i].state === 'waiting');
   }
 }
 
@@ -2162,27 +2492,35 @@ function _rdoOrdersUpdate(state, n) {
   if (!to.length && !from.length) return false;
 
   // ── what leaves ──
+  //
+  // ONE CLAUSE PER DESTINATION. Not one per city: a city's edges disagree in the
+  // normal case, and every summary of a disagreement is a lie about the majority
+  // of it. See the block over _rdoOrdersLines for the two defects this replaced.
   _rdoShow(n.out, 'ordout', to.length > 0);
-  var outSrc = [];
+  var outLines = [];
   if (to.length) {
     var next = (typeof standingOrderNext === 'function')
       ? standingOrderNext(state, sid)
-      : { units: 0, target: null, blocked: 'no-order' };
+      : { units: 0, target: null, blocked: 'no-order', edges: [] };
     var ships = next.units > 0;
+    // The city TOTAL is still the headline, because "how much leaves here" is a
+    // real question with one honest answer. What it may no longer do is stand in
+    // for the state of the lines underneath it.
     _rdoSet(n.out.v, 'ordoutv', ships ? _rdoNum(next.units) + ' / sweep' : 'nothing');
-    _rdoClass(n.out.row, 'ordoutrow', 'is-stalled', !ships && _rdoOrdersActionable(next.blocked));
-    if (ships) {
-      // The destinations are named FIRST: a stream is a pipe and the far end is
-      // the half the player cannot read off the node under the cursor.
-      var names = [];
-      for (var i = 0; i < to.length && i < RDO_MAX_FARMS; i++) names.push(_rdoStationName(to[i]));
-      if (to.length > names.length) names.push('+' + (to.length - names.length) + ' more');
-      outSrc.push('→ ' + names.join(', ') + ' · one sweep every ' + BAL.ORDERS.INTERVAL + ' ticks');
-    } else {
-      outSrc.push(_rdoOrdersWhyShort(next.blocked, next.target));
-    }
+    // `is-stalled` keeps its documented meaning — it dims a value that is not
+    // real, i.e. a zero — so it stays keyed to the total.
+    _rdoClass(n.out.row, 'ordoutrow', 'is-stalled', !ships);
+    // DEFECT 1, at the row. A city shipping 30 a sweep down two lines and
+    // permanently cut off from a third is a city with a problem, and `!ships`
+    // can never see it. This class is a property of the EDGES. It has no rule in
+    // style.css yet and is inert until one is written (see the note to the
+    // stylesheet's owner in this milestone's report) — the `×` line underneath
+    // is what carries the fact today, which is why it is a WORD and a glyph and
+    // not a colour.
+    _rdoClass(n.out.row, 'ordoutrow', 'is-attention', _rdoOrdersAnyStuck(next));
+    outLines = _rdoOrdersLines(next, RDO_ORDERS_MAX_LINES);
   }
-  _rdoSources(n.outSrc, 'ordoutsrc', outSrc);
+  _rdoOrdersRender(n.outSrc, 'ordoutsrc', outLines);
 
   // ── what arrives ──
   //

@@ -76,6 +76,13 @@ var TEST_FILES = [
   'test/runner.js',
   'test/select-tests.js',
   'test/camera-tests.js',
+  // Headless-capable (it runs as `node test/scenarios-orderswhy.js` too), but
+  // it needs render/readout.js AND render/map.js, and putting two render files
+  // into the sim harness behind a fake window and a fake document is the same
+  // trade declined for scenarios-routeview.js. Here both are the real files,
+  // loaded by the real index.html, in the real order — which is also what
+  // proves its MAP_ORDER_STUCK guard resolves at CALL time rather than at load.
+  'test/scenarios-orderswhy.js',
   // Loaded for its BOARD FIXTURES, not to be run — scenarios-routeview.js
   // reuses them rather than copying them, which is the right call
   // (known-issues #9) and the reason this line is not obviously necessary.
@@ -94,7 +101,7 @@ var TEST_FILES = [
 // is asynchronous — would file its assertions under the NEXT suite's name if
 // this loop moved on without waiting. Silently, with the totals still adding
 // up. Awaiting a non-promise is free, so the rule is simply: always wait.
-var TEST_SUITES = ['suiteSelect', 'suiteRouteView', 'suiteCamera'];
+var TEST_SUITES = ['suiteSelect', 'suiteRouteView', 'suiteCamera', 'suiteOrdersWhy'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');

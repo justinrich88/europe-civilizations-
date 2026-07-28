@@ -1125,6 +1125,31 @@ html, body {
 
 /* The headline of a section — the number the lines below it decompose. Full
    ink and a touch larger, so the eye lands on "81.6" before the working. */
+/* ── one line per supply destination (render/readout.js) ──────────────────
+   The orders section used to collapse a city's supply lines into ONE verdict
+   and pick it by edges[0] — i.e. by the alphabet. Three lines out of Berlin in
+   three different states read "no route over ground you hold", which was true
+   of one of them. render/map.js now draws those three edges in two visibly
+   different states, so the rail was actively contradicting the board.
+
+   THE STATE HIERARCHY IS LEGIBILITY, NOT COLOUR, and that is deliberate:
+   00-vision.md §8 gives colour to ownership and nothing else, and
+   render/map.js spends none of it on route state either. The glyph carries the
+   distinction — × for a line that needs the player, matching the bar the board
+   strikes across a stuck route; · or → for one that does not. These rules only
+   set the two apart in weight, so the section still reads correctly with them
+   removed. */
+.rdo-ordline.is-stuck   { color: var(--ink); }
+.rdo-ordline.is-waiting { color: var(--ink-faint); }
+
+/* A city that IS shipping but has one dead line. `is-stalled` cannot express
+   this — it is keyed to the total, which here is correct and non-zero — so
+   without its own class the one line that needs the player is invisible on a
+   city whose headline numbers all look healthy. --warn, not a colour of its
+   own: this is the same "you have to do something" register the cut-off
+   warning already uses. */
+.rdo-mod.is-attention .rdo-k { color: var(--warn); }
+
 .rdo-mod.is-head { margin-top: 0; }
 .rdo-mod.is-head .rdo-k { color: var(--ink-dim); }
 .rdo-mod.is-head .rdo-v { font-size: 12px; color: var(--ink); }
