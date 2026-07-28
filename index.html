@@ -52,9 +52,9 @@
        ResizeObserver on #board and rebuilds its fit rect, which is what keeps
        marquee selection aligned with what the player sees.
 
-       render/ailog.js still inserts its panel into .app immediately above
-       .bottombar — i.e. below this whole row — so the log and the rail
-       displace the board on different axes and never fight. -->
+       render/ailog.js appends its panel to .app — i.e. below this whole row —
+       so the log and the rail displace the board on different axes and never
+       fight. -->
   <div class="stage">
 
   <main class="board-wrap">
@@ -86,84 +86,62 @@
     <!-- The rail. Persistent, fixed width, never hidden, never animated: the
          player must never have to look for where information appeared.
          Sections are appended by JS through railAddSection() — see the seam
-         documented in render/readout.js and 01-data-schema.md. The element is
-         empty here on purpose so adding a section never means editing this
-         file. -->
-    <aside class="rail" id="rail" aria-label="Status"></aside>
+         documented in render/readout.js and 01-data-schema.md.
+
+         THE BOTTOM BAR USED TO LIVE BELOW THIS ROW AND IS GONE. It held the
+         send amount, a gesture hint, a strip of power chips and the ticker,
+         and it was the wrong shape for all four: it cost 58px of board HEIGHT
+         at the 800x900 window the game is played at, while the rail — 200px
+         wide and 798px tall — was showing 666px of nothing with no station
+         selected. Measured, not guessed. The camera fits the viewBox to the
+         board box on both axes, so those 58px are real map.
+
+         The hint line was deleted outright rather than moved: the Guide
+         (render/help.js, `?`) documents every gesture properly, with diagrams,
+         and a permanent one-line summary of a screen you can open on demand is
+         chrome. -->
+    <aside class="rail" id="rail" aria-label="Status">
+
+      <!-- STATIC, and first, on purpose. app/main.js wires #send-control by id
+           during boot, but rail sections are not built until the first frame,
+           so a section here would be wired to nothing. Being the rail's only
+           markup child also fixes its position: railAddSection() APPENDS, so
+           every JS section lands beneath this one — which is where they belong.
+           The amount is touched several times a minute; the readouts are read. -->
+      <div class="rail-section send-control" id="send-control">
+        <span class="hud-label">send</span>
+        <!-- PERSISTENT, and the digit that selects each one is on its face. The
+             active button stays wherever the player last set it, across volleys,
+             until they change it again — 25 is only the opening value (render/select.js,
+             selFraction) — see BAL.SEND_FRACTION_DEFAULT for the player's reasoning.
+             data-key is read by nothing; it is a label, and the binding itself is
+             derived from BAL.SEND_FRACTIONS so the two cannot drift. -->
+        <button type="button" class="btn send-btn is-active" data-fraction="0.25"><b>1</b>25</button>
+        <button type="button" class="btn send-btn" data-fraction="0.5"><b>2</b>50</button>
+        <button type="button" class="btn send-btn" data-fraction="0.75"><b>3</b>75</button>
+        <button type="button" class="btn send-btn" data-fraction="1"><b>4</b>All</button>
+
+        <!-- What the NEXT click will do, while a supply line is armed by R
+             (render/select.js, _selPaintArmed). Rendered as a fixed banner at the
+             top of the board, not here — see the `.send-armed` rule, which
+             explains why it must not sit in this box's flow. It lives in this
+             element only because the send box is where it conceptually belongs.
+             `position: fixed` is why moving this box into the rail did not move
+             the banner a pixel. -->
+        <span class="send-armed" id="send-armed" hidden aria-live="polite"></span>
+
+        <!-- The INF · ART · ARM type toggles used to sit here. Deleted 2026-07 on
+             the player's instruction ("Delete them."). Choosing SOURCES already
+             chooses types — the Ruhr makes armour, Leipzig makes artillery,
+             everywhere else infantry — so the toggles only bought "send this
+             city's infantry but leave its guns", which is not worth a permanent
+             mode on a bar the player fires volleys from. `cmd.types` still exists
+             in sim/commands.js; nothing in the UI sets it. -->
+      </div>
+
+    </aside>
 
   </div>
-
-  <!-- ── bottom bar ──────────────────────────────────────────────────── -->
-  <footer class="bottombar">
-    <div class="send-control" id="send-control">
-      <span class="hud-label">send</span>
-      <!-- PERSISTENT, and the digit that selects each one is on its face. The
-           active button stays wherever the player last set it, across volleys,
-           until they change it again — 25 is only the opening value (render/select.js,
-           selFraction) — see BAL.SEND_FRACTION_DEFAULT for the player's reasoning.
-           data-key is read by nothing; it is a label, and the binding itself is
-           derived from BAL.SEND_FRACTIONS so the two cannot drift. -->
-      <button type="button" class="btn send-btn is-active" data-fraction="0.25"><b>1</b>25</button>
-      <button type="button" class="btn send-btn" data-fraction="0.5"><b>2</b>50</button>
-      <button type="button" class="btn send-btn" data-fraction="0.75"><b>3</b>75</button>
-      <button type="button" class="btn send-btn" data-fraction="1"><b>4</b>All</button>
-
-      <!-- What the NEXT click will do, while a supply line is armed by R
-           (render/select.js, _selPaintArmed). Rendered as a fixed banner at the
-           top of the board, not here — see the `.send-armed` rule, which
-           explains why it must not sit in this bar's flow. It lives in this
-           element only because the send box is where it conceptually belongs. -->
-      <span class="send-armed" id="send-armed" hidden aria-live="polite"></span>
-
-      <!-- The INF · ART · ARM type toggles used to sit here. Deleted 2026-07 on
-           the player's instruction ("Delete them."). Choosing SOURCES already
-           chooses types — the Ruhr makes armour, Leipzig makes artillery,
-           everywhere else infantry — so the toggles only bought "send this
-           city's infantry but leave its guns", which is not worth a permanent
-           mode on a bar the player fires volleys from. `cmd.types` still exists
-           in sim/commands.js; nothing in the UI sets it. -->
-    </div>
-
-    <!-- Discoverability for the gesture table in render/select.js. Nothing else
-         on screen would ever tell you that the friendly march lives on the RIGHT
-         button, or that the amount can be overridden at the moment of the click.
-         Always visible — the player's window is 800px and the old
-         `@media (max-width:1000px){display:none}` meant this line did not exist
-         for them at all. It now wraps to its own row instead of vanishing.
-
-         Tiers: `.is-basic` items describe what anyone discovers in ten seconds
-         and are the first to go; the modifiers and the right button are the ones
-         that are genuinely unguessable, so they are the last to go. -->
-    <p class="send-hint" id="send-hint">
-      <span class="send-hint-item is-basic"><b>click</b> yours = select</span>
-      <span class="send-hint-item is-basic"><b>click</b> enemy = attack</span>
-      <span class="send-hint-item is-basic"><b>1&#8202;2&#8202;3&#8202;4</b> = 25&#8202;&#183;&#8202;50&#8202;&#183;&#8202;75&#8202;&#183;&#8202;all</span>
-      <!-- "move", not "reinforce". R is now the standing REINFORCE order, and
-           two different gestures both called reinforce — one a single march, one
-           a permanent supply line — is the kind of collision that makes a hint
-           line worse than no hint line. -->
-      <span class="send-hint-item"><b>right-click</b> = move</span>
-      <span class="send-hint-item"><b>&#8984;</b>click = keep group</span>
-      <!-- Standing orders (render/select.js, _selApplyOrder). Not `.is-basic`:
-           a key that acts on the current selection is invisible to anyone who
-           does not already know it exists, which is precisely the tier this
-           line is for. Written as a two-step because that is what it is now —
-           the key ARMS, the next click on your own ground names the destination.
-           The old bare `H R F` needed no target and so needed no arrow.
-
-           The shift = all / alt = half commit modifiers that used to sit on
-           this line are gone: 1-4 does the same job with one hand and no timing,
-           and shift was already overloaded as additive-select on the same
-           pointer. Cmd stays — keeping the group is not an amount. -->
-      <span class="send-hint-item"><b>R</b>&#8202;&#8594;&#8202;click = supply on/off, <b>H</b> = clear</span>
-    </p>
-
-    <div class="powers" id="powers-strip"></div>
-
-    <div class="ticker" id="ticker" aria-live="polite">
-      <ul class="ticker-list" id="ticker-list"></ul>
-    </div>
-  </footer>
 
 </div>
 
@@ -203,11 +181,19 @@
 
 <script src="render/map.js"></script>
 <script src="render/waves.js"></script>
-<script src="render/hud.js"></script>
 <script src="render/select.js"></script>
 <script src="render/ailog.js"></script>
 <script src="render/coverage.js"></script>
 <script src="render/readout.js"></script>
+<!-- AFTER readout.js, all three, because each calls railAddSection() at LOAD
+     time and railAddSection is a top-level `function` in readout.js — hoisted
+     within its own file, but not visible until that file has run. hud.js used
+     to sit above map.js's neighbours; it moved down here the day its ticker
+     became a rail section, and its `typeof railAddSection === 'function'`
+     guard means getting this wrong loses the ticker SILENTLY rather than
+     throwing. Nothing in these three runs at load beyond the registration. -->
+<script src="render/hud.js"></script>
+<script src="render/standings.js"></script>
 <script src="render/victory.js"></script>
 <!-- The guide. After render/map.js because it draws the four station
      silhouettes with map.js's own stationShape() rather than a copy of it

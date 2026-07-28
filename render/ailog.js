@@ -203,11 +203,12 @@ function ailogBuildPanel() {
   var list = el('div', 'ailog-list', { id: 'ailog-list' });
   panel.appendChild(list);
 
-  // Above the bottom bar, below the board. In normal flow, so it displaces the
-  // board rather than covering it.
-  var bottom = app.querySelector('.bottombar');
-  if (bottom) app.insertBefore(panel, bottom);
-  else app.appendChild(panel);
+  // Below the board, in normal flow, so it displaces the board rather than
+  // covering it — anything over the board that takes pointer events silently
+  // eats the click that commits an attack. It used to be inserted above
+  // .bottombar; the bottom bar is gone and .app's last child IS the bottom of
+  // the layout now, so the plain append is the whole rule.
+  app.appendChild(panel);
 
   return panel;
 }

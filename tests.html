@@ -61,11 +61,19 @@
      helpShow() is called, so it is safe on a page with no board. -->
 <script src="render/help.js"></script>
 
+<!-- The standings panel. Loads here for the same reason help.js does: its
+     ranking is a pure function of state and touches no DOM until the rail
+     builds it, and its registration is guarded, so it evaluates cleanly on a
+     page with no board. test/scenarios-standings.js asserts the ranking against
+     the same data. -->
+<script src="render/standings.js"></script>
+
 <!-- harness -->
 <script src="test/asserts.js"></script>
 <script src="test/ai-tests.js"></script>
 <script src="test/fog-tests.js"></script>
 <script src="test/help-tests.js"></script>
+<script src="test/scenarios-standings.js"></script>
 <script src="test/runner.js"></script>
 
 <script>

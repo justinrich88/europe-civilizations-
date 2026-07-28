@@ -356,7 +356,7 @@ Same contract discipline as the sim above, for the same reason: three agents bui
 | `renderBoard()` | `render/map.js` | Full rebuild of the static layers: territories, borders, links, labels. Expensive. Called once at startup and after nothing else. |
 | `renderLive(state)` | `render/map.js` | Per-frame update of everything that changes: garrison numbers, station ownership colours, territory tint and control tier. Must **mutate existing DOM nodes, never rebuild them** — rebuilding 108 `<g>` elements every frame kills selection and hover state. |
 | `renderWaves(state)` | `render/waves.js` | Draw/update/remove in-transit stack markers into `#g-waves`, positioned by interpolating each wave's current hop. |
-| `renderHud(state)` | `render/hud.js` | Territory count, total forces, day counter, power strip, event ticker. |
+| `renderHud(state)` | `render/hud.js` | Territory count, total forces, day counter. The power strip is gone (see `render/standings.js`) and the ticker is now a rail section registered by this file, pumped by the rail rather than by `renderHud`. |
 | `initSelection()` | `render/select.js` | Wire up marquee, click and keyboard selection on `#board`. Called once. |
 | `selectedSources()` | `render/select.js` | Sorted array of currently selected station ids. The only way other files read the selection. |
 | `clearSelection()` | `render/select.js` | Drop all selection and any preview lines. |
@@ -594,10 +594,23 @@ handlers fight over the same hover.
   ├── header.hud
   ├── div.stage (row)
   │     ├── main.board-wrap  →  svg#board
-  │     └── aside#rail       →  <section class="rail-section"> …
-  ├── .ailog                 (render/ailog.js inserts here, above .bottombar)
-  └── footer.bottombar
+  │     └── aside#rail       →  div#send-control.rail-section   (static markup)
+  │                             <section class="rail-section"> … (railAddSection)
+  └── .ailog                 (render/ailog.js appends here)
 ```
+
+**There is no bottom bar.** It held the send amount, a gesture hint, a strip of
+power chips and the ticker, and it cost 58px of board *height* at the 800×900
+window the game is played at (known-issues #17) while the rail beside it was
+measured showing 666px of empty column. The send amount moved into the rail as
+static markup; the hint was deleted (`render/help.js` documents every gesture);
+the chips were replaced by `render/standings.js`; the ticker became a rail
+section pinned to the floor.
+
+`#send-control` is **static markup and the rail's first child**, not a section,
+because `app/main.js` wires it by id during boot and `railAddSection()` does not
+build until the first frame. `railAddSection` appends, so every JS section lands
+beneath it.
 
 The rail is a **DOM sibling of the board, never an overlay**, for the same
 reason `.ailog` is: a panel over `#board` that accepts pointer events swallows

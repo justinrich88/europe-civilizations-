@@ -272,6 +272,11 @@ function runAllTests() {
   // asserted is derived content: no DOM is touched until helpShow() is called.
   if (typeof suiteHelp === 'function') suiteHelp(d);
 
+  // The standings panel — test/scenarios-standings.js. Second render/ file the
+  // harness loads, and safe for the same reason: the ranking is a pure function
+  // of state and no DOM is touched until the rail calls build().
+  if (typeof suiteStandings === 'function') suiteStandings(d);
+
   return TEST_RESULTS;
 }
 

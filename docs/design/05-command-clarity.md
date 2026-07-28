@@ -128,16 +128,32 @@ development points.**
 
 ### Three constraints on it
 
-**It must be fog-filtered.** Milestone 5.7 is landing as this is written. A
-panel that lists every power's true city count would hand back, in a table,
-exactly what the fog spends its whole existence hiding. Counts show what the
-player can *see* — and a number lagging reality is fog working, not a bug.
+**~~It must be fog-filtered.~~ REVERSED — the panel is fully public.** Built
+2026-07 as `render/standings.js`.
 
-The exception is deliberate and already decided in `02-visibility-and-sea.md`:
-**standings stay public.** Who is *leading* is newspaper knowledge in 1914 and
-`LEADER_WEIGHT` depends on it. So the panel may rank powers truthfully while
-the per-power counts remain what you have eyes on. If those two ever disagree
-visibly, the ranking is right and the counts are honest about their limits.
+The compromise this section proposed — rank the powers truthfully, print
+believed counts beside the ranking — was implemented (in the old bottom-bar
+chips) and it is the version that fails hardest. **A sorted table is itself a
+claim about the numbers next to it.** Rank Russia first and print `5` beside it
+and the panel is not "honest about its limits", it is visibly contradicting
+itself, and the only reading available to a player is that the game is broken.
+It reported Russia at 5 while Russia held 23.
+
+The escape clause above concedes the argument: *"if those two ever disagree
+visibly, the ranking is right"* means the true counts are already being
+computed, and then withheld from the column that needs them most.
+
+The decisive reason is mechanical, not aesthetic. `00-vision.md` §6 has every
+AI weighting hostility toward the leader — `LEADER_WEIGHT` (45.0, `ai/score.js`)
+reads the **true** board and is the only constant that can declare a war. A
+player who cannot see the standing the AI is reacting to cannot see the Concert
+of Europe operating at all: the game's central emergent system was running
+behind a gate that applied to the player and to nobody else.
+
+This restores what `02-visibility-and-sea.md`:254 already required — *"you can
+hide an army; you cannot hide having conquered Belgium"* — and overrules
+`07-roadmap.md` C3, which has been corrected. Everything else stays fogged; the
+standings are the second deliberate hole, exactly as that document names it.
 
 **"Development points" needs defining, and should not be a new currency.**
 There is no resource in this game and §8's cut list keeps it that way. Read it
@@ -145,13 +161,18 @@ as **a summary of what a power has built** — the count and tier of
 developments, e.g. `4 built · 7 tiers`. Derived from station state, stored
 nowhere.
 
-**Rail space is not free.** `render/hud.js` documents the bottom rail as a
-52px bar over the sea, and the ticker was just refitted into a fixed 32px slot
-because it had been simultaneously invisible at 800px and 109px tall above
-1100px. The right rail has more room than the bottom bar, but seven powers ×
-four stats is a table, and §8's principle is that the board is the interface.
-**Collapse to the essentials at 800px** (known-issues #17 — that is the window
-the game is played at) and let it expand when there is room.
+**~~Rail space is not free.~~ In a column it is very nearly free — and this
+was measured, not assumed.** The premise here was a 52px bottom BAR, where the
+ticker and the standings competed with the send control for 772px of width.
+That bar is gone. The right rail is a fixed 200px wide whether it is full or
+empty, and at 800×900 it was carrying 132px of content in an 798px column: 666px
+of nothing. Rows in a column cost the board zero.
+
+So the standings did NOT collapse to essentials at 800px. Seven powers × two
+stats (territories, cities) fits at 11px with room to spare, and the ticker went
+from two rows to six on the same reasoning. What is still true is §8's
+principle — the board is the interface — which is why the answer was to stop
+spending board HEIGHT on a bar, not to spend rail width more cleverly.
 
 ---
 
@@ -168,6 +189,8 @@ the game is played at) and let it expand when there is room.
 The selection fix is the only thing here a player is actively losing games to.
 It is also the cheapest. It goes first.
 
-The standings panel must be built **after** fog, not alongside it — it is a
-consumer of `visibleTo`/`believedStation`, and building it against the true
-board would mean writing it twice.
+~~The standings panel must be built **after** fog~~ — it turned out **not** to
+be a consumer of `visibleTo`/`believedStation` at all. See the reversal above:
+it reads the true board. The `hudBelievedTerritories()` machinery written for
+the fog-filtered version — a proxy board of believed owners run through the
+canonical `territoryControl()` — was deleted with the chips.

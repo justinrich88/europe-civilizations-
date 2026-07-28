@@ -1,17 +1,23 @@
 // render/hud.js — renderHud(state).
 //
 // The chrome around the board: territory count, total forces, day counter,
-// power strip, event ticker. 00-vision.md §8 sketches it exactly:
+// event ticker. 00-vision.md §8 sketches it as two bars:
 //
 //   │  Territories 14/48   Forces 312   ⏸ 1x 2x 4x   │ Day 42  │
 //   │  send: 25 · 50 · [75] · All     powers + event ticker    │
 //
+// THE SECOND BAR IS GONE. The send amount and the ticker moved into the rail
+// and the power strip was replaced outright by render/standings.js; see the
+// comment on the rail in index.html for the measurements that decided it. What
+// survives here is the top bar plus the ticker, and the ticker is now a RAIL
+// SECTION registered through railAddSection() rather than a slot in a footer.
+//
 // This function runs EVERY FRAME, at up to 60fps, alongside renderLive() and
 // renderWaves(). So the rule from 01-data-schema.md that governs renderLive
 // governs this file too: **mutate existing DOM nodes, never rebuild them**.
-// Rebuilding the power strip and the ticker sixty times a second is both
-// wasteful and visibly wrong — it kills text selection, and `aria-live` on the
-// ticker would re-announce the same events forever.
+// Rebuilding the ticker sixty times a second is both wasteful and visibly
+// wrong — it kills text selection, and `aria-live` would re-announce the same
+// events forever.
 //
 // The pattern used throughout: compute a cheap value, compare it to the last
 // one written, and touch the DOM only on a change. Most frames do nothing.
@@ -21,17 +27,18 @@
 //
 // ── FOG (Milestone 5.7) ─────────────────────────────────────────────────
 //
-// Two of the three blocks below were reading the whole board:
-//
-//   the power strip   seven live territory counts, every frame — complete
-//                     global standings, free, without looking at anything.
-//                     Now BELIEVED counts, via visibleTo + believedStation.
-//   the ticker        "ger took Brussels from neutral" for every capture on
-//                     the map. Now filtered by whether the player can see the
-//                     station the sim named (logEvent's optional `sid`).
+// The ticker was reading the whole board — "ger took Brussels from neutral"
+// for every capture on the map. It is now filtered by whether the player can
+// see the station the sim named (logEvent's optional `sid`).
 //
 // The stat block is untouched and needs no gate — it is scoped to the player
 // and a power always sees its own ground. See the note above hudStats().
+//
+// The power strip was fog-filtered too, and that turned out to be the wrong
+// call: a scoreboard that reports Russia at 5 when it holds 23 is worse than
+// no scoreboard, and 00-vision.md §6 has the AI weighting hostility against
+// TRUE relative standing — a number the player could not see. Its replacement,
+// render/standings.js, is deliberately public. The reasoning is in that file.
 //
 // The filtering happens HERE, at render time, and never in the sim: state.log
 // stays complete, because it is sim state and because render/victory.js wants
@@ -81,12 +88,8 @@ var _hudLast = {
   day: undefined,
 };
 
-// Power strip: one chip per power, built once, then only its number and its
-// dead/alive class are touched.
-var _hudChips = null;          // pid -> { row, count, chip }
-var _hudChipLast = null;       // pid -> { n, alive }
-
 // Ticker: the tail of state.log. We reuse <li> nodes and only rewrite text.
+var _hudTickerList = null;     // the <ul>, owned by the rail section below
 var _hudTickerItems = [];      // live <li> nodes, index 0 = newest
 var _hudTickerLastLen = -1;
 var _hudTickerLastTail = null; // identity of the newest log entry
@@ -95,26 +98,27 @@ var _hudTickerLastEpoch = -1;  // state.ownerEpoch — the ticker is fog-filtere
 var _hudTickerKeys = [];       // per-row identity, so we only repaint on change
 var _hudTickerTopKey = null;   // identity of row 0, to fire the enter animation
 
-// TWO rows, not five. This constant is the JS half of `--ticker-h` in
-// style.css: the slot is 32px and `.ticker-list li` has a 16px line-height, so
-// two is what the bar can show. Keep them in step — the DOM should contain
-// exactly what is on screen, or "how many events are visible" stops being a
-// thing anyone can measure, which is how this feature shipped invisible.
+// SIX rows. This constant is the JS half of `--ticker-h` in style.css: the slot
+// is 108px and `.ticker-list li` has an 18px line-height. Keep them in step —
+// the DOM should contain exactly what is on screen, or "how many events are
+// visible" stops being a thing anyone can measure, which is how this feature
+// shipped invisible in the first place.
 //
-// It was five, and the header of this file already said why that was wrong:
-// more rows is not free real estate, it is a taller bar eating the board. It
-// was wrong in fact as well as in principle — five auto-height rows grew the
-// bottom bar from 52px to 109px at 1280px, spending 56px of Europe on gossip
-// (00-vision.md §8), while at the 800px window the game is actually played at
-// the ticker was `display:none` and showed nothing at all.
-const HUD_TICKER_MAX = 2;
+// IT WAS TWO, and two was right for a footer. The argument written here then
+// was that "more rows is not free real estate, it is a taller bar eating the
+// board" — five auto-height rows grew the bottom bar from 52px to 109px and
+// spent 56px of Europe on gossip (00-vision.md §8). That argument dies with
+// the footer. In a rail the ticker grows DOWN a column that was measured at
+// 666px of empty space, and costs the board nothing at all: the rail is a
+// fixed 200px whether it is full or blank. The constraint moved, so the
+// constant moved with it. Six is what the slot holds, not a preference.
+const HUD_TICKER_MAX = 6;
 
-// How far back hudTickVisible() may reach to rescue a 'major'. Two rows is a
-// narrow window and the sim can put two captures through it in a second, so
-// without this a capitulation or an elimination — the loudest things that can
-// happen in a match — is gone before it can be read. Six rows of slack is about
-// a minute of a busy board at 4x.
-const HUD_TICKER_LOOKBACK = 6;
+// How far back hudTickVisible() may reach to rescue a 'major'. Even six rows is
+// a narrow window and the sim can put several captures through it in a second,
+// so without this a capitulation or an elimination — the loudest things that
+// can happen in a match — is gone before it can be read.
+const HUD_TICKER_LOOKBACK = 10;
 
 // Consecutive captures by the same power inside this many ticks collapse into
 // one row. BAL.TICKS_PER_SEC is 10, so this is ~12 sim-seconds — the width of a
@@ -127,24 +131,25 @@ function hudNodes() {
   if (_hudNodes && _hudNodes.territories && _hudNodes.territories.isConnected) {
     return _hudNodes;
   }
+  // The ticker's <ul> is NOT resolved here. It is built by the rail section at
+  // the foot of this file and handed over directly, because railAddSection()
+  // does not build until the first frame — a byId() at boot would cache null
+  // and, since this cache only re-resolves when `territories` goes stale, would
+  // stay null for the whole game. That is exactly the shape of bug that shipped
+  // an invisible ticker once already.
   _hudNodes = {
     territories: byId('stat-territories'),
     forces: byId('stat-forces'),
     day: byId('stat-day'),
-    strip: byId('powers-strip'),
-    ticker: byId('ticker-list'),
   };
   // A re-cache means the DOM was replaced; every memo is now stale.
   _hudLast = { territories: undefined, forces: undefined, day: undefined };
-  _hudChips = null;
-  _hudChipLast = null;
   _hudTickerItems = [];
   _hudTickerLastLen = -1;
   _hudTickerLastTail = null;
   _hudTickerLastEpoch = -1;
   _hudTickerKeys = [];
   _hudTickerTopKey = null;
-  _hudBelief = { epoch: -2, tick: -2, pid: null, counts: null };
   return _hudNodes;
 }
 
@@ -185,10 +190,10 @@ function hudPowerName(pid) {
 // be the same count with a visibility pass in front of it.
 //
 // The identity holds for territories specifically, which is worth stating
-// because it is what keeps this block and hudPowerStrip() agreeing about the
-// player's own chip: majority control turns on how many stations in a country
-// ONE power holds against the country's total, and the player can see every
-// station they hold. Stations they cannot see contribute to neither count.
+// because it is what keeps this block and render/standings.js agreeing about
+// the player's own row: majority control turns on how many stations in a
+// country ONE power holds against the country's total, and the player can see
+// every station they hold.
 //
 // `state.tick`, and therefore the day, is the sim clock and is public.
 function hudStats(state, nodes) {
@@ -214,180 +219,52 @@ function hudStats(state, nodes) {
   setTextIfChanged(nodes.day, 'day', String(day));
 }
 
-// ── power strip ─────────────────────────────────────────────────────────
+// ── power strip — DELETED, and it was contradicting two locked docs ──────
 //
-// render/map.js draws a provisional legend into #powers-strip so the colours
-// are legible before this file exists; the comment there says hud.js should
-// take it over. We do, once, and mark the node so we know not to do it again.
-
-function buildPowerStrip(strip) {
-  while (strip.firstChild) strip.removeChild(strip.firstChild);
-  _hudChips = Object.create(null);
-  _hudChipLast = Object.create(null);
-
-  const ids = (typeof POWER_IDS !== 'undefined' && POWER_IDS.length)
-    ? POWER_IDS
-    : (typeof POWERS !== 'undefined' ? Object.keys(POWERS).sort() : []);
-
-  for (const pid of ids) {
-    if (pid === 'neutral') continue;      // neutral is empty ground, not a power
-
-    const chip = el('span', 'power-chip', { 'data-power': pid, title: hudPowerName(pid) });
-
-    const sw = el('span', 'power-swatch');
-    const color = hudPowerColor(pid);
-    if (color) sw.style.background = color;
-    chip.appendChild(sw);
-
-    // Short id rather than the full name: seven "German Empire"s do not fit in
-    // the bottom bar, and the swatch is already carrying the identity.
-    chip.appendChild(el('span', 'power-name', { text: pid.toUpperCase() }));
-
-    const count = el('span', 'power-count', { text: '0' });
-    chip.appendChild(count);
-
-    strip.appendChild(chip);
-    _hudChips[pid] = { chip: chip, count: count };
-    _hudChipLast[pid] = { n: -1, alive: null };
-  }
-
-  strip.setAttribute('data-hud-built', '1');
-}
-
-// ── the strip's numbers are BELIEVED, not true ───────────────────────────
+// ~170 lines lived here: buildPowerStrip(), hudBelievedTerritories() and
+// hudPowerStrip(). They printed one chip per power carrying a BELIEVED
+// territory count — assembled by running the canonical territoryControl()
+// against a proxy board of believedStation() owners, memoised on
+// (tick, ownerEpoch). It was careful work and it answered the wrong question.
 //
-// The strip used to print `countTerritories(state, pid)` for all seven powers,
-// every frame: complete, live, global standings, updated the instant anything
-// anywhere changed hands. That is the whole board in seven integers, and it
-// survived every other fog gate in the milestone because it never mentions a
-// station by name.
+// The strip showed Russia holding **5** when Russia held 23. That is not fog
+// working, it is a scoreboard lying, and it is exactly known-issue #18: a
+// readout answering a different question from the one on screen, and never
+// looking wrong while it does it.
 //
-// Now each chip counts the territories the PLAYER HAS EYES INTO. A country
-// counts for a power when, on the board as the player believes it, that power
-// holds a majority of its stations; a station the player cannot see contributes
-// to nobody, so an unobserved conquest simply does not move the number until
-// somebody looks. **A number lagging reality is fog working**, and it is also
-// the one place the player is told, wordlessly, how much of Europe they have
-// stopped watching.
+// THE DOCS DID NOT AGREE WITH EACH OTHER, and it is worth being precise about
+// which one this overrules, because it is not the one you would guess:
 //
-// ── HOW, AND THE TWO THINGS NOT DONE HERE ────────────────────────────────
+//   02-visibility-and-sea.md:254   "The standings stay public — the second
+//                                   deliberate hole in the fog... you can hide
+//                                   an army; you cannot hide having conquered
+//                                   Belgium."      → agrees with the change
+//   05-command-clarity.md:137      a COMPROMISE: rank the powers truthfully,
+//                                   show believed counts beside the ranking.
+//   07-roadmap.md C3               "must be fog-filtered."
 //
-// `visibleTo` is asked ONCE (24-38us, the sanctioned per-frame budget) and its
-// result is handed to `believedStation` as the optional 4th argument, which is
-// exactly the escape hatch core/vision.js documents for a caller that wants the
-// whole board — 108 O(1) lookups instead of 108 traversals. Nothing here reads
-// `state.seen`: believedStation is the only function allowed to mint a level 1
-// and re-deriving the composition beside it would be two authorities for one
-// fact (known-issues #9).
+// So this goes beyond 02 and against the other two, deliberately. The
+// compromise is the interesting one, because it is the version that shipped and
+// it is the version that fails hardest: **a sorted table is itself a claim
+// about the numbers next to it.** Rank Russia first and print 5 beside it and
+// the panel is not being honest about its limits, it is visibly contradicting
+// itself, and the player's only available reading is that the game is broken.
+// The compromise's own escape clause — "if those two ever disagree visibly,
+// the ranking is right" — concedes the point: the ranking needs the true
+// counts, so the true counts are already being computed and withheld.
 //
-// And majority control is not re-implemented either. The believed owners are
-// assembled into a PROXY BOARD and the canonical `territoryControl()` is run
-// against it, so the three-tier rule (00-vision.md §3) has one author whichever
-// board it is asked about. The proxy is safe here and would not be everywhere:
-// 02-visibility-and-sea.md is explicit that a proxy state must never reach
-// `routeFor` / `commandRoute`, whose cache invalidates on state object identity
-// — a fresh proxy per call took a cached 0.115us route to 161us. This one is
-// handed to nothing but territoryControl, which reads `stations[sid].owner` and
-// nothing else.
+// The decisive argument is mechanical rather than aesthetic. 00-vision.md §6
+// has every AI weighting hostility toward the leader (LEADER_WEIGHT 45.0 in
+// ai/score.js, reading the TRUE board — the only constant that can declare a
+// war). A player who cannot see the standing the AI is reacting to cannot see
+// the Concert of Europe operating at all: the game's central emergent system
+// was running behind a gate that applied to the player and to nobody else.
 //
-// Throttled on (tick, ownerEpoch): visibility is a pure function of ownership
-// and static data, and memory only moves when observeTick runs. A paused game
-// recomputes never.
+// Both docs have been corrected rather than quietly disobeyed.
 //
-// ── THE TENSION, RECORDED BECAUSE SOMEBODY WILL FIND IT ──────────────────
-//
-// 02-visibility-and-sea.md decides in bold that **who is winning is public
-// knowledge** — "you can hide an army; you cannot hide having conquered
-// Belgium" — and that decision is load-bearing: `ctx.leader` and
-// `ctx.leaderShare` walk all 30 territories on every AI decision, and
-// LEADER_WEIGHT (45.0) is the only constant on the board that can declare a war
-// and the mechanism the balance of power runs on.
-//
-// **That mechanism is untouched.** It lives in ai/score.js and reads the true
-// board, as it must; this is the HUD, which feeds nothing. What changes is only
-// what the player is handed for free, every frame, without looking.
-var _hudBelief = { epoch: -2, tick: -2, pid: null, counts: null };
-
-// Territories per power, counted on the board the player believes in. Returns
-// null when there is no fog to apply — core/vision.js absent, or PLAYER unset
-// (a harness, the empire picker) — and the caller then falls back to the true
-// count, which is what the strip has always shown.
-function hudBelievedTerritories(state) {
-  const me = window.PLAYER || null;
-  if (!me || typeof visibleTo !== 'function' || typeof believedStation !== 'function' ||
-      typeof territoryControl !== 'function' ||
-      typeof STATION_IDS === 'undefined' || typeof TERRITORY_IDS === 'undefined') {
-    return null;
-  }
-
-  const epoch = state.ownerEpoch | 0;
-  if (_hudBelief.counts && _hudBelief.pid === me &&
-      _hudBelief.epoch === epoch && _hudBelief.tick === state.tick) {
-    return _hudBelief.counts;
-  }
-
-  const vis = visibleTo(state, me);
-  const proxy = { stations: Object.create(null) };
-  for (let i = 0; i < STATION_IDS.length; i++) {
-    const sid = STATION_IDS[i];
-    // owner null at level 0 — never seen, so it belongs to nobody as far as
-    // this player is concerned. territoryControl only ever awards a country to
-    // an id in POWER_IDS, so a null owner dilutes the majority instead of
-    // winning it, which is the correct reading: you cannot count a country you
-    // are not looking at.
-    proxy.stations[sid] = { owner: believedStation(state, me, sid, vis).owner };
-  }
-
-  const counts = Object.create(null);
-  for (let t = 0; t < TERRITORY_IDS.length; t++) {
-    const o = territoryControl(proxy, TERRITORY_IDS[t]).owner;
-    if (o) counts[o] = (counts[o] || 0) + 1;
-  }
-
-  _hudBelief = { epoch: epoch, tick: state.tick, pid: me, counts: counts };
-  return counts;
-}
-
-function hudPowerStrip(state, nodes) {
-  const strip = nodes.strip;
-  if (!strip) return;
-
-  // Rebuild only if the strip has never been built, or renderBoard() blew it
-  // away and re-seeded it with the provisional legend.
-  if (!_hudChips || strip.getAttribute('data-hud-built') !== '1') {
-    buildPowerStrip(strip);
-  }
-
-  const believed = hudBelievedTerritories(state);
-
-  for (const pid in _hudChips) {
-    const rec = _hudChips[pid];
-    const last = _hudChipLast[pid];
-
-    const p = state.powers && state.powers[pid];
-    // Alive/dead stays TRUE. A capitulation and an elimination are logged
-    // events with no station attached, and 02-visibility-and-sea.md keeps them
-    // public for the same reason it keeps the standings public: a power ceasing
-    // to exist is a fact about Europe, not a thing you find by scouting. It is
-    // also already on the ticker, unfiltered, one row down.
-    const alive = p ? !!p.alive : false;
-    const n = believed
-      ? (believed[pid] || 0)
-      : ((typeof countTerritories === 'function') ? countTerritories(state, pid) : 0);
-
-    if (n !== last.n) {
-      last.n = n;
-      rec.count.textContent = String(n);
-    }
-    // Dead powers stay on the strip, struck through — .power-chip.is-dead in
-    // style.css. Who has been knocked out is as informative as who is winning,
-    // and removing the chip would silently reflow every other one.
-    if (alive !== last.alive) {
-      last.alive = alive;
-      rec.chip.classList.toggle('is-dead', !alive);
-    }
-  }
-}
+// The replacement is render/standings.js, in the rail, public, with real rows
+// instead of chips. Nothing here feeds the sim, so nothing balance-facing
+// moved.
 
 // ── ticker ──────────────────────────────────────────────────────────────
 //
@@ -773,7 +650,15 @@ function hudTickRows(log, max, vis) {
 
     let text;
     if (places.length === 1) {
-      text = cap.pid + ' took ' + first.place + ' from ' + first.from;
+      // "from NEUTRAL" is dropped. Neutral is empty ground, not an opponent, so
+      // the clause carries no information and it is 40% of the sentence — in a
+      // 176px rail that is the difference between "AUT took Mecklenburg" and
+      // "AUT took Mecklenbur…". Taking a city off a POWER is a different event
+      // and keeps its clause, which is now also what makes the two visually
+      // distinguishable at a glance.
+      text = (first.from === 'neutral')
+        ? cap.pid + ' took ' + first.place
+        : cap.pid + ' took ' + first.place + ' from ' + first.from;
     } else if (places.length === 2) {
       text = cap.pid + ' took ' + places[0] + ' and ' + places[1];
     } else {
@@ -857,9 +742,9 @@ function hudTickPaint(li, row) {
   li.setAttribute('data-weight', row.weight);
 }
 
-function hudTicker(state, nodes) {
-  const list = nodes.ticker;
-  if (!list) return;
+function hudTicker(state) {
+  const list = _hudTickerList;
+  if (!list || !list.isConnected) return;
 
   const log = state.log || [];
   const len = log.length;
@@ -929,14 +814,65 @@ function hudTicker(state, nodes) {
   }
 }
 
-// ── entry point ─────────────────────────────────────────────────────────
+// ── the ticker as a rail section ─────────────────────────────────────────
+//
+// Registered through the same public seam every other section uses
+// (render/readout.js). Order 90 puts it LAST, below the four contextual
+// station sections, which is the only place it can go: those sections appear
+// and vanish as the selection changes, and a ticker above them would jump down
+// the column every time the player clicked a city. Pinned to the floor it is
+// peripheral vision, which is what it is for.
+//
+// build() hands the <ul> straight to the module variable rather than to
+// hudNodes(). See the note there: railAddSection does not build until the first
+// frame, so resolving this by id during boot caches null forever.
+//
+// update() returns true unconditionally — the section stays visible with an
+// empty list. A slot that appears the first time anything happens is a slot the
+// player has to re-find, and 05-command-clarity.md is explicit that the rail
+// never moves under the cursor.
+function _hudTickerBuild(body) {
+  _hudTickerList = el('ul', 'ticker-list', { id: 'ticker-list' });
+  _hudTickerList.setAttribute('aria-live', 'polite');
+  // Rebuilt list means the <li> pool and every memo belong to a dead node.
+  _hudTickerItems = [];
+  _hudTickerKeys = [];
+  _hudTickerLastLen = -1;
+  _hudTickerLastTail = null;
+  _hudTickerLastEpoch = -1;
+  _hudTickerTopKey = null;
+  body.appendChild(_hudTickerList);
+  return { list: _hudTickerList };
+}
 
+function _hudTickerUpdate(state) {
+  hudTicker(state);
+  return true;
+}
+
+// LOUD, not guarded-and-silent. This file must load after render/readout.js or
+// railAddSection does not exist yet and the ticker simply never appears —
+// no error, no empty box, nothing to notice. That is known-issue #18 wearing a
+// different hat, and this project has already shipped an invisible ticker once.
+if (typeof railAddSection === 'function') {
+  railAddSection({
+    id: 'ticker',
+    order: 90,
+    build: _hudTickerBuild,
+    update: _hudTickerUpdate,
+  });
+} else {
+  console.error('[render/hud] no railAddSection at load — render/hud.js must ' +
+    'come AFTER render/readout.js in index.html. The ticker is not registered.');
+}
+
+// ── entry point ─────────────────────────────────────────────────────────
+//
+// The ticker is NOT called from here any more — the rail pumps it, once per
+// frame, via the section above. renderHud is down to the top bar.
 function renderHud(state) {
   if (!state) return false;
-  const nodes = hudNodes();
-  hudStats(state, nodes);
-  hudPowerStrip(state, nodes);
-  hudTicker(state, nodes);
+  hudStats(state, hudNodes());
   return true;
 }
 

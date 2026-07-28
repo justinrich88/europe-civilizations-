@@ -243,7 +243,7 @@ function controlOf(state, territoryId) {
 // satisfy every read liveStations makes, not just `owner`. It did not: with no
 // `units` bag, `const u = st.units; u.infantry` threw, renderBoard() died
 // part-way through, and the shell that is supposed to be viewable before
-// app/main.js exists took drawTerritoryLabels and drawPowerLegend down with it.
+// app/main.js exists took drawTerritoryLabels down with it.
 //
 // Nothing in the running game noticed, because the start screen creates GAME
 // before it calls renderBoard(). A bootstrap path that only runs when something
@@ -2042,24 +2042,13 @@ function drawTerritoryLabels(D, layer) {
   return drawn;
 }
 
-// Provisional ownership legend in the bottom bar. render/hud.js should take
-// this over once it exists; until then it is what makes the colours legible.
-function drawPowerLegend(D) {
-  const strip = byId('powers-strip');
-  if (!strip) return;
-  while (strip.firstChild) strip.removeChild(strip.firstChild);
-  if (!D.POWERS) return;
-  for (const pid of Object.keys(D.POWERS).sort()) {
-    if (pid === 'neutral') continue;
-    const p = D.POWERS[pid];
-    const chip = el('span', 'power-chip');
-    const sw = el('span', 'power-swatch');
-    sw.style.background = powerColor(D, pid) || 'var(--neutral-node)';
-    chip.appendChild(sw);
-    chip.appendChild(el('span', null, { text: p.name || pid }));
-    strip.appendChild(chip);
-  }
-}
+// The provisional ownership legend lived here and is GONE, along with the
+// bottom bar it drew into. It predated render/hud.js and existed only to make
+// the colours legible before anything else did; render/standings.js now owns
+// that job properly, in the rail, with real numbers instead of a swatch row.
+// Leaving it would have been worse than useless — it wrote into #powers-strip,
+// an element that no longer exists, so it was ~15 lines of no-op running on
+// every full board redraw.
 
 // ── live update — everything that changes, every frame ──────────────────
 //
@@ -2642,7 +2631,6 @@ function renderBoard() {
     stations: D.STATIONS ? drawStations(D, gStat, state) : 0,
     labels: drawTerritoryLabels(D, gLab),
   };
-  drawPowerLegend(D);
   // The veil's nodes, built alongside the board they cover. It draws nothing
   // until renderLive() hands it a believed board, so a viewerless board — the
   // empire picker, a harness — is unchanged.

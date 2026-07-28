@@ -19,7 +19,13 @@ const SCRIPTS = [
   // context with no `document` and no `window` — its exports are guarded for
   // exactly that. test/help-tests.js asserts the content against the same data.
   'render/help.js',
+  // The second render/ file here, for the same reason: render/standings.js
+  // computes its ranking from state alone, touches no DOM until the rail calls
+  // build(), and guards its railAddSection() registration — so it evaluates in
+  // a context with no `document` and no `window`.
+  'render/standings.js',
   'test/asserts.js', 'test/ai-tests.js', 'test/fog-tests.js', 'test/help-tests.js',
+  'test/scenarios-standings.js',
   'test/runner.js',
 ];
 for (const rel of SCRIPTS) {

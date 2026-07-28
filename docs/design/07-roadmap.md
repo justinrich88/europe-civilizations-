@@ -153,9 +153,19 @@ UI. Its interaction with B1 is the point: fortification taxes armies that go
 
 ### C3. Route state and the standings panel
 
-`05-command-clarity.md` §2–3. The data to answer *"is this route running"*
-already exists in `standingOrderNext` and never reaches the screen. The
-standings panel must be fog-filtered, so it lands after fog is settled.
+`05-command-clarity.md` §2. The data to answer *"is this route running"*
+already exists in `standingOrderNext` and never reaches the screen. **This is
+now the whole of C3** — and it is more urgent than it was, because the send
+amount became persistent: firing **All** from a routed city knocks its own
+supply line into the blocked state for ~775 ticks, where it renders at 30%
+opacity with its chevrons hidden and is indistinguishable from deleted.
+
+~~The standings panel must be fog-filtered, so it lands after fog is settled.~~
+**Both halves of that sentence were wrong, and it shipped 2026-07 as
+`render/standings.js`.** It is fully PUBLIC, restoring
+`02-visibility-and-sea.md`:254; the reasoning is in `05-command-clarity.md` §3
+and at the head of `render/standings.js`. Being public is also what made it
+independent of fog, so it did not have to wait at all.
 
 ---
 

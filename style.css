@@ -40,13 +40,12 @@
   /* geometry */
   --territory-fill-alpha: 0.42;
   --hud-h:         44px;
-  --bottom-h:      52px;
   /* The event ticker's slot, and the ONLY thing that decides how many rows it
-     shows: two rows of the 16px line-height set on .ticker-list li. It is a
+     shows: six rows of the 18px line-height set on .ticker-list li. It is a
      fixed height on purpose — an auto-height ticker grew the bottom bar to
      109px at 1280px, i.e. 56px of Europe spent on gossip, while showing
      nothing at all at 800px. See the ticker block for the measurements. */
-  --ticker-h:      32px;
+  --ticker-h:      108px;   /* six 18px rows; render/hud.js HUD_TICKER_MAX */
   --radius:        4px;
 
   --font: "Inter", "Helvetica Neue", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -341,86 +340,39 @@ html, body {
 
 .station-readout[hidden] { display: none; }
 
-/* ── bottom bar ───────────────────────────────────────────────────────── */
+/* ── the send amount, in the rail ─────────────────────────────────────────
+   The bottom bar is gone. It held four things — the send amount, a gesture
+   hint, a strip of power chips and the ticker — and cost 58px of board HEIGHT
+   at the 800x900 window the game is played at (known-issues #17), while the
+   rail beside it was measured showing 666px of empty column. The camera fits
+   the viewBox to the board box on BOTH axes, so those 58px were real map.
 
-.bottombar {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  height: var(--bottom-h);
-  flex: 0 0 var(--bottom-h);
-  padding: 0 14px;
-  background: var(--panel);
-  border-top: 1px solid var(--line);
-}
+   Where each went:
+     send amount   here, static markup at the top of the rail (index.html)
+     gesture hint  DELETED - render/help.js documents every gesture properly
+     power chips   DELETED - replaced by render/standings.js, and public
+     ticker        a rail section, pinned to the floor (render/hud.js)
+
+   `.send-control` also carries `.rail-section`, so the padding and the divider
+   rule come from the rail and this block only has to lay the row out. */
 
 .send-control {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
-  flex: 0 0 auto;
 }
 
-.powers {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 0 0 auto;
-}
+/* The label sits on its own line above the buttons: four buttons plus a `send`
+   label is 229px and the rail is 200px. Stacking is what makes the row fit
+   without shrinking the primary click target in the game. */
+.send-control .hud-label { flex: 1 0 100%; margin-bottom: 2px; }
 
-.power-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--ink-dim);
-}
-
-.power-swatch {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: var(--neutral-node);
-}
-
-.power-chip.is-dead { opacity: 0.35; text-decoration: line-through; }
-
-.ticker {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  border-left: 1px solid var(--line);
-  padding-left: 14px;
-}
-
-.ticker-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column-reverse;
-  /* column-reverse puts main-START at the BOTTOM, so flex-start pins the newest
-     row (DOM index 0) to the floor of the slot and stacks older ones upward.
-     Anything that does not fit overflows past the TOP and is clipped there —
-     i.e. the row that falls off is always the oldest. It used to be flex-end,
-     which only looked right because .ticker had no height to overflow; the
-     moment the slot became fixed that packed the stack to the ceiling and
-     dropped the NEWEST event off the bottom. */
-  justify-content: flex-start;
-  height: 100%;
-  overflow: hidden;
-}
-
-.ticker-list li {
-  color: var(--ink-dim);
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ticker-list li:first-child { color: var(--ink); }
+/* Four buttons across 176px of content. `flex: 1 1 0` divides the row evenly,
+   so all four targets are the same size and the widest label ("All") sets
+   nothing; the horizontal padding goes because at 44px a button does not need
+   it and the digit-plus-value label is already centred. */
+.send-control .send-btn { flex: 1 1 0; min-width: 0; padding-left: 0; padding-right: 0; }
 
 /* ── selection ─────────────────────────────────────────────────────────
    render/select.js only. 00-vision.md §8: selection is a caret above the
@@ -1282,7 +1234,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: calc(var(--hud-h) + 16px) 16px calc(var(--bottom-h) + 16px);
+  padding: calc(var(--hud-h) + 16px) 16px 16px;
   pointer-events: none;
   background: radial-gradient(ellipse at center,
               rgba(12, 15, 20, 0.55) 0%, rgba(12, 15, 20, 0.86) 100%);
@@ -1594,7 +1546,9 @@ html, body {
 /* ── event ticker (render/hud.js) ──────────────────────────────────────
    Peripheral awareness, not a log. render/ailog.js owns detail. */
 
-/* THE TICKER IS A FIXED SLOT, IN BOTH AXES. Measured before this rule existed:
+/* THE TICKER IS A FIXED SLOT, AND IT IS NOW IN THE RAIL.
+
+   The measurements that produced the old two-row slot were all about a BAR:
 
      window   .ticker width   bar height   board height   rows on screen
      800px    0  (display:none)     53px      803px            0
@@ -1602,60 +1556,145 @@ html, body {
      1280px   603px               109px      747px            5
      1600px   923px               109px      747px            5
 
-   Two failures, not one. Below 1080px the ticker was switched off outright, so
-   captures, capitulations, eliminations, relations AND landings were invisible
-   at the 800px window this game is played at (known-issues #17) — a whole class
-   of feature shipping unobservable. And above 1100px it was auto-height, so five
-   16px rows grew the bar to 109px and took 56px of Europe, which is exactly the
-   trade 00-vision.md §8 forbids: the board is the interface, the HUD is a thin
-   rail over the sea.
+   Every one of those failures was a consequence of sharing a horizontal row
+   with a send box and seven power chips. In a column there is nothing to share
+   with: the rail is a fixed 200px whether it is full or empty, so rows cost the
+   board exactly nothing, and the old trade — "five 16px rows take 56px of
+   Europe" — no longer exists. Six rows, 18px each, 108px. --ticker-h says so
+   and render/hud.js's HUD_TICKER_MAX says six; they must stay in step or "how
+   many events are visible" stops being measurable.
 
-   So: a HEIGHT that never depends on the window (--ticker-h, two rows), and a
-   WIDTH floor that applies at every size. The 240px floor is measured against
-   the sentences the ticker actually prints — the longest capture row is 191px at
-   11px, the longest landing row 197px, and a 'major' landing at 12px/600 is
-   228px — so 240px of box (225px of text after the rule and the padding) reads
-   the loudest events whole and ellipsises only the rare long one.
+   `margin-top: auto` pins the section to the FLOOR of the rail. The four
+   station sections above it appear and vanish as the selection changes, and a
+   ticker that slid up and down the column on every click would be unreadable
+   peripheral vision. Pinned, it is always in the same place.
 
-   The room comes out of `.powers`, which the narrow-width block near .send-hint
-   compacts to swatch-and-count. The older note here said shrinking the chips was
-   "a worse trade — who is on the board is permanent information". That is still
-   true of DROPPING a chip; it was never true of dropping the three-letter code,
-   because the swatch is the map colour and render/hud.js already says out loud
-   that "the swatch is already carrying the identity". Seven chips still on the
-   strip, still counting territories, still struck through when a power dies. */
-.ticker {
-  flex: 1 1 300px;
-  min-width: 240px;
+   The day stamp is hidden. It was already hidden below 1099px, which is to say
+   it has never once been visible at the 800px window the game is actually
+   played at (known-issues #17); 36px of a 176px row is a quarter of the
+   sentence, and the sentence is the point. render/hud.js still builds the
+   element - hiding it here keeps the two-authority problem away from a
+   presentation choice. */
+/* ── standings (render/standings.js) ──────────────────────────────────────
+   Replaces the row of power chips the bottom bar used to carry. It is PUBLIC —
+   not fog-filtered — which 02-visibility-and-sea.md:254 and
+   05-command-clarity.md:137 both already required and the chips were quietly
+   violating. See the note at the head of render/standings.js.
+
+   A four-column grid rather than a flex row, because the two numbers must line
+   up down the column: seven rows of right-aligned digits is a table you can
+   read at a glance, and seven rows of numbers that shuffle sideways as the
+   names change length is not. 1fr on the name is what lets it be the only
+   thing that gives when the rail is 200px. */
+.standings-row {
+  display: grid;
+  grid-template-columns: 9px 1fr auto auto;
+  align-items: center;
+  gap: 0 6px;
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--ink-dim);
+}
+
+.standings-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--neutral-node);
+}
+
+.standings-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tabular figures and a fixed minimum, so a power going from 9 to 10 does not
+   shove the whole column. --font-num is already the project's numeric face. */
+.standings-num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 17px;
+}
+
+/* Territories is the victory metric (00-vision.md §3) and reads full strength;
+   cities is supporting detail and reads dimmer. Two numbers at the same weight
+   is a row you have to decode rather than glance at. */
+.standings-num.is-terr { color: var(--ink); }
+.standings-num.is-cities { color: var(--ink-faint); }
+
+/* You. The accent bar is on the LEFT edge of the row rather than a background
+   fill: the swatch beside it is already a saturated colour, and two filled
+   blocks side by side made the row read as a second, brighter power. */
+.standings-row.is-me {
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+  padding-left: 4px;
+  margin-left: -6px;
+}
+.standings-row.is-me .standings-num.is-terr { color: var(--accent); }
+
+/* Dead powers STAY, struck through. Who has been knocked out is as informative
+   as who is leading, and removing the row would silently reflow every other
+   one — the same reasoning the old chips used, and still right. */
+.standings-row.is-dead {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+[data-rail-section="ticker"] {
+  margin-top: auto;
+  border-bottom: 0;
+}
+
+[data-rail-section="ticker"] .rail-body {
   height: var(--ticker-h);
 }
 
-@media (min-width: 1100px) {
-  .ticker { min-width: 300px; }
+.tick-day { display: none; }
+
+/* The <ul>. column-reverse puts main-START at the BOTTOM, so flex-start pins
+   the newest row (DOM index 0) to the floor of the slot and stacks older ones
+   upward. Anything that does not fit overflows past the TOP and is clipped
+   there — i.e. the row that falls off is always the oldest. */
+.ticker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-start;
+  height: 100%;
+  overflow: hidden;
 }
 
 .ticker-list li {
   display: flex;
   align-items: baseline;
   gap: 6px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+.ticker-list li:first-child { color: var(--ink); }
 
 /* Fade by age. Newest is DOM index 0 and, under column-reverse, the bottom
    row — so nth-child ramps opacity down as entries climb. Pure CSS: the age
    ramp costs renderHud nothing per frame, which matters because it runs at
    60fps and the rows shift on every event. */
 .ticker-list li:nth-child(1) { opacity: 1; }
-.ticker-list li:nth-child(2) { opacity: 0.72; }
-.ticker-list li:nth-child(3) { opacity: 0.52; }
-.ticker-list li:nth-child(4) { opacity: 0.36; }
-.ticker-list li:nth-child(5) { opacity: 0.24; }
-
-/* Day stamp. Bursts arrive in clumps, and without it four capture lines look
-   simultaneous when they are a week apart. It is also the first thing to go
-   when the bar is cramped — the sentence matters more than the timestamp. */
-@media (max-width: 1099px) {
-  .tick-day { display: none; }
-}
+.ticker-list li:nth-child(2) { opacity: 0.78; }
+.ticker-list li:nth-child(3) { opacity: 0.62; }
+.ticker-list li:nth-child(4) { opacity: 0.48; }
+.ticker-list li:nth-child(5) { opacity: 0.36; }
+.ticker-list li:nth-child(6) { opacity: 0.26; }
 
 .tick-day {
   flex: 0 0 auto;
@@ -2101,7 +2140,7 @@ html, body {
      up 15px underneath a cursor that was, by construction, one click away from
      naming a city. A banner that shifts the thing you are aiming at is worse
      than no banner. `fixed` needs no positioning context, so it also cannot be
-     broken by a later change to .app or .bottombar.
+     broken by a later change to .app or the rail.
 
      pointer-events:none is NOT optional: this floats over the board, and
      anything over the board that accepts pointer events silently eats the click
@@ -2176,140 +2215,20 @@ html, body {
   .send-armed { animation: none; }
 }
 
-/* THE HINT MUST SURVIVE AT 800px.
-   It used to `display: none` below 1000px, and the player's window is 800 —
-   so the single line that teaches right-click reinforce did not exist for the
-   person who needed it. Nothing else on screen carries that information, or the
-   three commit-time modifiers added beside it.
+/* The hint line, the bottom bar's wrap rules and the two narrow-reflow media
+   blocks lived here - roughly 140 lines of measured arithmetic about fitting a
+   send box, a hint, seven power chips and a ticker into 772px of an 800px
+   window. All of it goes with the bar. The rail solved the same problem by not
+   being a row: a column has no width arithmetic to get wrong, and it was
+   already there and empty.
 
-   The fix is a ROW, not a smaller font and not fewer words. Deleting
-   INF · ART · ARM freed ~156px of the send control, which is enough for one more
-   phrase and nowhere near enough for six: at 800px the bar's other tenants (send
-   control 202px, seven power chips 383px, padding and gaps 82px) leave ~133px,
-   and the ticker is already squeezed to 15px there and showing nothing.
+   The hint was DELETED rather than moved. It listed six gestures in 11px grey;
+   render/help.js lists all of them with diagrams, key-caps and the reason each
+   one exists, and opens on `?` from anywhere. A permanent one-line summary of a
+   screen you can open on demand is chrome.
 
-   So the hint always takes a line of its own, below the controls. Measured, this
-   costs ZERO board height at every width from 800 to 1500 — the controls row is
-   27px and the hint 14px, and 5 + 27 + 1 + 14 + 5 = 52 is exactly the bar height
-   that was already reserved. The bar looks the same size and now says six times
-   as much.
+   Kept below: everything that is about the board and never was about the bar. */
 
-   The earlier attempt kept the hint inline and tiered items away with media
-   queries. It shipped a measured 107px overflow at 1250px: a four-phrase hint is
-   390px and the shared row only has ~283px to give once the ticker claims its
-   300px floor. A row of its own has no such arithmetic to get wrong. */
-.send-hint {
-  display: flex;
-  align-items: center;
-  /* Wraps only as a last resort — below ~700px, outside the supported range,
-     where a second line is better than a clipped one. */
-  flex-wrap: wrap;
-  gap: 2px 14px;
-  margin: 0;
-  /* `order: 3` puts the hint after the powers strip and the ticker in VISUAL
-     order while leaving the DOM alone, so the wrap produces two rows (controls,
-     then hint) rather than three. `flex: 1 0 100%` is what forces the break. */
-  order: 3;
-  flex: 1 0 100%;
-  overflow: hidden;
-  font-size: 11px;
-  line-height: 1.2;
-  color: var(--ink-faint);
-  white-space: nowrap;
-}
-
-/* The bar must be allowed to wrap and to size to its content, or `flex: 0 0
-   var(--bottom-h)` pins it and the second row is simply painted outside. */
-.bottombar {
-  flex-wrap: wrap;
-  height: auto;
-  min-height: var(--bottom-h);
-  flex: 0 0 auto;
-  row-gap: 1px;
-  padding-top: 5px;
-  padding-bottom: 5px;
-  align-content: center;
-}
-
-/* NARROW REFLOW — the 800px window this game is played at.
-   Replaces `@media (max-width:1080px){ .ticker{display:none} }`, which was
-   written when the ticker was 15px wide there and correctly observed that 15px
-   holds no event. It fixed the symptom by deleting the feature: at 800px the
-   ticker had never once been seen, so landings, captures, capitulations,
-   eliminations and relations were all equally invisible in real play.
-
-   The arithmetic it was up against, measured at 800px (772px of content after
-   the bar's 14px padding, on the controls row — .send-hint is `flex: 1 0 100%`
-   and takes a row of its own):
-
-     send control  229px  +  power strip  383px  +  2 gaps  36px  =  648px
-     left for the ticker                                          =  124px
-
-   124px is a fifth of a sentence. So the room is taken from the strip, and from
-   the strip's LABELS rather than from its chips:
-
-     .power-name off        -7 x 21.4px  and  -7 x 5px of chip gap   -185px
-     .powers gap 10 -> 6                                              -24px
-     .bottombar gap 18 -> 10                                          -16px
-
-   which leaves the ticker ~305px at 800px — more than the 300px floor the wide
-   layout already treats as adequate. Nothing is dropped from the strip: seven
-   chips, seven live territory counts, seven map colours, and the full power name
-   still on each chip's `title`. render/hud.js's own note on those labels is that
-   they are a short code precisely because "the swatch is already carrying the
-   identity"; below 1100px we take it at its word.
-
-   The `is-dead` treatment survives the change: `line-through` now strikes the
-   count instead of the code, which is still the chip going visibly out.
-
-   NOT done, and why:
-   - Ticker on its own row. It is the obvious fix and it costs 33px of Europe at
-     the one width that cannot spare it (§8). This costs 5px — the slot is 32px
-     against a 27px controls row — and it hands 52px BACK at 1280px.
-   - Shrinking the send buttons. They are the primary control and the only click
-     target in the bar; a volley amount is not the thing to make harder to hit.
-   - Tiering the .send-hint away. Its natural width is 743px of the 772px at
-     800px, so it has nothing to give without deleting the only line on screen
-     that says the right button marches — and it already sheds its two basic
-     phrases at 700px, below the supported range. */
-@media (max-width: 1099px) {
-  .bottombar { column-gap: 10px; }
-
-  .powers { gap: 6px; }
-
-  /* The three-letter code goes; the swatch and the live territory count stay.
-     `title` on the chip (set in render/hud.js) still names the power in full. */
-  .power-chip .power-name { display: none; }
-
-  /* One extra pixel each way, so the swatch reads as the identity token it is
-     now carrying alone rather than as a bullet in front of a number. Costs 7px
-     of the 185px the labels gave back. */
-  .power-swatch { width: 10px; height: 10px; }
-
-  /* The rule and its gutter are 15px of a 305px box here; 8px is enough to keep
-     the ticker visibly separate from the strip without eating a word. */
-  .ticker { padding-left: 8px; }
-}
-
-/* Last-resort narrowing, below the supported range: drop the two phrases that
-   describe what a player discovers in the first ten seconds. The right button
-   and the modifiers are the ones nothing else on screen would ever tell them,
-   so they are never the ones dropped. */
-@media (max-width: 700px) {
-  .send-hint .send-hint-item.is-basic { display: none; }
-}
-
-.send-hint-item b {
-  color: var(--ink-dim);
-  font-weight: 600;
-  /* The modifier glyphs (⇧ ⌥ ⌘) are punctuation in the body font and render
-     small and pale beside the words they qualify. */
-  font-size: 12px;
-}
-
-/* The routed preview. One <path> per source, one quadratic per hop — the
-   link's own arc, so a preview over a sea crossing bows exactly where the link
-   and the wave do (render/map.js's link-geometry seam). */
 .sel-path {
   fill: none;
   stroke: var(--warn);
@@ -2621,7 +2540,6 @@ html, body {
    800px width the game is actually played at. */
 .app.is-choosing .hud,
 .app.is-choosing .rail,
-.app.is-choosing .bottombar { display: none; }
 
 /* The camera cluster and its pan/zoom hint go with them, for the same reason
    and for one more. render/camera.js self-bootstraps on DOMContentLoaded, so

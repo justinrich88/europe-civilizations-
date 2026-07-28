@@ -323,21 +323,31 @@ Single-station orders are the same gesture with one source selected, and **drag 
 > - **A readout answers the question on screen, or it says nothing.** Any predicted quantity comes from the function that makes the decision — never from a parallel calculation that happens to agree today (`docs/testing/known-issues.md` #18).
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Territories 14/48   Forces 312   ⏸ 1x 2x 4x   │ Day 42  │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│      1914 Europe — territories tinted by controller      │
-│      stations as nodes sized by capacity,                │
-│      shaped by type (◉ city  ▲ fort  ■ factory  ✦ farm)  │
-│      transit trails while waves are in flight            │
-│                                                          │
-│      marquee-select your nodes → click one target        │
-│                                                          │
-├──────────────────────────────────────────────────────────┤
-│  send: 25 · 50 · [75] · All     powers + event ticker    │
-└──────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────┬─────────────┐
+│  Territories 14/48  Forces 312  ⏸ 2x 4x   Day 42  ? GUIDE│
+├────────────────────────────────────────────┼─────────────┤
+│                                            │ send 25 50  │
+│    1914 Europe — territories tinted by     │      75 All │
+│    controller, stations as nodes sized     ├─────────────┤
+│    by capacity, shaped by type             │ your empire │
+│    (◉ city  ▲ fort  ■ factory  ✦ farm)     ├─────────────┤
+│                                            │ standings   │
+│    transit trails while waves fly          ├─────────────┤
+│                                            │ the city    │
+│    marquee-select your nodes →             │ you clicked │
+│    click one target                        ├─────────────┤
+│                                            │ ticker      │
+└────────────────────────────────────────────┴─────────────┘
 ```
+
+**THE BOTTOM BAR IS GONE (2026-07).** The sketch above used to show a second
+bar carrying `send · powers · ticker`. It cost 58px of board *height* at the
+800×900 window the game is actually played at, while the right rail beside it
+was measured showing **666px of empty column** — so the bar was spending map to
+avoid using space that was already paid for and blank. Everything in it moved
+into the rail or was deleted; `01-data-schema.md` has the DOM and the reasoning
+per item. The rail is a fixed 200px whether it is full or empty, which is what
+makes a column the cheap place to put a readout and a row the expensive one.
 
 Deliberately **not** present: build queue, resource bar, posting sliders, production menu, diplomacy inbox. All cut.
 
