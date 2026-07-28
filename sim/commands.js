@@ -106,13 +106,28 @@ function _cmdFallbackRoute(fromSid, toSid, canPass) {
 // asked for the new behaviour. Everything that decides whether a send is LEGAL
 // must pass state and pid — applyCommand below does, and the preview should
 // too, or it will draw a line the commit then rejects.
+//
+// THE FALLBACK'S PASSABILITY RULE MIRRORS `_moveCanTraverse` IN sim/movement.js,
+// and it stopped doing so once. It read `owner === pid || owner === 'neutral'`,
+// which was the traversal rule until the capital-only opening made 101 of 108
+// stations neutral at turn zero and neutral ground became impassable (the long
+// block above `_moveCanTraverse` has the measurement: Britain marched out of
+// London and captured Berlin through three unfought garrisons). This copy was
+// left behind, still claiming in its own comment to mirror the other one.
+//
+// Nothing reaches it in a build where sim/movement.js loaded, which is what let
+// it rot — and is exactly why it is written down here rather than trusted: a
+// validation path that only runs when something else is already broken must
+// still give the SAME verdict as the real rule, or the one time it runs it
+// accepts a volley that then marches into a garrison it should have fought
+// (docs/testing/known-issues.md #9, #20).
 function commandRoute(fromSid, toSid, state, pid) {
   var canPass = null;
   if (state && state.stations && pid) {
     if (typeof routeFor === 'function') return routeFor(state, pid, fromSid, toSid);
     canPass = function (sid) {
       var st = state.stations[sid];
-      return !!st && (st.owner === pid || st.owner === 'neutral');
+      return !!st && st.owner === pid;
     };
   } else if (typeof routeBetween === 'function') {
     return routeBetween(fromSid, toSid);

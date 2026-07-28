@@ -1011,6 +1011,52 @@ function _ordBlocked(target, why) {
   return { target: target, units: 0, fraction: 0, blocked: why };
 }
 
+// ---------------------------------------------------------------------------
+// WHO GOES FIRST — and why it must not always be the same city.
+//
+// The plan books headroom as it goes, so when several sources feed ONE
+// destination the sources at the front of the list get the room and the ones
+// behind them read `destination-full`. That is correct arithmetic and it was
+// the wrong QUEUE: the list was STATION_IDS order, which is alphabetical, which
+// is a ranking the sim applies off screen — exactly the thing THE EVEN SPLIT
+// above refuses to do one paragraph earlier, arriving through the back door.
+//
+// Measured on a live board, five cities feeding one front city that was
+// spending what it received, over 160 sweeps:
+//
+//     ber 160    bre 2    brn 2    fra 1    ham 1
+//
+// and with `ber` dropped from the group it was `bre` — the smallest of the five
+// — that won 61 sweeps while `ham`, more than twice its capacity, took 2. Not
+// size, not distance, not need: the id. Four of the player's five feeders sat
+// dark forever, which is what "they're not consistently still sending troops"
+// looks like from the outside, and the map drew four dimmed pipes with no
+// arrows on them to say so.
+//
+// So the sweep starts at a different feeder each time and wraps. One line, and
+// it is the whole fix: throughput is unchanged (the same total room is spent by
+// the same total of sources), and over N sweeps each of N feeders leads once.
+// "They take turns" is a rule the player can state and check off the board,
+// which is the bar the even split was held to.
+//
+// TIED TO THE SWEEP NUMBER, NOT TO A COUNTER IN STATE. `state.tick` is already
+// what decides whether a sweep happens at all, so deriving the rotation from it
+// keeps the phase a pure function of the board — a counter would be a second
+// piece of sim state to snapshot, replay and get wrong.
+//
+// CEIL, NOT FLOOR, because this predicts the NEXT sweep and the readout asks
+// between sweeps. On a sweep tick the two agree exactly (tick % INTERVAL === 0),
+// which is the only moment the exactness test compares them. For the ONE tick
+// immediately after a sweep the answer names the sweep that just ran rather than
+// the one 25 ticks out; every other tick in the window is exact.
+function _ordRotation(state, n) {
+  if (!(n > 1)) return 0;
+  var iv = (BAL.ORDERS.INTERVAL > 0) ? BAL.ORDERS.INTERVAL : 1;
+  var tick = (state && isFinite(state.tick)) ? state.tick : 0;
+  var r = Math.ceil(tick / iv) % n;
+  return r < 0 ? r + n : r;
+}
+
 // A source's whole answer: `{ units, edges, blocked, target }`.
 //
 //   units    total leaving this city on the next sweep, summed over its edges
@@ -1043,6 +1089,17 @@ function _ordPlanPower(state, pid) {
     if (st.supplyTo && st.supplyTo.length) sources.push(sid);
   }
   if (!sources.length) return out;
+
+  // Rotate the queue so a scarce destination is not fed by the same city every
+  // sweep — see _ordRotation. In place, because `sources` IS `out.sources` and
+  // _ordSweepPower issues the commands in exactly this order: the plan sizes
+  // each send against what the previous one left, so the two must walk the same
+  // sequence or the prediction stops being exact.
+  var off = _ordRotation(state, sources.length);
+  if (off) {
+    var head = sources.splice(0, off);
+    for (i = 0; i < head.length; i++) sources.push(head[i]);
+  }
 
   var inbound = _ordInbound(state, pid);
 
