@@ -621,3 +621,47 @@ close to the real rendered width (600 for this card at the 800px window). Same
 failure shape as #17: a number that only means what it says at one width.
 
 **Caught by screenshotting, not by any assertion** — nothing tests it.
+
+---
+
+## 22. A `railAddSection()` call at load time is a load-order dependency, and the `typeof` guard turns getting it wrong into a silently missing feature
+
+`railAddSection` is a top-level `function` in `render/readout.js`. Hoisting is
+per-file, so it does not exist until that file has run — any file that registers
+a section **at load time** must have its `<script>` tag *after* `render/readout.js`.
+
+The natural way to write the call is the project's usual defensive shape:
+
+```js
+if (typeof railAddSection === 'function') { railAddSection({ ... }); }
+```
+
+and that is the trap. Wrong order and the guard is false, the section is never
+registered, and the result is **no error, no empty box, and nothing on screen to
+notice** — the rail simply renders one section fewer than it should. It is #18
+wearing a different hat, and this project has already shipped an invisible
+ticker once.
+
+Two files hit it in one session. `render/hud.js` had sat above `render/map.js`'s
+neighbours since it was written; the day its ticker became a rail section it had
+to move below `render/readout.js`, and nothing about the file's contents says
+so. `render/standings.js` was written with the same silent guard.
+
+**The rule: guard, but make the else branch loud.**
+
+```js
+} else {
+  console.error('[render/hud] no railAddSection at load — render/hud.js must ' +
+    'come AFTER render/readout.js in index.html. The ticker is not registered.');
+}
+```
+
+A guard that returns quietly is only correct when *not doing the thing* is an
+acceptable outcome. For a registration it never is: the guard exists to survive
+a harness with no rail, and a harness will not read the console, while a human
+who has just broken the order will.
+
+**Corollary for `tests-ui.html`:** this is also why that harness loads
+`index.html` in an iframe instead of copying its script tags. A duplicated
+script list would have kept the old order and gone on passing while testing a
+page nobody ships — #9, in the form where the drift is invisible.
