@@ -275,6 +275,9 @@ function runAllTests() {
   // The standings panel — test/scenarios-standings.js. Second render/ file the
   // harness loads, and safe for the same reason: the ranking is a pure function
   // of state and no DOM is touched until the rail calls build().
+  // Supply routes under command — test/scenarios-routes.js.
+  if (typeof suiteRoutes === 'function') suiteRoutes(d);
+
   if (typeof suiteStandings === 'function') suiteStandings(d);
 
   // Selection gestures — test/select-tests.js. This one is NOT reached by

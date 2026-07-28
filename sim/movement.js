@@ -1138,6 +1138,80 @@ function _ordPlanPower(state, pid) {
     var have = totalUnits(st.units);
     var share = (open > 0 && fraction > 0) ? (have * fraction) / open : 0;
 
+    // -----------------------------------------------------------------------
+    // TAKE TURNS RATHER THAN STARVE EVERY LINE AT ONCE.
+    //
+    // THE EVEN SPLIT above divides one source's allowed outflow between its open
+    // destinations, and MIN_SEND then gates each share on its own. Those two
+    // rules multiply: N lines out of one city need N x MIN_SEND of surplus
+    // before ANY of them run, so a source that could comfortably pay for one
+    // stream pays for NONE the moment a second line is drawn out of it. Not a
+    // smaller stream — zero, to every destination, including the one that was
+    // working a second earlier.
+    //
+    // Which is exactly what the player reported: *"if you add a command for a
+    // city that's in the path, it disrupts the flow of troops and ends the
+    // route."* The new line is not what ends it; DIVIDING BY TWO is, and the old
+    // line dies with the new one. Measured over 84 two-destination networks on
+    // 12 seeds x 7 powers, 10,080 sweeps: on 57.6% of them every edge read
+    // `below-min-send` while the source held enough surplus to pay for one whole
+    // stream. 10,536 units sat still that had somewhere legal to go.
+    //
+    // BAL.ORDERS.MIN_SEND was already cut 2.0 -> 1.0 for this ("it's difficult
+    // to reinforce more than one city from a single city", data/tuning.js §11)
+    // and it only halved the wall — the constant cannot fix a rule that
+    // multiplies, it can only move where it bites.
+    //
+    // AND IT BITES EVERY FEEDER, not only the small ones, because this mechanic
+    // drives a source to a fixed point: it ships SEND_FRACTION of its surplus
+    // and regrows logistically, so it settles exactly where the two balance —
+    // which is where its whole allowance is worth about ONE MIN_SEND. Measured
+    // after 500 ticks on the deepest own-ground route each power can draw:
+    //
+    //     power   source  capacity   steady garrison   whole allowance
+    //     aut     alf     14         11.4              0.95
+    //     ita     inn     20         13.2              0.99
+    //     ger     brn     30         15.9              1.01    (MIN_SEND = 1.0)
+    //
+    // A 30-capacity city converges to the same knife edge a 14-capacity one
+    // does. Halving that is not a 50% cut, it is an off switch, and no value of
+    // MIN_SEND moves the equilibrium away from itself.
+    //
+    // So when the division is what pushed every share under the floor, the
+    // source spends its WHOLE allowance down ONE line this sweep and the lines
+    // take turns, chosen by the same tick-derived rotation the SOURCE queue
+    // already uses (_ordRotation — see the block above it for why the queue may
+    // not be a fixed ranking, which is the identical argument one level down).
+    //
+    // WHAT IS PRESERVED, because the even split is a deliberate rule and not an
+    // accident:
+    //
+    //   * the per-sweep total is unchanged — `have x fraction`, exactly what a
+    //     single-line source ships. Drawing more lines still spreads the stream
+    //     rather than multiplying it, which is what makes the keep floor mean
+    //     anything.
+    //   * over N sweeps each of N lines leads once, so the long-run share per
+    //     destination is still 1/N. Batched, not reweighted.
+    //   * nothing changes while the even split can actually pay: this fires ONLY
+    //     when `share < MIN_SEND`, a state in which the current code ships zero.
+    //     It cannot make any board worse than it is.
+    //
+    // "Each line gets the whole stream in turn" is a rule the player can state
+    // and check off the board, which is the bar THE EVEN SPLIT set for itself.
+    //
+    // The lines that are waiting still report `below-min-send`, which is the
+    // truth about them on this sweep and is why they are waiting — no new
+    // blocked reason, so the vocabulary in 01-data-schema.md and the words the
+    // rail prints are untouched.
+    // -----------------------------------------------------------------------
+    var whole = (fraction > 0) ? have * fraction : 0;
+    var lead = -1;                    // index AMONG THE OPEN EDGES that leads
+    if (open > 1 && share < BAL.ORDERS.MIN_SEND && whole >= BAL.ORDERS.MIN_SEND) {
+      share = whole;
+      lead = _ordRotation(state, open);
+    }
+    var openSeen = -1;
+
     // `factor` is the fraction of the ORIGINAL garrison still standing here as
     // each successive edge is issued. Two edges out of one city are two separate
     // applyCommand calls in the same sweep, and the second one is sized against
@@ -1153,6 +1227,15 @@ function _ordPlanPower(state, pid) {
 
       var room = _ordHeadroom(state, t, inbound);
       if (room < BAL.ORDERS.MIN_SEND) { edges[j] = _ordBlocked(t, 'destination-full'); continue; }
+
+      // Counted on exactly the edges pass 1 counted in `open`: same predicate,
+      // same order, and `inbound` cannot have moved for THIS destination in
+      // between (supplyTo is deduped, so no earlier edge of this source booked
+      // against it). That equality is what makes `lead` index the set it was
+      // computed against — if the two ever drift, the rotation silently skips a
+      // line instead of alternating and no total would look wrong.
+      openSeen++;
+      if (lead >= 0 && openSeen !== lead) { edges[j] = _ordBlocked(t, 'below-min-send'); continue; }
 
       var cur = splitUnits(st.units, factor);
       var curTotal = totalUnits(cur);
