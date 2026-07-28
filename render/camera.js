@@ -149,6 +149,8 @@ var CAM = {
   fit: null,      // base grown to the element's aspect ratio
   rect: null,     // cached element box, refreshed on resize only
   view: null,     // current viewBox {x,y,w,h}
+  attr: null,     // last viewBox STRING written, so a no-op move writes nothing
+  scale: null,    // last scale notified; fit can move while the string does not
   pan: null,      // { cx, cy } last client point while dragging
   ctxSuppress: false,
   // arrow-key pan: held direction flags, eased velocity, and the rAF handle.
@@ -220,9 +222,39 @@ function _camSet(v) {
   x = Math.min(f.x + f.w - w, Math.max(f.x, x));
   y = Math.min(f.y + f.h - h, Math.max(f.y, y));
 
+  // A NO-OP MOVE WRITES NOTHING. This is the fix for the flicker at the ends of
+  // the range, and it belongs here rather than at any caller because this is the
+  // single write path — the wheel, the +/- buttons and the keys all arrive
+  // through it, and so does every future one.
+  //
+  // The clamps above are unconditional, so pushing PAST the ceiling produced a
+  // perfectly valid result identical to the current one, and this function then
+  // wrote it anyway. Measured: eight `+` clicks at 4x produced eight viewBox
+  // writes whose value never changed. A wheel delivers dozens of events a
+  // second, and each redundant write re-lays-out the whole SVG and re-notifies
+  // every subscriber — render/map.js counter-scales 138 station symbols on each
+  // one. That storm of identical work is what the player sees as flicker.
+  //
+  // Compared as the ROUNDED STRING rather than as four floats, because the
+  // string is what actually reaches the DOM: _camNum trims to 3dp, so two views
+  // that differ by 1e-14 are the same viewBox, and treating them as different
+  // would leave a slow leak of exactly this bug behind.
+  var attr = _camNum(x) + ' ' + _camNum(y) + ' ' + _camNum(w) + ' ' + _camNum(h);
+  var moved = (attr !== CAM.attr);
+
   CAM.view = { x: x, y: y, w: w, h: h };
-  CAM.svg.setAttribute('viewBox',
-    _camNum(x) + ' ' + _camNum(y) + ' ' + _camNum(w) + ' ' + _camNum(h));
+
+  // `fit` can change under a resize while the viewBox rounds to the same string,
+  // and scale is fit.w / view.w — so the string alone is not enough to decide
+  // that subscribers have nothing to do. Both are checked.
+  var scale = _camScale();
+  var rescaled = (scale !== CAM.scale);
+
+  if (!moved && !rescaled) return;
+
+  CAM.attr = attr;
+  CAM.scale = scale;
+  if (moved) CAM.svg.setAttribute('viewBox', attr);
   _camSyncControls();
   _camNotify();
 }
@@ -632,6 +664,12 @@ function initCamera() {
     return false;
   }
   CAM.svg = svg;
+  // A fresh element has the AUTHORED viewBox on it, whatever _camSet last
+  // wrote. Clearing the memo here means "no-op moves write nothing" can never
+  // become "the first move after a rebuild writes nothing", which would be the
+  // same optimisation turning into a camera that will not move.
+  CAM.attr = null;
+  CAM.scale = null;
 
   // The authored viewBox is the whole board; tools/build-map.js fits the
   // projected geometry to it. Read it rather than hard-coding 1000x700, so the

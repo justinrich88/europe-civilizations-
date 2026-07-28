@@ -75,6 +75,7 @@ var TEST_FILES = [
   'test/asserts.js',
   'test/runner.js',
   'test/select-tests.js',
+  'test/camera-tests.js',
   // Loaded for its BOARD FIXTURES, not to be run — scenarios-routeview.js
   // reuses them rather than copying them, which is the right call
   // (known-issues #9) and the reason this line is not obviously necessary.
@@ -86,7 +87,14 @@ var TEST_FILES = [
 
 // Suite entry points to call, in order. Named rather than discovered so a suite
 // that fails to load is a hard error below instead of silently not running.
-var TEST_SUITES = ['suiteSelect', 'suiteRouteView'];
+//
+// THEY RUN ONE AT A TIME, AND EACH IS AWAITED. test/asserts.js keeps a single
+// module-global `_currentSuite` and every assert() pushes into it, so a suite
+// that returns a promise — test/camera-tests.js does, because MutationObserver
+// is asynchronous — would file its assertions under the NEXT suite's name if
+// this loop moved on without waiting. Silently, with the totals still adding
+// up. Awaiting a non-promise is free, so the rule is simply: always wait.
+var TEST_SUITES = ['suiteSelect', 'suiteRouteView', 'suiteCamera'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');
@@ -157,8 +165,12 @@ frame.addEventListener('load', function () {
 
       win.resetTests();
       var d = (typeof win.collectData === 'function') ? win.collectData() : {};
-      TEST_SUITES.forEach(function (n) { win[n](d); });
-
+      // Sequential and awaited — see the note on TEST_SUITES.
+      return TEST_SUITES.reduce(function (chain, n) {
+        return chain.then(function () { return win[n](d); });
+      }, Promise.resolve());
+    })
+    .then(function () {
       var summary = win.summarizeTests();
       var text = (typeof win.formatResults === 'function')
         ? win.formatResults()
@@ -169,12 +181,35 @@ frame.addEventListener('load', function () {
       // yet; on this page every suite's dependencies are loaded by definition,
       // so a skip can only mean the suite could not find what it needed and
       // said nothing about it.
-      var bad = summary.fail > 0 || summary.skip > 0;
-      say(text + (summary.skip > 0
-        ? '\n\n!! ' + summary.skip + ' SKIPPED — a skip is a failure on this ' +
-          'page: every dependency is loaded here, so a suite that skipped ' +
-          'could not find something and did not say so.'
-        : ''), bad ? 'bad' : 'ok');
+      //
+      // AN EMPTY SUITE IS A FAILURE TOO, and that rule is here because the
+      // absence of it let a suite through. test/asserts.js only records via
+      // test(name, fn); a bare assert() throws on failure and records NOTHING
+      // on success, so a suite written with bare assertions measured the right
+      // things, asserted the right things, reported 0/0 and printed green.
+      // `summary.skip` did not catch it because there was nothing to skip.
+      // known-issue #8: a test that cannot fail is worse than no test, and a
+      // suite that cannot report is the same thing one level up.
+      var empty = [];
+      for (var i = 0; i < win.TEST_RESULTS.length; i++) {
+        var s = win.TEST_RESULTS[i];
+        if (!s.skipped && s.tests.length === 0) empty.push(s.name);
+      }
+
+      var bad = summary.fail > 0 || summary.skip > 0 || empty.length > 0;
+      var notes = '';
+      if (summary.skip > 0) {
+        notes += '\n\n!! ' + summary.skip + ' SKIPPED — a skip is a failure on ' +
+          'this page: every dependency is loaded here, so a suite that skipped ' +
+          'could not find something and did not say so.';
+      }
+      if (empty.length) {
+        notes += '\n\n!! ' + empty.length + ' SUITE(S) RECORDED NOTHING: ' +
+          empty.join(', ') + '\n   A suite that runs and asserts nothing is ' +
+          'the loudest possible green lie. Check for bare assert() calls ' +
+          'outside test(name, fn).';
+      }
+      say(text + notes, bad ? 'bad' : 'ok');
 
       // Machine-readable, so a browser-driving harness can read one value
       // instead of scraping the <pre>.
