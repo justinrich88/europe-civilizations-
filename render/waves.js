@@ -158,11 +158,22 @@ const WAVE_LAND_BUCKETS = 100;
 // link tells you the owner, the strength, the origin, the destination and the
 // ETA in one glance.
 //
-// THE RULE: an enemy wave is drawn only while the hop it is CURRENTLY ON has an
-// endpoint the viewer can see live (level 2). Not "has ever seen" — a wave is a
+// THE RULE: an enemy wave is drawn only while BOTH ENDS of the hop it is
+// CURRENTLY ON are visible live (level 2). Not "has ever seen" — a wave is a
 // thing happening now and there is no memory of one; state.seen records owner,
 // units, connected and a tick, and nothing about anybody's marching columns.
 // Own waves are always drawn, in fog or out of it: you know where you sent them.
+//
+// BOTH, not EITHER, and the change is a player report rather than a theory.
+// The either-rule drew a column sliding out of a lit station into ground the
+// player had never laid eyes on, and it read as exactly what it was — the
+// destination leaking. In the player's words: "I shouldn't see units moving to
+// a station unless I see both stations in the route." A marker carries the
+// owner, the strength, the origin, the destination and the ETA in one glance,
+// so half a hop of sight buying a whole hop of intelligence is the largest
+// single leak fog could ship. Level 2 at both ends is also the exact condition
+// under which the hop is a road the player could march down themselves, so the
+// rule costs nothing they could have acted on.
 //
 // THE TRAP, AND WHY THE GATE SITS WHERE IT DOES. renderWaves ends by removing
 // the node of every wave that was not marked in `seen` this frame — that is how
@@ -173,7 +184,7 @@ const WAVE_LAND_BUCKETS = 100;
 // for the rest of the game — a ghost that is worse than no marker at all,
 // because it looks exactly like a real stack that has stopped.
 function _wavHopSeen(vis, a, b) {
-  return vis[a] === 2 || vis[b] === 2;
+  return vis[a] === 2 && vis[b] === 2;
 }
 
 function resetWaveLayer() {

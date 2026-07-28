@@ -614,14 +614,24 @@ function mapFogLevels(state) {
 // its Dijkstras from scratch every tick — 0.115us becomes 161us, with no wrong
 // answer anywhere, only a game that crawls (02-visibility-and-sea.md §1).
 // Nothing outside liveTerritories() below is given this object.
+// It also carries `level` — the 0/1/2 table itself, per station, minted by the
+// same believedStation() call the owner comes out of. THREE consumers now need
+// a level and only one of them needs a garrison: the country tint (here), the
+// link gate (mapFogLinks) and the veil (mapVeil). Recording the number while it
+// is already in hand is what keeps those three from each running their own
+// 108-station believedStation sweep, and — more to the point — what keeps them
+// from each composing "visible now, or remembered ever" a second time. There is
+// exactly one composition of that on this board and vision.js owns it.
 function mapBelievedBoard(state, pid, vis) {
   if (_mapFogBoard) return _mapFogBoard;
   const stations = Object.create(null);
   const unknown = Object.create(null);
+  const level = Object.create(null);
   const ids = (typeof STATION_IDS !== 'undefined' && STATION_IDS) ? STATION_IDS : [];
   for (let i = 0; i < ids.length; i++) {
     const sid = ids[i];
     const b = believedStation(state, pid, sid, vis);
+    level[sid] = b.level;
     if (b.level === 0) {
       stations[sid] = { owner: MAP_FOG_UNKNOWN };
       unknown[sid] = true;
@@ -629,8 +639,19 @@ function mapBelievedBoard(state, pid, vis) {
       stations[sid] = { owner: b.owner };
     }
   }
-  _mapFogBoard = { proxy: { stations: stations }, unknown: unknown };
+  _mapFogBoard = { proxy: { stations: stations }, unknown: unknown, level: level };
   return _mapFogBoard;
+}
+
+// The believed board for this frame, or null when there is no viewer and
+// nothing is masked. One call, memoised inside mapFogLevels/_mapFogBoard, so
+// every consumer below is reading the same object — and `bel === lastBel` is a
+// sound "nothing moved" test because the memo mints a NEW object exactly when
+// the fog changed.
+function mapFogBelief(state) {
+  const vis = mapFogLevels(state);
+  if (!vis || typeof believedStation !== 'function') return null;
+  return mapBelievedBoard(state, mapViewer(state), vis);
 }
 
 // The control tier of one territory on the believed board.
@@ -708,6 +729,283 @@ function mapFogStale(rec, on) {
   if (rec.fillArc) rec.fillArc.style.display = on ? 'none' : '';
   if (rec.fillTrack) rec.fillTrack.style.display = on ? 'none' : '';
   LIVE.writes += 5;
+}
+
+// ── the link gate ───────────────────────────────────────────────────────
+//
+// A link is drawn only when BOTH endpoints are at level >= 1 — visible now, or
+// remembered. Never-seen ground has no roads on it.
+//
+// It used to draw all 236 regardless, and the argument for that was that
+// 02-visibility-and-sea.md keeps "routing legality on the true board", so
+// hiding a road the player may legally march down would contradict the spec.
+// That argument conflates WHAT THE SIM ALLOWS with WHAT THE SCREEN SHOWS.
+// Hiding the line does not stop a wave traversing it; routeFor still runs on
+// the complete board and the preview still commits. Nothing about legality
+// moved.
+//
+// What it cost was the whole picture. Every road on the map radiated out of
+// the lit ground into blank grey — a network with no nodes on it, drawn over
+// territory the player had never entered. On screen that does not read as fog,
+// it reads as a renderer that failed half way through, and that is exactly
+// what it was reported as.
+//
+// AND THERE IS PROVABLY NO GAMEPLAY LOSS. A wave may only leave ground its
+// owner holds, and held ground is level 2 by construction; every station
+// adjacent to it is within one hop and therefore also level 2. So every link
+// the player could actually use this instant already has both endpoints
+// visible and is drawn. The links that vanish are the ones leading somewhere
+// they cannot yet go, and watching the network grow as they explore is a
+// feature rather than a subtraction.
+//
+// LIVE, NOT BUILD-TIME. Fog changes every tick and the board is built once, so
+// this runs in the per-frame path off renderLive(). A link whose far end is
+// seen for the first time appears on that frame, with no renderBoard() rebuild
+// — the same reason liveStations exists.
+//
+// `display` is an INLINE STYLE (known-issues #15): `.link` is a class rule and
+// a presentation attribute would lose to it silently.
+function mapFogLinks(bel) {
+  const links = LIVE.link;
+  if (!links || !links.length) return;
+  for (let i = 0; i < links.length; i++) {
+    const rec = links[i];
+    // No viewer means mask nothing. An id the belief map has never heard of
+    // stays drawn rather than vanishing, which is the failure that debugs.
+    const hide = !!bel && (bel.level[rec.a] === 0 || bel.level[rec.b] === 0);
+    if (hide === rec.hidden) continue;
+    rec.hidden = hide;
+    rec.node.style.display = hide ? 'none' : '';
+    LIVE.writes++;
+  }
+}
+
+// ── the veil ────────────────────────────────────────────────────────────
+//
+// Hidden ground used to be pure ABSENCE: the territory polygon, its borders and
+// its name, and nothing else — no node, no number, no tint. The trouble is that
+// absence and failure are the same picture. The board read as a page that had
+// not finished loading, and that is precisely how it was reported.
+//
+// So hidden ground is now DARKENED. Not empty — withheld.
+//
+// WHERE IT IS DRAWN, AND WHY THAT IS NOT NEGOTIABLE. Inside #g-coverage, which
+// is `pointer-events: none` in the stylesheet AND sits below #g-stations in
+// sibling order, so layer order alone makes it harmless even if that rule is
+// ever deleted. Belt and braces: the group also carries pointer-events none as
+// an inline style. Anything over the board that accepts pointer events swallows
+// the click that commits an attack, produces no error whatsoever, and simply
+// makes the game stop responding — that has happened five times on this project
+// and a full-board fog rect is the textbook instance of it.
+//
+// #g-coverage also sits BELOW #g-borders, and that is the reason this treatment
+// can be as dark as it is. Coastlines, internal borders, links, stations and
+// country names all paint OVER the veil at full strength, so darkening the fill
+// cannot erase the geography. "Hidden: territory shape only"
+// (02-visibility-and-sea.md §1) survives literally: the shape is what is left.
+//
+// THE PALETTE IS LOCKED (00-vision.md §8, "colour carries ownership only").
+// There is no fog hue and there must never be one — a fog colour would read as
+// an eighth power. The veil is var(--bg), the board's own background neutral,
+// and the only channel it uses is opacity.
+//
+// THREE STATES, and the veil carries a third of the read. The node treatment
+// carries the other two thirds and is unchanged: level 1 keeps its dashed
+// outline, reduced opacity, --ink-faint number and absent fullness ring.
+//
+//   0 hidden    full veil. No node, no link, no tint.
+//   1 fogged    partial veil — the ground is dimmer than what you can see and
+//               clearly lighter than what you never have.
+//   2 visible   no veil at all: byte-identical to a board before fog existed.
+//
+// The soft edge is the point of the mask. A hard boundary between seen and
+// unseen reads as a clipping artifact — something went wrong at that line — and
+// a gradient reads as a frontier, which is what it is.
+const MAP_VEIL_ID = 'fog-veil-mask';
+const MAP_VEIL_HOLE_ID = 'fog-veil-hole';
+
+// Clearing radius around a station, in BOARD UNITS, and deliberately so: this
+// is geography, not a symbol. The lit ground around a garrison must grow when
+// the player zooms in, exactly as the territory under it does, or the frontier
+// would crawl across the map as the camera moved. (known-issues #17 is the
+// opposite case — a value that wanted to be screen-constant and was authored in
+// board units. The tell is which thing the value belongs to, and this one
+// belongs to the map.)
+//
+// 58 against a nearest-neighbour gap of 16.9 units: the discs around a chain of
+// neighbouring stations overlap heavily, so a held province clears as one
+// region rather than as a string of portholes.
+const MAP_VEIL_R = 58;
+
+// How much of the veil each state clears. Level 2 clears all of it; level 1
+// clears just under half, so remembered ground sits between the two.
+//
+// The two levels are separate GROUPS inside the mask, each with its own group
+// opacity, rather than 108 individually-faded circles — and that is what caps
+// the accumulation. Overlapping translucent holes composite multiplicatively,
+// so eight remembered provinces in a row would otherwise clear as completely as
+// a visible one and level 1 would collapse into level 2 wherever the player had
+// wandered widely. A group is composited ONCE, so no amount of overlap inside
+// it can clear more than the group's own opacity.
+const MAP_VEIL_MEM = '0.45';
+
+// The gradient's solid core, as a fraction of the radius. Inside it the veil is
+// gone entirely; outside it, it fades back in over the remaining 60%.
+const MAP_VEIL_CORE = '40%';
+
+// The wash rect's own opacity — how dark never-seen ground goes. Picked off
+// screenshots at the 800px window the game is actually played at
+// (known-issues #17), not off the number.
+//
+// The three tones it produces, against --neutral land compositing to about
+// rgb(40,47,59): hidden rgb(22,27,34), fogged rgb(30,36,45), visible
+// rgb(40,47,59). Roughly even steps, which is what makes it read as a ramp
+// rather than as two states and an accident.
+//
+// WHY IT CAN GO THIS DARK WITHOUT LOSING THE SEA. The veil covers water and
+// land alike, so the land/sea contrast is scaled rather than crushed — and the
+// coastline is drawn in #g-borders, ABOVE this layer, at full strength. The
+// line is what separates land from water on this map; the fill only ever
+// agreed with it. 0.72 was tried and rejected: it takes hidden land to
+// rgb(20,24,31) against veiled water at rgb(13,17,23), and at that separation
+// the fill stops carrying the coast at all.
+const MAP_VEIL_OP = '0.64';
+
+// The board's own coordinate frame, plus a wide margin. The camera only ever
+// NARROWS the viewBox, so a rect this size can never expose an unveiled edge.
+const MAP_VEIL_BOX = [-200, -200, 1400, 1100];
+
+// { g, rect, lit, mem, hole:{sid:[memCircle, litCircle]}, lvl:{sid}, bel }
+let _mapVeil = null;
+
+// core/util.js's el() knows a fixed set of SVG tags and this file may not edit
+// it. Three tags short — mask, radialGradient, stop — so they are made here.
+function _mapSvgEl(tag, attrs) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attrs) for (const k in attrs) node.setAttribute(k, String(attrs[k]));
+  return node;
+}
+
+// Built once per board, from renderBoard(). #g-coverage is NOT cleared by
+// renderBoard — render/coverage.js owns that layer and keeps its own index into
+// it, so emptying it behind that file's back would leave it holding orphans
+// forever (the same bargain resetWaveLayer exists to honour). So the veil
+// removes exactly its own group and appends a fresh one.
+function mapVeilBuild(D) {
+  _mapVeil = null;
+  const defs = byId('board-defs');
+  const layer = byId('g-coverage');
+  if (!defs || !layer || !D.STATIONS) return false;
+
+  if (!defs.querySelector('#' + MAP_VEIL_HOLE_ID)) {
+    const grad = _mapSvgEl('radialGradient', { id: MAP_VEIL_HOLE_ID });
+    grad.appendChild(_mapSvgEl('stop', { offset: '0%', 'stop-color': '#000', 'stop-opacity': '1' }));
+    grad.appendChild(_mapSvgEl('stop', { offset: MAP_VEIL_CORE, 'stop-color': '#000', 'stop-opacity': '1' }));
+    grad.appendChild(_mapSvgEl('stop', { offset: '100%', 'stop-color': '#000', 'stop-opacity': '0' }));
+    defs.appendChild(grad);
+  }
+
+  const old = defs.querySelector('#' + MAP_VEIL_ID);
+  if (old) old.parentNode.removeChild(old);
+  const mask = _mapSvgEl('mask', {
+    id: MAP_VEIL_ID, maskUnits: 'userSpaceOnUse',
+    x: MAP_VEIL_BOX[0], y: MAP_VEIL_BOX[1],
+    width: MAP_VEIL_BOX[2], height: MAP_VEIL_BOX[3],
+  });
+  // White shows the wash; black holes hide it. The rect is the veil at full
+  // strength and everything after it is subtraction.
+  mask.appendChild(_mapSvgEl('rect', {
+    x: MAP_VEIL_BOX[0], y: MAP_VEIL_BOX[1],
+    width: MAP_VEIL_BOX[2], height: MAP_VEIL_BOX[3], fill: '#fff',
+  }));
+  const mem = _mapSvgEl('g', { opacity: MAP_VEIL_MEM });
+  const lit = _mapSvgEl('g', { opacity: '1' });
+  mask.appendChild(mem);
+  mask.appendChild(lit);
+  defs.appendChild(mask);
+
+  // Two circles per station, one in each group, `display`-toggled. Moving one
+  // circle between the groups instead would be a DOM reparent on every sight
+  // change; this is one style write, which is what the rest of renderLive
+  // costs.
+  const hole = Object.create(null);
+  const lvl = Object.create(null);
+  // Sorted, like drawStations — nothing here depends on the order, and that is
+  // exactly why it should not be the one place on the board that reads
+  // Object.keys raw.
+  const sids = Object.keys(D.STATIONS).sort();
+  for (let i = 0; i < sids.length; i++) {
+    const sid = sids[i];
+    const st = D.STATIONS[sid];
+    if (!st || !st.pos || st.pos.length < 2) continue;
+    const a = _mapSvgEl('circle', {
+      cx: st.pos[0], cy: st.pos[1], r: MAP_VEIL_R, fill: 'url(#' + MAP_VEIL_HOLE_ID + ')',
+    });
+    const b = _mapSvgEl('circle', {
+      cx: st.pos[0], cy: st.pos[1], r: MAP_VEIL_R, fill: 'url(#' + MAP_VEIL_HOLE_ID + ')',
+    });
+    a.style.display = 'none';
+    b.style.display = 'none';
+    mem.appendChild(a);
+    lit.appendChild(b);
+    hole[sid] = [a, b];
+    lvl[sid] = -1;
+  }
+
+  const prev = layer.querySelector('[data-fog-veil]');
+  if (prev) prev.parentNode.removeChild(prev);
+  const g = el('g', 'fog-veil', { 'data-fog-veil': '1' });
+  // Belt and braces over the stylesheet's `#g-coverage { pointer-events:none }`
+  // and over the layer order. Three independent reasons this cannot eat a
+  // click, because one has failed five times.
+  g.style.pointerEvents = 'none';
+  const rect = el('rect', 'fog-veil-wash', {
+    x: MAP_VEIL_BOX[0], y: MAP_VEIL_BOX[1],
+    width: MAP_VEIL_BOX[2], height: MAP_VEIL_BOX[3],
+    mask: 'url(#' + MAP_VEIL_ID + ')',
+  });
+  rect.style.pointerEvents = 'none';
+  rect.style.fillOpacity = MAP_VEIL_OP;
+  rect.style.display = 'none';           // no viewer until renderLive says so
+  g.appendChild(rect);
+  layer.appendChild(g);
+
+  _mapVeil = { g: g, rect: rect, hole: hole, lvl: lvl, bel: undefined, on: false };
+  return true;
+}
+
+// Per frame. `bel` is the memoised believed board, which is a NEW object
+// exactly when the fog changed — so identity is a sound "nothing moved" test
+// and a settled or paused board costs one comparison.
+function mapVeil(bel) {
+  if (!_mapVeil) return;
+  // LAST CHILD OF #g-coverage, and it has to be checked rather than assumed.
+  // render/coverage.js builds its 48 washes and 48 figures LAZILY, on the first
+  // frame a farm is hovered, which is long after renderBoard() put this group
+  // in the layer — so the veil starts out first and would end up painted over
+  // by an overlay that lights countries up. Fog you can defeat by hovering is
+  // not fog. Both files own nodes in one layer and neither may edit the other,
+  // so the fix is one identity comparison per frame; the move itself happens at
+  // most once in a session, because coverage builds exactly once.
+  const layer = _mapVeil.g.parentNode;
+  if (layer && layer.lastChild !== _mapVeil.g) layer.appendChild(_mapVeil.g);
+  const on = !!bel;
+  if (on !== _mapVeil.on) {
+    _mapVeil.on = on;
+    _mapVeil.rect.style.display = on ? '' : 'none';
+    LIVE.writes++;
+  }
+  if (!on || bel === _mapVeil.bel) return;
+  _mapVeil.bel = bel;
+  for (const sid in _mapVeil.hole) {
+    const lv = bel.level[sid] || 0;
+    if (lv === _mapVeil.lvl[sid]) continue;
+    _mapVeil.lvl[sid] = lv;
+    const h = _mapVeil.hole[sid];
+    h[0].style.display = (lv >= 1) ? '' : 'none';
+    h[1].style.display = (lv === 2) ? '' : 'none';
+    LIVE.writes += 2;
+  }
 }
 
 // ── supply routes ───────────────────────────────────────────────────────
@@ -1427,7 +1725,9 @@ function drawLinks(D, layer) {
     const node = el('path', 'link' + (link.sea ? ' is-sea' : ''), {
       'data-link': link.a + '-' + link.b,
     });
-    const rec = { node: node, a: link.a, b: link.b, d: null };
+    // `hidden: null` rather than false so the first live frame always writes
+    // the state it decided, instead of trusting a default nobody set.
+    const rec = { node: node, a: link.a, b: link.b, d: null, hidden: null };
     LIVE.link.push(rec);
     mapLinkPath(rec);
     layer.appendChild(node);
@@ -2080,10 +2380,7 @@ function liveStations(D, state) {
 // and those two files belong to other hands in any case.
 function liveTerritories(D, state) {
   if (!state || !state.stations) return;
-  const vis = mapFogLevels(state);
-  const me = mapViewer(state);
-  const bel = (vis && typeof believedStation === 'function')
-    ? mapBelievedBoard(state, me, vis) : null;
+  const bel = mapFogBelief(state);
   for (const tid in LIVE.terr) {
     const rec = LIVE.terr[tid];
     const ctrl = bel ? mapBelievedControl(bel, tid) : controlOf(state, tid);
@@ -2127,6 +2424,17 @@ function renderLive(state) {
   _mapOrdPlans = null;            // never survives the frame it was computed in
   liveStations(D, state);
   liveTerritories(D, state);
+  // The two per-frame fog reads that are not per-station: the road network and
+  // the veil over the ground it runs through. Both take the SAME memoised
+  // believed board liveTerritories just used — one solve for the frame, shared,
+  // rather than three files each asking vision.js the same question 108 times.
+  //
+  // They live in the LIVE path rather than at board build because fog changes
+  // every tick and the board is built once. A link whose far end comes into
+  // sight appears on that frame.
+  const bel = mapFogBelief(state);
+  mapFogLinks(bel);
+  mapVeil(bel);
   return LIVE.writes - before;
 }
 
@@ -2200,6 +2508,10 @@ function renderBoard() {
     labels: drawTerritoryLabels(D, gLab),
   };
   drawPowerLegend(D);
+  // The veil's nodes, built alongside the board they cover. It draws nothing
+  // until renderLive() hands it a believed board, so a viewerless board — the
+  // empire picker, a harness — is unchanged.
+  if (D.STATIONS) mapVeilBuild(D);
   // Stations and labels were built at whatever the scale is right now; record
   // it so the first renderLive() does not rewrite 138 transforms for nothing.
   LIVE.symK = mapSymbolScale();

@@ -2927,3 +2927,38 @@ html, body {
   .start-card-profile { display: none; }
 }
 /* start:end */
+
+/* --- fog of war veil (render/map.js) -------------------------------- */
+
+/* Hidden ground is DARKENED, not left empty. Absence and failure look
+   identical on a screen, and "the map failed to load" is exactly how the
+   previous, purely-subtractive fog was reported.
+
+   THE LAYER IS THE SAFETY ARGUMENT. This rect lives in #g-coverage, which is
+   pointer-events:none above AND sits below #g-stations in sibling order, and
+   render/map.js writes pointer-events:none inline on both the group and the
+   rect as well. Three independent reasons it cannot swallow the click that
+   commits an attack — because a full-board overlay is the textbook version of
+   the failure that has hit this project five times, and it announces itself
+   with no error at all.
+
+   #g-coverage also sits BELOW #g-borders, which is what makes a wash this dark
+   safe: coastlines, internal borders, links, stations and country names all
+   paint over it at full strength. Darkening the fill cannot erase the
+   geography, so "Hidden: territory shape only"
+   (02-visibility-and-sea.md §1) survives literally.
+
+   NO HUE. var(--bg) is the board's own background neutral. 00-vision.md §8
+   spends colour on ownership and nothing else, so a fog tint would read as an
+   eighth power; the only channel here is opacity, and render/map.js writes it
+   as an INLINE STYLE (known-issues #15 — a class rule silently outranks a
+   presentation attribute, and it has already recurred inside this system). */
+.fog-veil,
+.fog-veil-wash {
+  pointer-events: none;
+}
+
+.fog-veil-wash {
+  fill: var(--bg);
+  stroke: none;
+}
