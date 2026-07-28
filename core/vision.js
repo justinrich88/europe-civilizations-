@@ -155,8 +155,9 @@ function stationVision(sid) {
 
 // What `pid` may read on this board, as { stationId: level }.
 //
-//   2  visible — held by pid, or within stationVision() hops of a station it
-//                holds, counted over LINKS
+//   2  visible — held by pid, within stationVision() hops of a station it
+//                holds counted over LINKS, or standing in a TERRITORY pid has
+//                a station in
 //   0  hidden  — everything else
 //
 // THIS FUNCTION NEVER RETURNS 1, and that is permanent rather than unfinished.
@@ -204,9 +205,86 @@ function visibleTo(state, pid) {
   }
   if (!reach) return out;                 // holds nothing: sees nothing
 
-  if (typeof LINKS === "undefined" || !LINKS) return out;
-  _visRelax(out, budget, reach);
+  if (typeof LINKS !== "undefined" && LINKS) _visRelax(out, budget, reach);
+  // PRESENCE, after the hop walk and deliberately not folded into it. A country
+  // you stand in is known; it does not become a lookout tower.
+  _visOwnCountries(out, stations, pid);
   return out;
+}
+
+// You know your own countries.
+//
+// If `pid` holds AT LEAST ONE station in a territory, every station in that
+// territory is level 2 for pid. The rule the player asked for was "if a player
+// controls a country, they should see the whole country" — and *control* in
+// core/state.js's sense (`tier: 'full'`, every station held) already implied it
+// for free, which is why implementing that sentence literally is a measured
+// no-op: you always see what you own. Presence is the loosest reading and the
+// only one that reveals anything, and it is still nearly free — 2 to 5 stations
+// board-wide on the live map, because vision 1 already lights everything
+// adjacent and half the 30 countries hold only two stations.
+//
+// LEGIBILITY IS THE POINT, not the stations. "I hold a city here, so this
+// country is mine to see" is a rule a player can state; "you see one hop, plus
+// a second hop from forts and five authored lookouts" is one they can only
+// discover. The renderer leans on it directly: render/map.js clears the veil
+// over the WHOLE POLYGON of a country the viewer stands in, which it may only
+// do because this function guarantees every station inside it is visible. Clear
+// ground with no cities on it would read as "this country is empty", which is a
+// confident lie; the two changes are one change and must not be separated.
+//
+// SYMMETRIC. This is `visibleTo`, which the AI reads through the same call the
+// renderer does (02-visibility-and-sea.md §1: "The AI gets the same fog.
+// Symmetric, without exception"), and there is no `pid`-dependent branch here.
+//
+// IT DOES NOT PROJECT SIGHT. The revealed stations are written straight into
+// `out` and never into `budget`, so a country you stand in does not become a
+// vision source for its neighbours. Presence reveals what is inside the border
+// and stops at it; everything beyond is still the hop walk above. That is also
+// what keeps this cheap and what keeps the rule statable in one sentence.
+//
+// PURE, like its caller: it writes into the `out` object visibleTo just built
+// and touches nothing else — not `state`, not `STATIONS`, not a scratch field.
+//
+// The grouping comes from stationsIn() in core/state.js, which is the one place
+// "which stations are in this territory" is answered (known-issues #9: two
+// implementations of one rule is a bug waiting to happen, and on this project
+// that exact duplication has already happened once, with territoryControl).
+// Absent — core/state.js not loaded — the reveal simply does not happen and the
+// hop walk stands alone, which is the same way this file degrades on a missing
+// STATIONS or LINKS.
+function _visOwnCountries(out, stations, pid) {
+  if (typeof stationsIn !== "function") return;
+  if (typeof STATIONS !== "object" || !STATIONS) return;
+
+  var ids = STATION_IDS;
+  var i, sid, rec, tid;
+
+  // Territories pid stands in, collected in STATION_IDS order so the list is
+  // deterministic. Set-to-2 is idempotent so no order could change the answer,
+  // which is exactly why this must not be the one place in the file that reads
+  // Object.keys and gets away with it.
+  var seen = {};
+  var tids = [];
+  for (i = 0; i < ids.length; i++) {
+    sid = ids[i];
+    if (!stations[sid] || stations[sid].owner !== pid) continue;
+    rec = STATIONS[sid];
+    tid = rec ? rec.territory : null;
+    if (!tid || seen[tid]) continue;
+    seen[tid] = true;
+    tids.push(tid);
+  }
+
+  for (i = 0; i < tids.length; i++) {
+    var inside = stationsIn(tids[i]);            // sorted: STATION_IDS is
+    for (var j = 0; j < inside.length; j++) {
+      // Guarded against a station in the map data that the live board has no
+      // record of, so a stale snapshot loses a reveal rather than growing a key
+      // every other consumer would then read as an undefined station.
+      if (out[inside[j]] !== undefined) out[inside[j]] = 2;
+    }
+  }
 }
 
 // Spread `budget` outward over LINKS until it is exhausted.

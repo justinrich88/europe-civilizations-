@@ -163,6 +163,7 @@ function _fogFilesIn(dir) {
 function suiteFog(d) {
   _fogSuiteVisionData(d);
   _fogSuiteVisibleTo(d);
+  _fogSuiteOwnCountries(d);
   _fogSuiteMemory(d);
   _fogSuiteAiSymmetry(d);
   _fogSuiteLayering(d);
@@ -423,6 +424,213 @@ function _fogPickWithDepth(want, depth, type) {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// fog / own countries
+//
+// "You know your own countries": hold AT LEAST ONE station in a territory and
+// every station in it is level 2 for you.
+//
+// WHY THESE FIXTURES ARE SCANNED AND NOT PICKED. The rule is only observable
+// where it disagrees with the hop walk — a country whose stations all sit
+// within one hop of each other is revealed by vision 1 alone, and a test built
+// on one would pass with the rule deleted (known-issues #8 rule 1). So every
+// test below is built on a territory that HAS a station out of sight-reach of
+// another station in the same territory, found by scanning the live map. On
+// today's board 10 of 30 territories qualify; that number is not asserted,
+// because it is a fact about the map rather than about the rule, but the
+// existence of at least one is, and loudly.
+//
+// The stakes are higher than the two-to-eight stations this reveals. The veil
+// in render/map.js clears the WHOLE POLYGON of a country the viewer stands in,
+// and it may only do that because this rule guarantees there are no hidden
+// cities inside it. Cleared ground with no cities on it reads as "this country
+// is empty" — a confident lie, known-issues #18 in geometry. If these tests go
+// red, the map is lying, not merely under-informing.
+// ---------------------------------------------------------------------------
+
+// Territories where the presence rule is OBSERVABLE, scanned off the live map:
+// { tid, sid, far } — hold `sid` alone and `far` is every station in `tid` that
+// the hop walk cannot reach from it. One entry per territory, the first
+// qualifying station in sorted order, so the pick is stable across runs.
+//
+// The hop walk here is the test's own (_fogHops over _fogAdj), never
+// core/vision.js's — checking vision.js with vision.js would make the suite
+// agree with the code by construction.
+function _fogPresenceCandidates() {
+  var adj = _fogAdj(true);
+  var out = [];
+  for (var t = 0; t < TERRITORY_IDS.length; t++) {
+    var tid = TERRITORY_IDS[t];
+    var inside = stationsIn(tid);
+    if (inside.length < 2) continue;
+    for (var i = 0; i < inside.length; i++) {
+      var sid = inside[i];
+      var hops = _fogHops(sid, adj);
+      var v = stationVision(sid);
+      var far = [];
+      for (var j = 0; j < inside.length; j++) {
+        var other = inside[j];
+        if (other === sid) continue;
+        if (hops[other] === undefined || hops[other] > v) far.push(other);
+      }
+      if (far.length) { out.push({ tid: tid, sid: sid, far: far, hops: hops, vision: v }); break; }
+    }
+  }
+  return out;
+}
+
+function _fogSuiteOwnCountries(d) {
+  var fns = simFns();
+  if (typeof visibleTo !== 'function') {
+    return skipSuite('fog / own countries', 'core/vision.js not loaded');
+  }
+  if (!fns.newGame || typeof setStationOwner !== 'function' ||
+      typeof stationsIn !== 'function' || !d.STATIONS || !d.LINKS) {
+    return skipSuite('fog / own countries', 'core/state.js or data/ not loaded');
+  }
+  suite('fog / own countries');
+
+  var cands = _fogPresenceCandidates();
+  var pick = cands.length ? cands[0] : null;
+
+  test('holding ONE station in a country reveals every station in it', function () {
+    assert(!!pick, 'no territory has a station out of sight-reach of a sibling — ' +
+      'the rule is unobservable on this map and nothing below proves anything');
+    var pid = _fogPowers()[0];
+    var s = _fogOnly(5710, pid, pick.sid);
+    var v = visibleTo(s, pid);
+
+    var inside = stationsIn(pick.tid), problems = [];
+    for (var i = 0; i < inside.length; i++) {
+      if (v[inside[i]] !== 2) {
+        problems.push(inside[i] + ' is in ' + pick.tid + ' with ' + pid + ' holding ' +
+          pick.sid + ' but reads level ' + v[inside[i]]);
+      }
+    }
+    // THE GUARD THAT MAKES THIS A TEST. Without it, a board where vision alone
+    // already lit the whole country would pass with the rule removed.
+    assert(pick.far.length > 0, 'fixture is wrong — nothing in ' + pick.tid +
+      ' is out of reach of ' + pick.sid);
+    assertNone(problems, 'you know your own countries: presence in ' + pick.tid +
+      ' must reveal all ' + inside.length + ' of its stations, including ' +
+      pick.far.join(', ') + ' — out of the ' + pick.vision + '-hop reach of ' + pick.sid);
+  });
+
+  test('a country you hold nothing in is unaffected — presence does not leak', function () {
+    assert(!!pick, 'no observable territory — see the test above');
+    var pid = _fogPowers()[0];
+    var s = _fogOnly(5711, pid, pick.sid);
+    var v = visibleTo(s, pid);
+
+    var problems = [], witnesses = 0, i, j;
+    for (i = 0; i < TERRITORY_IDS.length; i++) {
+      var tid = TERRITORY_IDS[i];
+      if (tid === pick.tid) continue;
+      var inside = stationsIn(tid);
+      var lit = 0, dark = 0;
+      for (j = 0; j < inside.length; j++) {
+        // The hop walk is the whole expected answer outside the held country.
+        var h = pick.hops[inside[j]];
+        var reach = (h !== undefined && h <= pick.vision);
+        if (reach) lit++; else dark++;
+        if (reach && v[inside[j]] !== 2) {
+          problems.push(inside[j] + ' is ' + h + ' hop(s) away but reads ' + v[inside[j]]);
+        }
+        if (!reach && v[inside[j]] !== 0) {
+          problems.push(inside[j] + ' is in ' + tid + ', which ' + pid +
+            ' holds nothing in, and is out of hop reach — but reads level ' +
+            v[inside[j]] + '. Presence leaked across a border.');
+        }
+      }
+      // A country with a lit station AND a dark one is the case that separates
+      // "presence, where I stand" from "presence, wherever I can see".
+      if (lit && dark) witnesses++;
+    }
+    assert(witnesses > 0, 'no country outside ' + pick.tid + ' is partly seen and ' +
+      'partly not — the leak this test looks for could not have shown up');
+    assertNone(problems, 'presence reveals the country you STAND in, and stops at its border');
+  });
+
+  test('the rule is per-power — two powers with presence elsewhere see different countries', function () {
+    // Two observable territories far enough apart that neither power's hop walk
+    // can reach into the other's country. Scanned, so it survives a map rebuild.
+    var pair = null;
+    for (var i = 0; i < cands.length && !pair; i++) {
+      for (var j = i + 1; j < cands.length && !pair; j++) {
+        var h = cands[i].hops[cands[j].sid];
+        if (h === undefined || h >= 6) pair = [cands[i], cands[j]];
+      }
+    }
+    assert(!!pair, 'no two observable territories at least 6 hops apart — ' +
+      'the two powers could not be separated');
+
+    var pids = _fogPowers();
+    assert(pids.length >= 2, 'fewer than two real powers on this board');
+    var a = pids[0], b = pids[1];
+
+    // One board, both powers on it, so the two answers are read off the same
+    // state — a difference cannot be an artifact of two different fixtures.
+    var s = _fogOnly(5712, a, pair[0].sid);
+    for (var k = 0; k < STATION_IDS.length; k++) {
+      if (s.stations[STATION_IDS[k]].owner === b) setStationOwner(s, STATION_IDS[k], 'neutral');
+    }
+    setStationOwner(s, pair[1].sid, b);
+
+    var va = visibleTo(s, a);
+    var vb = visibleTo(s, b);
+    var problems = [], m;
+
+    for (m = 0; m < pair[0].far.length; m++) {
+      var farA = pair[0].far[m];
+      if (va[farA] !== 2) problems.push(a + ' stands in ' + pair[0].tid + ' but cannot see ' + farA);
+      if (vb[farA] === 2) {
+        problems.push(b + ' stands in ' + pair[1].tid + ' and can see ' + farA +
+          ' in ' + pair[0].tid + ' — the reveal is not per-power');
+      }
+    }
+    for (m = 0; m < pair[1].far.length; m++) {
+      var farB = pair[1].far[m];
+      if (vb[farB] !== 2) problems.push(b + ' stands in ' + pair[1].tid + ' but cannot see ' + farB);
+      if (va[farB] === 2) {
+        problems.push(a + ' stands in ' + pair[0].tid + ' and can see ' + farB +
+          ' in ' + pair[1].tid + ' — the reveal is not per-power');
+      }
+    }
+    assertNone(problems, 'presence is a fact about a power, not about the board: ' +
+      a + ' knows ' + pair[0].tid + ', ' + b + ' knows ' + pair[1].tid + ', neither knows both');
+  });
+
+  test('visibleTo stays pure with the presence rule running', function () {
+    // The existing purity test in fog / visibleTo runs on a turn-zero-shaped
+    // board where the rule reveals almost nothing. This one runs it on a board
+    // BUILT so the rule fires, because "pure except on the path that does the
+    // work" is the shape a purity regression actually takes: the obvious
+    // implementation of "reveal the country" is a scratch set hung off the
+    // station or the territory.
+    assert(!!pick, 'no observable territory — the rule would not have fired');
+    var pid = _fogPowers()[0];
+    var s = _fogOnly(5713, pid, pick.sid);
+    for (var i = 0; i < 40; i++) stepTick(s);
+
+    var before = JSON.stringify(snapshot(s));
+    var v = visibleTo(s, pid);
+    var after = JSON.stringify(snapshot(s));
+
+    // Vacuity guard: if the presence rule did not actually reveal anything on
+    // this board, the test measured the purity of a code path that never ran.
+    var revealed = 0, inside = stationsIn(pick.tid);
+    for (i = 0; i < pick.far.length; i++) if (v[pick.far[i]] === 2) revealed++;
+    assert(revealed > 0, 'the presence rule revealed nothing on this board — ' +
+      'purity was measured on a path that did not run');
+    assert(inside.length > 1, 'fixture territory has one station');
+
+    assertEqual(after.length, before.length,
+      'visibleTo changed the SIZE of the state — the presence rule wrote something');
+    assert(after === before,
+      'visibleTo mutated the state while revealing ' + pick.tid);
+  });
 }
 
 // ---------------------------------------------------------------------------

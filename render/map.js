@@ -622,6 +622,17 @@ function mapFogLevels(state) {
 // 108-station believedStation sweep, and — more to the point — what keeps them
 // from each composing "visible now, or remembered ever" a second time. There is
 // exactly one composition of that on this board and vision.js owns it.
+//
+// …and `mine`, the fourth field and the only one that is not about belief:
+// the set of territories the viewer HOLDS A STATION IN. It rides here because
+// it invalidates on exactly the same key everything else in this object does
+// (state identity + ownerEpoch, which is what a capture moves), so computing it
+// beside them costs one sweep instead of a second one somewhere else with its
+// own cache and its own drift. mapVeil is its only consumer — see the veil.
+//
+// It is a LIVE read of `state.stations[sid].owner`, not a believed one, and
+// that is not a fog leak: a power is never fogged from its own ground.
+// believedStation would return the same answer through two more function calls.
 function mapBelievedBoard(state, pid, vis) {
   if (_mapFogBoard) return _mapFogBoard;
   const stations = Object.create(null);
@@ -639,8 +650,35 @@ function mapBelievedBoard(state, pid, vis) {
       stations[sid] = { owner: b.owner };
     }
   }
-  _mapFogBoard = { proxy: { stations: stations }, unknown: unknown, level: level };
+  _mapFogBoard = {
+    proxy: { stations: stations }, unknown: unknown, level: level,
+    mine: mapOwnCountries(state, pid),
+  };
   return _mapFogBoard;
+}
+
+// { territoryId: true } for every country the viewer stands in, however lightly.
+//
+// The grouping is stationsIn()'s, which is core/state.js's and is the same one
+// core/vision.js's presence rule reads (known-issues #9: this file has already
+// shipped a second copy of a territory rule once, and it silently overwrote
+// core's). Nothing here decides which stations are in a country; it only asks.
+//
+// TERRITORY_IDS, not Object.keys — the sorted array, like everything else that
+// walks the board.
+function mapOwnCountries(state, pid) {
+  const out = Object.create(null);
+  if (!pid || !state || !state.stations) return out;
+  if (typeof stationsIn !== 'function') return out;
+  const tids = (typeof TERRITORY_IDS !== 'undefined' && TERRITORY_IDS) ? TERRITORY_IDS : [];
+  for (let i = 0; i < tids.length; i++) {
+    const inside = stationsIn(tids[i]);
+    for (let j = 0; j < inside.length; j++) {
+      const st = state.stations[inside[j]];
+      if (st && st.owner === pid) { out[tids[i]] = true; break; }
+    }
+  }
+  return out;
 }
 
 // The believed board for this frame, or null when there is no viewer and
@@ -853,6 +891,61 @@ const MAP_VEIL_MEM = '0.45';
 // gone entirely; outside it, it fades back in over the remaining 60%.
 const MAP_VEIL_CORE = '40%';
 
+// ── your own countries clear WHOLE, not in discs ────────────────────────
+//
+// The complaint that produced this, verbatim: the fog is *"slightly too
+// restrictive — if a player controls a country, they should see the whole
+// country."*
+//
+// THE MECHANICAL FOG WAS NOT THE PROBLEM. Measured before changing anything:
+// implementing that sentence literally — control a country, see all of it —
+// reveals ZERO stations, because core/state.js only names a controller when a
+// power holds EVERY station in the territory, and you always see what you own.
+// Even the loosest reading, *presence* (hold one station, see the country),
+// reveals 2 / 8 / 0 stations board-wide across all seven powers at ticks
+// 3000 / 9000 / 18000. Vision 1 already lights everything adjacent and half the
+// 30 countries hold only two stations.
+//
+// WHAT FELT RESTRICTIVE WAS THIS LAYER. The veil clears in a 58-unit disc
+// around each known station, and a territory polygon is far larger than that.
+// So a country the player plainly held read as fogged, for the sole reason that
+// its city was not in the country's geometric middle. The fog was telling the
+// truth about the stations and lying about the ground.
+//
+// So a country the viewer stands in clears ITS WHOLE POLYGON. Not a bigger
+// radius — a bigger radius would only move the same soft blob outward and would
+// still not agree with any line on the map. The shape that means "this country
+// is mine to see" is the country, and it is already drawn: the border painting
+// over the veil's edge in #g-borders is the same border, so the hard edge lands
+// exactly on a line the player can already see and reads as intent rather than
+// as a clipping artifact.
+//
+// ⚠ THIS IS HALF OF A CHANGE AND CANNOT SHIP ALONE. Clearing a polygon while
+// stations inside it stay hidden says "you can see here" and then shows no
+// cities — which reads as *"this country is empty"*, a confident lie, and is
+// known-issues #18 (a readout answering a different question from the one on
+// screen) expressed in geometry. It is honest only because core/vision.js's
+// presence rule guarantees every station inside a country you stand in is level
+// 2. The two changes are one change. If the presence rule is ever removed, this
+// must go with it.
+//
+// EVERYTHING ELSE STAYS RADIAL, and the pair is what reads correctly. Sight
+// BEYOND your own countries — an enemy city one hop over a border you have no
+// presence behind — keeps its soft disc. Your own ground is plainly yours with
+// an edge on it; your sight line past it fades out. Two treatments, two
+// meanings, and the difference between them is legible without a legend.
+//
+// LEVEL 2 ONLY, never the remembered group. A country you once stood in and
+// have been thrown out of is exactly the ground level 1 exists for, and it goes
+// back to discs around the cities you remember.
+//
+// THE GEOMETRY IS NOT RE-DERIVED. The points string is read straight off the
+// polygon drawTerritories already built and liveTerritories already tints —
+// literally the same node, so there is no second answer to what shape a country
+// is and no way for the two to drift (known-issues #9, logged four times on this
+// project, once as a duplicate territory rule *in this very file*).
+const MAP_VEIL_TERR_FILL = '#000';
+
 // The wash rect's own opacity — how dark never-seen ground goes. Picked off
 // screenshots at the 800px window the game is actually played at
 // (known-issues #17), not off the number.
@@ -875,7 +968,8 @@ const MAP_VEIL_OP = '0.64';
 // NARROWS the viewBox, so a rect this size can never expose an unveiled edge.
 const MAP_VEIL_BOX = [-200, -200, 1400, 1100];
 
-// { g, rect, lit, mem, hole:{sid:[memCircle, litCircle]}, lvl:{sid}, bel }
+// { g, rect, hole:{sid:[memCircle, litCircle]}, lvl:{sid},
+//   terr:{tid:polygon}, terrOn:{tid:bool}, bel, on }
 let _mapVeil = null;
 
 // core/util.js's el() knows a fixed set of SVG tags and this file may not edit
@@ -952,6 +1046,33 @@ function mapVeilBuild(D) {
     lvl[sid] = -1;
   }
 
+  // One polygon per country, in the LIT group — see MAP_VEIL_TERR_FILL. The
+  // points come off the polygon drawTerritories built, which is why this runs
+  // after it in renderBoard(): there is one shape per country on this board and
+  // both layers read the same string from the same node.
+  //
+  // Solid black, not the radial gradient the discs use: a country you stand in
+  // is cleared, not softened, and the softening beyond its border is the job of
+  // the discs that overlap it.
+  const terr = Object.create(null);
+  const terrOn = Object.create(null);
+  const tids = Object.keys(LIVE.terr).sort();
+  for (let i = 0; i < tids.length; i++) {
+    const pts = LIVE.terr[tids[i]].poly.getAttribute('points');
+    if (!pts) continue;
+    const poly = _mapSvgEl('polygon', { points: pts });
+    // #15: a fog property the renderer computes is written as a style. `fill`
+    // is set once rather than per frame, but a stray `polygon { fill: … }` or a
+    // future `.territory`-shaped rule would beat a presentation attribute here
+    // with no error at all, and a mask whose holes stop being black fails by
+    // showing the player MORE than they should see.
+    poly.style.fill = MAP_VEIL_TERR_FILL;
+    poly.style.display = 'none';
+    lit.appendChild(poly);
+    terr[tids[i]] = poly;
+    terrOn[tids[i]] = false;
+  }
+
   const prev = layer.querySelector('[data-fog-veil]');
   if (prev) prev.parentNode.removeChild(prev);
   const g = el('g', 'fog-veil', { 'data-fog-veil': '1' });
@@ -970,7 +1091,10 @@ function mapVeilBuild(D) {
   g.appendChild(rect);
   layer.appendChild(g);
 
-  _mapVeil = { g: g, rect: rect, hole: hole, lvl: lvl, bel: undefined, on: false };
+  _mapVeil = {
+    g: g, rect: rect, hole: hole, lvl: lvl,
+    terr: terr, terrOn: terrOn, bel: undefined, on: false,
+  };
   return true;
 }
 
@@ -1005,6 +1129,17 @@ function mapVeil(bel) {
     h[0].style.display = (lv >= 1) ? '' : 'none';
     h[1].style.display = (lv === 2) ? '' : 'none';
     LIVE.writes += 2;
+  }
+  // Your own countries, cleared whole. `bel.mine` moves only when a capture
+  // does, so this is 30 boolean compares on a frame where nothing changed and
+  // is behind the `bel === _mapVeil.bel` gate above in any case.
+  const mine = bel.mine || null;
+  for (const tid in _mapVeil.terr) {
+    const on = !!(mine && mine[tid]);
+    if (on === _mapVeil.terrOn[tid]) continue;
+    _mapVeil.terrOn[tid] = on;
+    _mapVeil.terr[tid].style.display = on ? '' : 'none';
+    LIVE.writes++;
   }
 }
 
