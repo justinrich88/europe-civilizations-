@@ -277,6 +277,15 @@ function runAllTests() {
   // of state and no DOM is touched until the rail calls build().
   if (typeof suiteStandings === 'function') suiteStandings(d);
 
+  // Selection gestures — test/select-tests.js. This one is NOT reached by
+  // test/node.js or tests.html and cannot be: render/select.js calls
+  // document.addEventListener at the top level, and the gesture assertions
+  // hit-test real screen coordinates against a rendered board. It runs from
+  // tests-ui.html, which loads index.html itself in an iframe and injects the
+  // suite — see the comment there for why there is no second script list.
+  // The hook is here anyway so the suite is registered in one place.
+  if (typeof suiteSelect === 'function') suiteSelect(d);
+
   return TEST_RESULTS;
 }
 

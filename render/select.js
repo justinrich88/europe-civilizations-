@@ -43,6 +43,11 @@
 //   H / R / F (no modifier)             -> standing order on the whole selection,
 //                                          which SURVIVES. See _selApplyOrder.
 //
+// ONE EXCEPTION, and it suspends the first three rows: while a supply order is
+// ARMED (R pressed), EITHER button clicking a city you own names the
+// destination and nothing marches. See _selCommitArmed, which owns that rule
+// for both buttons and explains why the right one is in it.
+//
 // The accident is structurally gone: the gesture that used to send troops to
 // one of your own cities no longer sends anything at all.
 //
@@ -1256,7 +1261,15 @@ function selOnMouseUp(evt) {
   if (evt.button === 2) {
     const rd = SEL_STATE.rdrag;
     SEL_STATE.rdrag = null;
-    if (rd && !rd.moved) selReinforce(rd.station);
+    if (!rd || rd.moved) return;
+    // AN ARMED ORDER EATS THIS CLICK TOO — see the left button below, and the
+    // block above _selCommitArmed for why the right button gets the same rule.
+    // It is inside the `!rd.moved` gate on purpose: a right-DRAG is how
+    // render/camera.js pans, and panning to FIND the destination must neither
+    // commit the order nor cancel the arming. Measured on the live board — a
+    // 40px right-drag while armed leaves `armed` standing and creates nothing.
+    if (_selCommitArmed(rd.station, false)) return;
+    selReinforce(rd.station);
     return;
   }
 
@@ -1277,7 +1290,7 @@ function selOnMouseUp(evt) {
   // AN ARMED ORDER EATS THE CLICK, before the gesture table below runs. It has
   // to be first: every branch under it either changes the selection or launches
   // troops, and the whole point of arming is that this one click means neither.
-  if (_selCommitArmed(sid)) return;
+  if (_selCommitArmed(sid, true)) return;
 
   if (!sid) {
     // Empty ground. Shift-click on nothing is a miss, not a clear.
@@ -1473,6 +1486,14 @@ function _selDisarm() {
 // One armed state, so one string — and it names the toggle rather than only the
 // add, because the same gesture is how a line is removed and a banner that only
 // said "click the city to supply" would make cancelling feel like a bug.
+//
+// UNCHANGED by the both-buttons fix, and deliberately so. "click a city" names
+// no button, which was already the promise the banner was making and is now
+// literally true of either one — that the text needed no edit is part of the
+// argument for the design chosen in _selCommitArmed. Spelling out "either
+// button" was considered and dropped: it spends the line on a distinction that
+// only exists for someone who knows a narrower rule was possible, and the
+// player who reported this reached for the right button without being told to.
 const SEL_ARMED_TEXT = 'SUPPLY — click a city to add or remove it';
 
 // ── the confirmation ────────────────────────────────────────────────────
@@ -1668,14 +1689,72 @@ function _selPaintArmed() {
 
 // The destination click. Returns true if the click was CONSUMED, which is what
 // stops it also being read as a selection toggle or a volley.
-function _selCommitArmed(sid) {
+//
+// ── BOTH BUTTONS NAME THE DESTINATION (player-reported, 2026-07) ────────
+//
+// Word for word: *"if you right click while setting, it just a normal send and
+// doesn't go through."* This ran only from the LEFT button's branch of
+// selOnMouseUp; the right button's branch returned before it and went straight
+// to selReinforce. So while armed, a right-click on your own city marched the
+// army there and created no route — and then clearSelection() inside selCommit
+// disarmed and emptied the group on the way out, so the banner vanished exactly
+// as it does on success. Measured on the live board: Berlin 65 -> 48.75, one
+// wave created, `supplyTo` still empty, banner blank. With CMD held it is worse
+// still — the group survives, so the banner keeps reading "SUPPLY — click a
+// city" while the volley it just fired is already in the air.
+//
+// Three designs were available and the choice is not obvious, so it is written
+// down:
+//
+//   1. right-click names the destination, same as left     <- CHOSEN
+//   2. right-click is ignored while armed, and the banner says so
+//   3. right-click cancels the arming, left commits
+//
+// (1), for three reasons in ascending order of weight. The player reached for
+// the right button because it is ALREADY the button that means "send to my own
+// city", so it is the button the gesture trains you to use. The banner says
+// "click a city to add or remove it" and names no button — under (2) or (3) it
+// would have to grow one, and a banner that has to disambiguate the pointing
+// device is a mode confessing to itself. And decisively: arming exists so that
+// the next click on your own ground means something DIFFERENT, so a button that
+// quietly falls through to the old meaning is known-issue #18 in its purest
+// form — an interaction answering a different question from the one on screen,
+// and never looking wrong doing it. (2) is that same failure with a disclaimer.
+// (3) gives one gesture two opposite meanings decided by which finger you used.
+//
+// The pan collision is real and is handled by POSITION, not by design choice:
+// render/camera.js pans with the right button, so the call site sits inside the
+// `!rd.moved` gate that selReinforce already sits inside. A right press that
+// travelled is a pan and reaches neither.
+//
+// ── `cancelOnMiss` — the one place the two buttons still differ ─────────
+//
+// A left-click on anything that is not your own city CANCELS the arming: an
+// enemy node, empty sea, a station lost since R was pressed. Consumed either
+// way, because a click that both cancelled the arming AND fired a volley at the
+// enemy under the cursor would be the worst possible reading of an ambiguous
+// gesture.
+//
+// The right button does NOT cancel, and that is not a new asymmetry — it is the
+// right button's existing house rule, left alone. selReinforce already treats a
+// right press that is not on your own city as a MISS rather than an
+// instruction ("right-clicking an enemy is a mis-aimed reinforcement, not a
+// sneaky second way to attack"), and it has to: the right button is also the pan
+// button, so a press that fell under SEL_RCLICK_SLOP_PX is far more often a pan
+// that did not take than a considered statement. Cancelling on it would delete
+// the armed state for no visible reason, and the player's next click on their
+// own city would toggle the selection instead of drawing the route — which is
+// the same silent-wrong-verb bug this whole change removes, reintroduced from
+// the other side. Returning false lets the press fall through to selReinforce,
+// which no-ops on exactly these targets.
+function _selCommitArmed(sid, cancelOnMiss) {
   if (!SEL_STATE.armed) return false;
 
-  // Cancel on anything that is not your own city — an enemy node, empty sea,
-  // a station lost since the key was pressed. Consumed either way: a click that
-  // both cancelled the arming AND fired a volley at the enemy under the cursor
-  // would be the worst possible reading of an ambiguous gesture.
-  if (!sid || !selIsMine(sid)) { _selDisarm(); return true; }
+  if (!sid || !selIsMine(sid)) {
+    if (!cancelOnMiss) return false;
+    _selDisarm();
+    return true;
+  }
 
   _selDisarm();
   _selApplyOrder(sid);

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Concert of Europe — UI tests</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #0c0f14; color: #c9d1d9;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex; height: 100vh;
+  }
+  #out { flex: 1 1 auto; margin: 0; padding: 14px; overflow: auto; white-space: pre; }
+  #frame { flex: 0 0 800px; width: 800px; height: 900px; border: 0; border-left: 1px solid #222; }
+  .ok   { color: #7ee787; }
+  .bad  { color: #ff7b72; }
+  .note { color: #8b949e; }
+</style>
+</head>
+<body>
+
+<pre id="out" class="note">starting…</pre>
+
+<!-- THE PAGE UNDER TEST IS index.html ITSELF, IN AN IFRAME, AND THAT IS THE
+     WHOLE POINT OF THIS FILE.
+
+     render/select.js cannot be tested by either existing harness:
+       test/node.js   — it calls document.addEventListener at the top level, so
+                        it does not even evaluate in a context with no document.
+       tests.html     — has no #board, no camera fit rect and no live GAME, so
+                        every gesture assertion could only ever report SKIP.
+
+     The obvious fix is to copy index.html's thirty <script> tags into a third
+     page. That is known-issue #9 — two implementations of one rule — and it is
+     the version of it that rots fastest, because the drift is invisible: the
+     copy keeps passing while testing a page nobody ships. render/hud.js moved
+     below render/readout.js earlier today for exactly this kind of load-order
+     reason, and a duplicated list would have silently kept the old order.
+
+     So there is no copy. The iframe loads the shipped page, and the test files
+     are injected into it afterwards — which also keeps test scripts out of
+     index.html, where they have no business being.
+
+     ?player=ger skips the empire picker (00-vision.md §8) so the board is live
+     and wired without anyone having to click a card. The iframe is a real
+     800x900, the window the game is played at (known-issues #17) — the camera
+     fit rect and elementFromPoint both depend on real layout, and a hidden or
+     zero-sized frame would make every hit test a lie. -->
+<iframe id="frame" src="index.html?player=ger" title="game under test"></iframe>
+
+<script>
+'use strict';
+
+// The suites to inject, in order. asserts.js first (assert/resetTests), then
+// runner.js (collectData/formatResults), then the suites themselves.
+var TEST_FILES = [
+  'test/asserts.js',
+  'test/runner.js',
+  'test/select-tests.js',
+];
+
+var out = document.getElementById('out');
+var frame = document.getElementById('frame');
+
+function say(text, cls) {
+  out.className = cls || 'note';
+  out.textContent = text;
+}
+
+// Inject one classic script into the frame and resolve when it has run. Written
+// with <script src> rather than eval so a syntax error reports with a real
+// filename and line number, exactly as it would on the shipped page.
+function inject(doc, src) {
+  return new Promise(function (resolve, reject) {
+    var s = doc.createElement('script');
+    s.src = src;
+    s.onload = function () { resolve(src); };
+    s.onerror = function () { reject(new Error('failed to load ' + src)); };
+    doc.body.appendChild(s);
+  });
+}
+
+// The board is drawn asynchronously and app/main.js does not announce itself, so
+// poll for the two things the gesture tests actually need: a live GAME and a
+// station node that can be hit-tested. Polling a real condition rather than
+// sleeping a guessed number of milliseconds is the difference between a flaky
+// suite and a slow one.
+function waitForGame(win, doc, timeoutMs) {
+  var deadline = Date.now() + (timeoutMs || 15000);
+  return new Promise(function (resolve, reject) {
+    (function poll() {
+      var ready = win.GAME && win.PLAYER &&
+        doc.querySelector('#g-stations .station-shape');
+      if (ready) return resolve();
+      if (Date.now() > deadline) {
+        return reject(new Error('no live GAME in the frame after ' +
+          (timeoutMs / 1000) + 's — did index.html throw? Check its console.'));
+      }
+      setTimeout(poll, 60);
+    }());
+  });
+}
+
+frame.addEventListener('load', function () {
+  var win = frame.contentWindow;
+  var doc = frame.contentDocument;
+
+  say('waiting for the board…');
+
+  waitForGame(win, doc)
+    .then(function () {
+      say('injecting suites…');
+      return TEST_FILES.reduce(function (chain, src) {
+        return chain.then(function () { return inject(doc, src); });
+      }, Promise.resolve());
+    })
+    .then(function () {
+      if (typeof win.selectTestsRun !== 'function') {
+        throw new Error('test/select-tests.js loaded but exposed no ' +
+          'selectTestsRun() — did its name change?');
+      }
+      var res = win.selectTestsRun();
+      var text = (typeof win.formatResults === 'function')
+        ? win.formatResults()
+        : JSON.stringify(res.summary, null, 2);
+      var fail = res.summary && res.summary.fail;
+      say(text, fail === 0 ? 'ok' : 'bad');
+      // Machine-readable, so a browser-driving harness can read one value
+      // instead of scraping the <pre>.
+      window.UI_TEST_SUMMARY = res.summary;
+      document.title = (fail === 0 ? 'PASS' : 'FAIL') + ' — UI tests';
+    })
+    .catch(function (e) {
+      say('HARNESS ERROR\n\n' + (e && e.stack ? e.stack : String(e)), 'bad');
+      window.UI_TEST_SUMMARY = { pass: 0, fail: -1, error: String(e) };
+      document.title = 'FAIL — UI tests';
+    });
+});
+</script>
+
+</body>
+</html>
