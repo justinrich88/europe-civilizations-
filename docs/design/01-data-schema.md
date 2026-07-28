@@ -241,7 +241,7 @@ All mutation flows through one entry point:
 ```js
 applyCommand(state, { type:'send',  owner, sources:[…], target, fraction,
                       types?, standing? })
-applyCommand(state, { type:'order', owner, stations:[…], order })
+applyCommand(state, { type:'order', owner, stations:[…], target })
 ```
 
 which is what makes headless testing and replay free.
@@ -285,18 +285,18 @@ Helper contracts other files may rely on:
 | `routeBetween(fromSid, toSid)` | `sim/movement.js` | **Geography.** Shortest path as an array of station ids, `null` if unreachable. Pure — depends only on `LINKS`, and must stay that way. Distance heuristics read it. |
 | `routeFor(state, pid, fromSid, toSid)` | `sim/movement.js` | **Legality.** The path a wave of `pid` may actually walk on this board, or `null` when there is none. Same shape and tie-break as `routeBetween`. |
 | `setStationOwner(state, sid, owner)` | `core/state.js` | Change who holds a station and bump `state.ownerEpoch`. The only supported way. Returns `true` if anything changed. **Also assigns a fresh empty `station.supplyTo`** — supply lines do not survive a capture. A *fresh array*, never `length = 0`, so a caller holding the old one is not emptied underneath it. See "Standing orders". |
-| `setStationOrder(state, sid, order)` | `core/state.js` | Set a station's standing order after validating it. The only supported way; `applyCommand({type:'order'})` is what callers use. |
-| `stationOrder(state, sid)` | `core/state.js` | A station's order, defaulting to `'hold'` for a state built before the field existed. |
 | `ordersTick(state)` | `sim/movement.js` | Phase 2. Throttled to `BAL.ORDERS.INTERVAL`. |
 | `standingOrderSend(state, sid)` | `sim/movement.js` | The **source's willingness**: units this station wants to ship, before the destination gets a say. Pure. Not what a readout should show — see the row below. |
-| `standingOrderNext(state, sid)` | `sim/movement.js` | **What actually leaves** on the next sweep: `{ units, target, blocked }`. `units` is `0` whenever anything blocks it, `target` is the station it is aimed at (kept even when blocked, so a panel can name the rally that is full) and `blocked` is `null` when it ships or one of `no-order` / `no-seed` / `destination-full` / `unreachable` / `already-there` / `at-keep-floor` / `below-min-send`. Pure, uncached, ~80µs on the 108-station board — one call per frame is free. **This is the number a readout shows.** |
+| `standingOrderNext(state, sid)` | `sim/movement.js` | **What actually leaves** on the next sweep: `{ units, target, blocked }`. `units` is `0` whenever anything blocks it, `target` is the station it is aimed at (kept even when blocked, so a panel can name the rally that is full) and `blocked` is `null` when it ships or one of `no-order` / `unreachable` / `at-keep-floor` / `destination-full` / `below-min-send`. Pure, uncached, ~80µs on the 108-station board — one call per frame is free. **This is the number a readout shows.** |
 | `standingOrderPlan(state, pid)` | `sim/movement.js` | The same answer for **every** feed city one power holds, in one search: `{ sid: { units, target, blocked } }`. Same planner, same ~80µs whether the power feeds one city or forty. Anything wanting the whole set — the empire header, the map's blocked-feeder marks — calls this, never `standingOrderNext` in a loop. |
 
 ### The traversal rule
 
-A wave may march **through** stations its owner holds and through **neutral** stations. It may not march through a station held by any other power. The **final** station in a path is exempt — walking into an enemy city is the attack itself.
+A wave may march **through** stations its owner holds. It may not march through a station held by any other power, and it may not march through **neutral** ground either — neutral is not passable. The **final** station in a path is exempt — walking into an enemy city is the attack itself, whether that city is a rival's or neutral's.
 
-Keyed on **ownership, not on war status**. Relations drift every tick (`sim/relations.js`), so a war-keyed rule would open and close corridors underneath the player for reasons that are off screen; ownership is drawn on the map and can be reasoned about. `neutral` is passable in both directions and by everyone.
+Keyed on **ownership, not on war status**. Relations drift every tick (`sim/relations.js`), so a war-keyed rule would open and close corridors underneath the player for reasons that are off screen; ownership is drawn on the map and can be reasoned about.
+
+> *Revised 2026-07.* Neutral used to count as passable, and it was nearly harmless under the old opening — most ground between two powers already belonged to a power. The capital-only opening changed that: 101 of 108 stations are neutral at turn zero, so "neutral is passable" turned the entire map into an open highway on turn one (measured: Britain marched its opening garrison from London through three unfought garrisons and captured Berlin outright). Expansion is supposed to be the whole game and neutral cities are supposed to be fought down one at a time — neither held while you could walk past them. See `_moveCanTraverse` in `sim/movement.js`, which is `st.owner === pid`: own ground only, no neutral exception.
 
 Two consequences other files must honour:
 

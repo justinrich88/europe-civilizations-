@@ -29,6 +29,14 @@
 
     <div class="hud-group">
       <span class="hud-stat"><span class="hud-label">Day</span><span class="hud-value" id="stat-day">0</span></span>
+
+      <!-- The way back into the guide (render/help.js). `hidden` here and
+           revealed by helpInit(), which app/main.js calls from bootPlay() —
+           so it does not exist as a clickable thing while the empire picker is
+           up, for the same reason nothing else on the board is wired yet. The
+           listener is attached there too; this file stays declarative. -->
+      <button type="button" class="btn help-btn" id="help-btn" hidden
+              title="How to play (?)" aria-label="How to play"><span class="help-btn-q">?</span>Guide</button>
     </div>
   </header>
 
@@ -89,9 +97,10 @@
   <footer class="bottombar">
     <div class="send-control" id="send-control">
       <span class="hud-label">send</span>
-      <!-- ONE-SHOT, and the digit that selects each one is on its face. The
-           active button relaxes back to 25 after every volley (render/select.js,
-           selCommit) — see BAL.SEND_FRACTION_DEFAULT for the player's reasoning.
+      <!-- PERSISTENT, and the digit that selects each one is on its face. The
+           active button stays wherever the player last set it, across volleys,
+           until they change it again — 25 is only the opening value (render/select.js,
+           selFraction) — see BAL.SEND_FRACTION_DEFAULT for the player's reasoning.
            data-key is read by nothing; it is a label, and the binding itself is
            derived from BAL.SEND_FRACTIONS so the two cannot drift. -->
       <button type="button" class="btn send-btn is-active" data-fraction="0.25"><b>1</b>25</button>
@@ -200,6 +209,10 @@
 <script src="render/coverage.js"></script>
 <script src="render/readout.js"></script>
 <script src="render/victory.js"></script>
+<!-- The guide. After render/map.js because it draws the four station
+     silhouettes with map.js's own stationShape() rather than a copy of it
+     (known-issues #9), and it is never called before bootPlay(). -->
+<script src="render/help.js"></script>
 <script src="render/camera.js"></script>
 <!-- The empire picker. After the other render/ files because it calls map.js's
      shapePoints/pointsAttr to draw the homelands from the same geometry the

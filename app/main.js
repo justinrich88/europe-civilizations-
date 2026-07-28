@@ -59,12 +59,20 @@ const DEFAULT_SEED = 19140628;
 // built, deliberately NOT in window.GAME (state stays small and diffable,
 // 01-data-schema.md).
 //
-// §8 called this "a persistent 25/50/75/All setting… set once, not per attack".
-// IT IS NO LONGER PERSISTENT. On the player's instruction it is a one-shot that
-// relaxes to 25% after every volley, selected with the digits 1-4 — see
-// BAL.SEND_FRACTION_DEFAULT for the argument, which is that a sticky 75% turns
-// one absent-minded click into an emptied city. The reset itself lives in
-// render/select.js next to the commit, because that is the event that spends it.
+// §8: "a persistent 25/50/75/All setting… set once, not per attack". It is
+// persistent, and 25% is only where it starts.
+//
+// This flipped twice. It was built one-shot — relaxing to 25% after every
+// volley — on the argument that a sticky All turns one absent-minded click into
+// an emptied city. Played, that argument loses: the amount is chosen for a
+// SITUATION, not for a click, and a player who has decided to commit hard is
+// deciding it about a whole exchange. Re-picking the digit before every volley
+// is a tax on the plan, and worse, the number on the bar was silently lying
+// about what the next click would do (known-issue #18 in its purest form —
+// the readout answering a question nobody asked).
+//
+// The safety it bought is better bought by the preview, which already shows the
+// exact payload each source will send before the click lands.
 
 var _sendFraction = (typeof BAL !== 'undefined' && BAL) ? BAL.SEND_FRACTION_DEFAULT : 0.25;
 
@@ -86,10 +94,10 @@ function setSendFraction(f) {
   return v;
 }
 
-// Back to the timid default. Called by render/select.js after a volley fires.
-function resetSendFraction() {
-  return setSendFraction((typeof BAL !== 'undefined' && BAL) ? BAL.SEND_FRACTION_DEFAULT : 0.25);
-}
+// resetSendFraction() IS DELETED, not left as a no-op. render/select.js called
+// it after every volley; nothing calls it now, and nothing should. A function
+// that exists to un-choose the player's choice is the bug, so it does not get
+// to survive as a stub someone can wire back up.
 
 // The shift = all / alt = half commit-time modifiers are DELETED. They existed
 // because the fraction was a sticky setting in the corner of the screen and the
@@ -351,13 +359,24 @@ function bootPlay(pid) {
   if (typeof startLoop === 'function') startLoop();
   else console.error('[app/main] app/loop.js has not loaded — no startLoop()');
 
+  // The guide (render/help.js). helpInit() reveals the `?` button in the top
+  // bar and installs the ?-key toggle; helpAutoShow() opens it the first time
+  // this browser ever reaches a board and never again, unless asked.
+  //
+  // AFTER setSpeed(0) above, and that ordering is the whole pause contract:
+  // helpShow() snapshots currentSpeed() and restores exactly that on close, so
+  // the auto-show captures 0 and closing LEAVES the opening board paused. If it
+  // ran before the pause it would capture the running speed and start the war
+  // the moment the player finished reading.
+  if (typeof helpInit === 'function') tryStep('helpInit', helpInit);
+  if (typeof helpAutoShow === 'function') tryStep('helpAutoShow', helpAutoShow);
+
   return true;
 }
 
 // Global exports — no modules anywhere in this project.
 window.sendFraction = sendFraction;
 window.setSendFraction = setSendFraction;
-window.resetSendFraction = resetSendFraction;
 window.syncSpeedButtons = syncSpeedButtons;
 window.syncFractionButtons = syncFractionButtons;
 window.boot = boot;

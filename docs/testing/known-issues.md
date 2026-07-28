@@ -610,3 +610,14 @@ Two lessons:
    discovery will be a stack trace at the worst possible moment. Seeding it from
    `SETUP` rather than with zeroes at least makes a wrong answer visible as a
    wrong board.
+
+---
+
+## 21. An SVG `viewBox` width is a scale factor, not a drawing size, whenever the element is `width: 100%`
+
+A diagram authored at 300 viewBox units inside a 616px-wide card renders every
+9px caption at ~18px and every stroke at 2×. The fix is to author the viewBox
+close to the real rendered width (600 for this card at the 800px window). Same
+failure shape as #17: a number that only means what it says at one width.
+
+**Caught by screenshotting, not by any assertion** — nothing tests it.

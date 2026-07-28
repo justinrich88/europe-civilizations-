@@ -46,39 +46,31 @@
 // The accident is structurally gone: the gesture that used to send troops to
 // one of your own cities no longer sends anything at all.
 //
-// ── commit-time modifiers (player-reported, 2026-07) ────────────────────
+// ── commit-time modifier (player-reported, 2026-07; amended 2026-07) ────
 //
 // "It needs to be something that can happen very quickly as the player is making
-// many moves in parallel." The persistent 25/50/75/All setting is fine as a
-// DEFAULT and wrong as the only answer: changing it costs a trip to the corner
-// of the screen, and — worse — it stays changed, so the volley after it is fired
-// at a number nobody chose. Every modifier below is therefore read off the click
-// that commits, applies to that volley only, and leaves nothing behind:
+// many moves in parallel." The persistent 25/50/75/All setting is a DEFAULT the
+// player sets with the digits 1-4 (app/main.js) — it stays wherever they leave
+// it, across volleys, until they change it again. SHIFT (all) and ALT (half)
+// used to exist as commit-time overrides of that setting, decided at the click
+// instead of at the corner of the screen. Both are now DELETED: the digits do
+// that job with one hand and no key held while aiming, and SHIFT already meant
+// additive-selection on the same pointer. See app/main.js, "shift = all / alt =
+// half commit-time modifiers are DELETED", for the full reasoning.
 //
-//   plain click        -> the persistent fraction (unchanged; the common case)
-//   SHIFT + click      -> send everything            (fraction 1)
-//   ALT/OPTION + click -> send half                  (fraction 0.5)
+// What is left:
+//
+//   plain click        -> the persistent fraction (the common case)
 //   CMD/META + click   -> commit and KEEP the selection, to fire the same
 //                         massed group at the next target without reselecting
 //
-// All four work on the RIGHT button too, so reinforce gets them as well.
+// CMD works on the RIGHT button too, so reinforce gets it as well.
 //
-// Why these three and not the obvious fourth:
-//
-//   * SHIFT is already the additive-selection modifier, but only ever on
-//     stations the player OWNS — and a target is by definition not owned, so the
-//     two gestures cannot both apply to one click. `d.additive` is read in
-//     exactly one place (the marquee branch of selOnMouseMove) and a commit is
-//     by construction not a marquee. Verified by measurement, not assumed.
-//   * ALT and CMD were measured arriving intact on this platform: a synthetic
-//     alt-click and cmd-click on #board both produced mousedown/mouseup with the
-//     flag set and no default action.
-//   * CTRL is unusable on macOS: a ctrl-click fires `contextmenu` between
-//     mousedown and mouseup — it IS the secondary click — so a ctrl+left gesture
-//     is indistinguishable from a right-click by the time it reaches us.
-//
-// SHIFT beats ALT if both are somehow held. Arbitrary, but fixed and documented,
-// so it can never be a surprise.
+// CMD was measured arriving intact on this platform: a synthetic cmd-click on
+// #board produced mousedown/mouseup with the flag set and no default action.
+// CTRL is unusable on macOS: a ctrl-click fires `contextmenu` between
+// mousedown and mouseup — it IS the secondary click — so a ctrl+left gesture
+// is indistinguishable from a right-click by the time it reaches us.
 
 'use strict';
 
@@ -167,9 +159,11 @@ function selPlayer() {
 // The 25/50/75/All send amount, picked with the digits 1-4. Owned by
 // app/main.js; the tuning default stands in until then.
 //
-// ONE-SHOT: selCommit() calls resetSendFraction() after every volley, so this
-// reads 25% again by the next click. §8 called it "persistent… set once, not
-// per attack" and the player overruled that — see BAL.SEND_FRACTION_DEFAULT.
+// PERSISTENT: the amount stays wherever the player last set it until they
+// change it again — 25% is only the opening value, not something the game
+// resets back to. The player is choosing the amount for a SITUATION, not for
+// a single click, and a bar displaying a number the next click would not use
+// is known-issue #18 in its purest form. See BAL.SEND_FRACTION_DEFAULT.
 function selFraction() {
   if (typeof sendFraction === 'function') return sendFraction();
   if (typeof window.sendFraction === 'function') return window.sendFraction();
@@ -1119,15 +1113,6 @@ function selCommit(target) {
   // outlive the gesture that asked for it. Firing one massed army at four
   // targets in sequence is then four clicks, not four clicks plus three
   // reselections.
-  // THE AMOUNT RELAXES. Whatever digit was pressed bought exactly this one
-  // volley; the next click is 25% again unless the player says otherwise. This
-  // is the whole of the one-shot rule and it lives here, on the event that
-  // spends it, rather than in app/main.js where the value lives — a setting
-  // cannot know when it has been used.
-  //
-  // Before the selection is cleared, so a redraw triggered by the reset paints
-  // against the group that still exists.
-  if (typeof resetSendFraction === 'function') resetSendFraction();
 
   if (!keep) {
     clearSelection();
@@ -1518,6 +1503,60 @@ function _selStationName(sid) {
   return (typeof STATIONS !== 'undefined' && STATIONS[sid] && STATIONS[sid].name) || sid;
 }
 
+// ── IS THE LINE I JUST DREW ACTUALLY RUNNING? ──────────────────────────
+//
+// 05-command-clarity.md §2, in the player's words: the routes are *"tough to
+// click and understand if they're actually active"*. The banner said
+// "SUPPLYING LEIPZIG — 3 cities" whether the stream was moving 6 units a sweep
+// or was going to move nothing for the next ten minutes, and those two boards
+// look identical at the moment of the click — the sweep is 25 ticks away, so
+// there is nothing on screen yet either way.
+//
+// It matters most in the case that produced the bug report. A city that has
+// just spent its garrison on a volley is below its keep floor, so a line drawn
+// out of it ships NOTHING for as long as it takes to regrow — measured on a
+// live board, 63 ticks after a 50% volley and 775 ticks after a 100% one. The
+// map draws that as a dimmed line with its chevrons removed, which is very
+// close to how it draws no line at all, and the player reasonably reads it as
+// *"the command I issued removed my route"*.
+//
+// THE BINARY ONLY, AND A POINTER TO THE REASON. `standingOrderNext` computes a
+// machine-readable reason and render/readout.js already turns each one into a
+// sentence on hover; writing a second copy of that vocabulary here is
+// known-issues #9 in its purest form — two files spelling one sim fact, drifting
+// the first time a reason is added. So this says whether anything moves and
+// where to look for why, and nothing more.
+//
+// ONE standingOrderPlan CALL, on a click. It plans the whole power (~80µs) and
+// is the sanctioned bulk accessor — standingOrderNext in a loop over the group
+// would re-plan the power once per city (01-data-schema.md).
+//
+// Returns true (moving), false (nothing moves), or null (unknowable — no plan
+// function, no game, or the group's edges are not in the plan), and null prints
+// nothing rather than guessing.
+function _selOrderMoving(stations, target) {
+  const g = selGame();
+  const me = selPlayer();
+  if (!g || !me || !target || !stations.length) return null;
+  if (typeof standingOrderPlan !== 'function') return null;
+
+  const plan = standingOrderPlan(g, me);
+  let known = false;
+  for (let i = 0; i < stations.length; i++) {
+    const p = plan[stations[i]];
+    if (!p || !p.edges) continue;
+    for (let j = 0; j < p.edges.length; j++) {
+      const e = p.edges[j];
+      if (e.target !== target) continue;
+      known = true;
+      // ANY of them moving is "the route is running". The group is one gesture
+      // and the banner is one line; per-city detail is the readout's job.
+      if (e.units > 0) return true;
+    }
+  }
+  return known ? false : null;
+}
+
 // Names the DESTINATION and counts the SOURCES, because those are the two
 // things the player cannot verify by looking. Which cities were selected has
 // just scrolled out of their head; which city they clicked is under the cursor
@@ -1559,8 +1598,16 @@ function _selConfirmText(res, target) {
 
   // `added` is decided ONCE for the whole group in _cmdApplyOrder, so reading
   // it off the first entry is reading the group's verdict, not one station's.
-  return (acc[0].added ? 'SUPPLYING ' : 'NO LONGER SUPPLYING ') +
-         String(_selStationName(target)).toUpperCase() + ' — ' + many;
+  const head = (acc[0].added ? 'SUPPLYING ' : 'NO LONGER SUPPLYING ') +
+               String(_selStationName(target)).toUpperCase() + ' — ' + many;
+  // Only on the ADD. "No longer supplying X" is a statement about a line that
+  // no longer exists, and reporting the flow of something that is gone would be
+  // the same class of nonsense as "cleared 3 cities" when none had a line.
+  if (!acc[0].added) return head;
+  const moving = _selOrderMoving(sources, target);
+  if (moving === false) return head + ' · NOTHING MOVING YET — hover a city for why';
+  if (moving === true) return head + ' · moving on the next sweep';
+  return head;
 }
 
 function _selClearConfirm() {
