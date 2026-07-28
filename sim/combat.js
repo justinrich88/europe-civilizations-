@@ -363,8 +363,14 @@ function _capture(state, sid, atkIds) {
   if (!stationAttackers(state, sid).length) _clearAttackers(st);
   delete state.battles[sid];
 
+  // The station id rides along as logEvent's optional 4th argument. It is a
+  // FACT ABOUT THE EVENT, not a consultation of anything: this file neither
+  // knows nor may know who can see `sid` (02-visibility-and-sea.md §1, and
+  // test/fog-tests.js greps for it). render/hud.js is the file that decides
+  // whether the player is told, because a capture in the dark is the single
+  // largest thing the ticker used to give away.
   if (typeof logEvent === 'function') {
     logEvent(state, 'capture', winner + ' took ' + (STATIONS[sid] ? STATIONS[sid].name : sid) +
-      ' from ' + prev);
+      ' from ' + prev, sid);
   }
 }

@@ -164,6 +164,7 @@ function suiteFog(d) {
   _fogSuiteVisionData(d);
   _fogSuiteVisibleTo(d);
   _fogSuiteMemory(d);
+  _fogSuiteAiSymmetry(d);
   _fogSuiteLayering(d);
 }
 
@@ -743,6 +744,531 @@ function _fogSuiteMemory(d) {
     for (var i = 0; i < log.length; i++) if (log[i].power === s.human) acted++;
     assertEqual(acted, 0, s.human + ' took ' + acted + ' AI decisions — the human is not ' +
       'being skipped, so this test proved nothing about observeTick\'s position');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// fog / ai symmetry  —  stage 4, the AI's believed board
+//
+// "The AI gets the same fog. Symmetric, without exception."
+// (02-visibility-and-sea.md §1.)
+//
+// ---------------------------------------------------------------------------
+// READ THIS BEFORE ADDING A TEST HERE — a measured fact about the board
+// ---------------------------------------------------------------------------
+//
+// The obvious test to write is "aiDecide attacks a fogged station and sizes the
+// volley against the remembered garrison". IT CANNOT BE WRITTEN through
+// aiDecide, and the reason is structural rather than a gap in the fixtures:
+//
+//   1. `_aiHopsFromOwn` (ai/score.js) seeds its BFS with every station the
+//      power holds — all at hops 0 — and expands only through that same own
+//      ground. Its frontier is therefore empty after one pass, so ctx.hops only
+//      ever contains 0 and 1 no matter what TARGET_MAX_HOPS says. Candidates
+//      are exactly the stations ADJACENT to own ground.
+//   2. Every station a power holds has vision >= 1 (core/vision.js), so
+//      everything one hop out is lit at level 2.
+//   3. `_moveCanTraverse` (sim/movement.js) allows a wave through OWN ground
+//      only, so a station you can legally send to is adjacent to something you
+//      hold — which is a station you can see.
+//
+// Measured across three full games sampled every 2,000 ticks: **1,215 of 1,215
+// candidates were at level 2.** Under the current traversal rule, any station
+// the AI may legally attack is a station it can currently SEE.
+//
+// So the believed board is, today, provably equal to the true board at every
+// point where an attack is decided — with one exception, `_aiCutsLink`, whose
+// input is the target's NEIGHBOURS and of whose 5,949 reads only 4,390 were
+// live (383 remembered, 1,176 never seen).
+//
+// That does not make the seam optional and it does not make these tests
+// theatre. It means the tests must exercise the seam WHERE IT IS REACHABLE —
+// at the believed-read helpers themselves and at aiCandidates' filter — rather
+// than staging a scene through aiDecide that the board cannot produce. Every
+// assertion below was run against the unfixed code and seen to fail
+// (known-issues #8 rule 1). The day either fact above changes — a hop map that
+// genuinely reaches two, or a passability rule that lets a wave cross ground it
+// does not hold — these become live behavioural tests with no edit required.
+// ---------------------------------------------------------------------------
+
+function _fogG() {
+  return (typeof globalThis !== 'undefined') ? globalThis
+       : (typeof window !== 'undefined') ? window : null;
+}
+
+// The odds floor `pid` demands, personality included — the number an attack has
+// to clear. Recomputed here rather than imported so this suite does not depend
+// on an ai/ private.
+function _fogMinOdds(pid) {
+  var name = (typeof POWERS !== 'undefined' && POWERS[pid]) ? POWERS[pid].ai : null;
+  var P = (BAL.AI.PERSONALITIES || {})[name];
+  return BAL.AI.MIN_ODDS * ((P && P.minOddsMul) || 1);
+}
+
+// The stage-4 fixture: a station this power SAW, then went blind to, and which
+// has since been massively reinforced on the true board.
+//
+// Built on _fogMemFixture, so the "went blind" step is a real loss of sight
+// (handing `drop` away) rather than a hand-edited memory. The reinforcement is
+// x`mul` on top of whatever grew there, applied AFTER the last observation, so
+// the remembered garrison and the live one are separated by a factor nothing
+// in the AI can explain away as rounding.
+//
+// Returns null when the map cannot supply the shape, and every caller asserts
+// on that rather than silently passing.
+function _fogAmbush(seed, pid, mul) {
+  var f = _fogMemFixture(seed, pid);
+  if (!f) return null;
+
+  observeTick(f.s);                                   // tick 0, on cadence
+  if (believedStation(f.s, pid, f.lost).level !== 2) return null;
+
+  setStationOwner(f.s, f.drop, 'neutral');            // go blind
+  _fogMemWatch(f.s, 200);                             // observer runs throughout
+
+  // The ambush. Everything the defender does from here is invisible to `pid`.
+  var u = f.s.stations[f.lost].units;
+  u.infantry *= mul;
+  u.artillery *= mul;
+  u.armour *= mul;
+
+  f.believed = believedStation(f.s, pid, f.lost);
+  if (f.believed.level !== 1) return null;
+  return f;
+}
+
+function _fogSuiteAiSymmetry(d) {
+  var g = _fogG();
+  if (typeof visibleTo !== 'function' || typeof believedStation !== 'function') {
+    return skipSuite('fog / ai symmetry', 'core/vision.js not loaded');
+  }
+  if (typeof aiContext !== 'function' || typeof aiCandidates !== 'function' ||
+      typeof aiScoreTarget !== 'function' || typeof aiDecide !== 'function') {
+    return skipSuite('fog / ai symmetry', 'ai/score.js or ai/ai.js not loaded');
+  }
+  if (typeof stationPower !== 'function' || typeof newGame !== 'function' || !d.STATIONS) {
+    return skipSuite('fog / ai symmetry', 'sim/combat.js, core/state.js or data/ not loaded');
+  }
+  suite('fog / ai symmetry');
+
+  var pid = _fogPowers()[0];
+
+  // -------------------------------------------------------------------------
+  // 1. The candidate filter
+  // -------------------------------------------------------------------------
+
+  test('a station this power has NEVER SEEN is not a candidate', function () {
+    var s = newGame(5720);
+    observeTick(s);
+    var ctx = aiContext(s, pid);
+    var vis = visibleTo(s, pid);
+
+    // Two stations at the SAME injected hop distance, differing only in whether
+    // this power can see them. The hops are injected because ctx.hops tops out
+    // at 1 today (see the block above this suite) while aiCandidates is written
+    // against TARGET_MAX_HOPS = 2 — and ctx is a PARAMETER of aiCandidates, so
+    // handing it the two-hop map the function is written for is using the API,
+    // not defeating it. Replacing the whole map rather than adding to it keeps
+    // the pair out of CANDIDATES_PER_DECISION's truncation.
+    var hidden = null, control = null, i, sid;
+    for (i = 0; i < STATION_IDS.length; i++) {
+      sid = STATION_IDS[i];
+      if (s.stations[sid].owner === pid) continue;
+      if (vis[sid] === 0 && !hidden && !(s.seen && s.seen[pid] && s.seen[pid][sid])) hidden = sid;
+      if (vis[sid] === 2 && !control) control = sid;
+    }
+    assert(!!hidden, 'no unseen station on the turn-zero board — nothing to filter');
+    assert(!!control, 'no visible non-own station — the control would prove nothing');
+
+    ctx.hops = {};
+    for (i = 0; i < ctx.own.length; i++) ctx.hops[ctx.own[i]] = 0;
+    ctx.hops[hidden] = 2;
+    ctx.hops[control] = 2;
+
+    var cands = aiCandidates(s, pid, ctx), got = {};
+    for (i = 0; i < cands.length; i++) got[cands[i].sid] = true;
+
+    // The control first: if the visible one were missing too, the assertion
+    // below would pass because aiCandidates returned nothing at all.
+    assert(got[control], control + ' is visible and two hops out but was not offered — ' +
+      'the filter is rejecting everything, so the real assertion proves nothing');
+    assert(!got[hidden], hidden + ' has never been seen by ' + pid +
+      ' and must not be a candidate: you cannot decide to take a city you do not ' +
+      'know is there');
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. The odds gate — the number that decides every attack
+  // -------------------------------------------------------------------------
+
+  test('the odds gate reads the REMEMBERED garrison, not the live one', function () {
+    var f = _fogAmbush(5721, pid, 6);
+    assert(!!f, 'fixture is wrong — no station seen, lost and reinforced');
+    var ctx = aiContext(f.s, pid);
+
+    var believedDef = _aiActDefenderPower(f.s, pid, f.lost, ctx);
+    var trueDef = stationPower(f.s, f.lost, 'defender');
+
+    assert(believedDef > 0, 'the believed defence is zero — nothing was measured');
+    assert(trueDef > believedDef * 2,
+      'the live garrison at ' + f.lost + ' is only ' + trueDef.toFixed(1) +
+      ' against a remembered ' + believedDef.toFixed(1) + ' — the fixture did not ' +
+      'separate them, so this test cannot tell the two boards apart');
+
+    // The remembered garrison, run through the CANONICAL stationPower on a
+    // one-station proxy. Deliberately not a unit-ratio estimate: _fortBonus
+    // saturates, so a ratio would disagree with the sim about a full fort.
+    var proxy = { stations: {} };
+    proxy.stations[f.lost] = {
+      owner: f.believed.owner,
+      units: f.believed.units,
+      attackers: {},
+    };
+    assertClose(believedDef, stationPower(proxy, f.lost, 'defender'), 1e-9,
+      '_aiActDefenderPower did not return the power of the garrison ' + pid +
+      ' last SAW at ' + f.lost + ' — it is reading the true board');
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. The ambush, as arithmetic
+  // -------------------------------------------------------------------------
+
+  test('a volley that clears the odds floor on the believed board LOSES on the real one', function () {
+    var f = _fogAmbush(5722, pid, 6);
+    assert(!!f, 'fixture is wrong');
+    var ctx = aiContext(f.s, pid);
+
+    var believedDef = _aiActDefenderPower(f.s, pid, f.lost, ctx);
+    var trueDef = stationPower(f.s, f.lost, 'defender');
+    var minOdds = _fogMinOdds(pid);
+
+    // This is the whole of level 1 in one line. The AI commits when its stack
+    // is worth at least minOdds x the defence it BELIEVES is there; the least
+    // such stack is minOdds x believedDef. If that is still short of the TRUE
+    // defence, the power marches into a fight it cannot win and finds out on
+    // arrival — which is the point of remembering a number instead of knowing
+    // one.
+    //
+    // Against the unfixed code believedDef === trueDef and the inequality reads
+    // `minOdds * D < D`, which is false for any floor at or above 1:1. There is
+    // no way to make this pass by accident.
+    assert(minOdds >= 1, 'MIN_ODDS is below 1:1 — this assertion is meaningless');
+    assert(minOdds * believedDef < trueDef,
+      'a volley sized to clear ' + minOdds.toFixed(2) + ':1 against the remembered ' +
+      believedDef.toFixed(1) + ' would bring ' + (minOdds * believedDef).toFixed(1) +
+      ', against a true defence of ' + trueDef.toFixed(1) + ' — the AI is not walking ' +
+      'into the ambush, so it is reading the live board');
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. The scorer
+  // -------------------------------------------------------------------------
+
+  test('a station that changes hands behind the fog is still scored as it was last seen', function () {
+    var f = _fogMemFixture(5723, pid);
+    assert(!!f, 'fixture is wrong');
+    observeTick(f.s);
+    setStationOwner(f.s, f.drop, 'neutral');
+    _fogMemWatch(f.s, 200);
+
+    var b0 = believedStation(f.s, pid, f.lost);
+    assertEqual(b0.level, 1, f.lost + ' is not fogged — fixture is wrong');
+
+    var before = aiScoreTarget(f.s, pid, f.lost, aiContext(f.s, pid));
+
+    // Everything the enemy does from here is invisible to `pid`: the station
+    // changes hands to a power it is at war with, and the garrison octuples.
+    var pids = _fogPowers(), rival = null;
+    for (var i = 0; i < pids.length; i++) {
+      if (pids[i] !== pid && pids[i] !== b0.owner) { rival = pids[i]; break; }
+    }
+    assert(!!rival, 'no third power to hand the station to');
+    setStationOwner(f.s, f.lost, rival);
+    var me = f.s.powers[pid];
+    me.wars = me.wars || {}; me.wars[rival] = true;
+    me.relations = me.relations || {}; me.relations[rival] = BAL.AI.RELATION_MIN;
+    var u = f.s.stations[f.lost].units;
+    u.infantry *= 8; u.artillery *= 8; u.armour *= 8;
+
+    var after = aiScoreTarget(f.s, pid, f.lost, aiContext(f.s, pid));
+    assertEqual(JSON.stringify(after), JSON.stringify(before),
+      'the score of ' + f.lost + ' moved when it changed hands behind the fog: ' +
+      JSON.stringify(before) + ' -> ' + JSON.stringify(after) +
+      ' — the scorer is reading the live board');
+
+    // THE VACUITY GUARD, and it is the whole reason this test is trustworthy.
+    // "The score did not change" is also true of a scorer that ignores the
+    // station entirely, or of a fixture where nothing meaningful moved. So:
+    // refresh ONLY what `pid` remembers — one record in state.seen, on a
+    // snapshot, with every other input identical — and the score must now move.
+    // That isolates the single variable this test is about.
+    var scratch = snapshot(f.s);
+    var live = scratch.stations[f.lost];
+    scratch.seen[pid][f.lost] = {
+      o: live.owner,
+      u: { infantry: live.units.infantry, artillery: live.units.artillery, armour: live.units.armour },
+      c: live.connected !== false,
+      t: scratch.tick,
+    };
+    var refreshed = aiScoreTarget(scratch, pid, f.lost, aiContext(scratch, pid));
+    assert(JSON.stringify(refreshed) !== JSON.stringify(before),
+      'updating what ' + pid + ' REMEMBERS about ' + f.lost + ' did not change its ' +
+      'score either (' + JSON.stringify(before) + ') — this fixture cannot tell a ' +
+      'fogged scorer from one that is not looking at the station at all');
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. Connectivity — invisible from outside a power's own network
+  // -------------------------------------------------------------------------
+
+  test('a staging march is sized on believed connectivity, not the real flag', function () {
+    if (typeof _aiActGrownDefenderPower !== 'function') {
+      return skipTest('staging projection', 'ai/ai.js private not reachable');
+    }
+    var f = _fogMemFixture(5724, pid);
+    assert(!!f, 'fixture is wrong');
+    observeTick(f.s);                                  // seen, and seen CONNECTED
+    setStationOwner(f.s, f.drop, 'neutral');           // go blind
+    _fogMemWatch(f.s, 200);
+
+    var b = believedStation(f.s, pid, f.lost);
+    assertEqual(b.level, 1, f.lost + ' is not fogged — fixture is wrong');
+    assertEqual(b.connected, true, f.lost + ' was not remembered as connected');
+
+    // Cut it off on the LIVE board. `pid` cannot possibly know this: whether a
+    // station is joined to its owner's network is a fact about the inside of
+    // somebody else's empire.
+    f.s.stations[f.lost].connected = false;
+
+    var ctx = aiContext(f.s, pid);
+    var def = _aiActDefenderPower(f.s, pid, f.lost, ctx);
+    var grown = _aiActGrownDefenderPower(f.s, pid, f.lost, def, ctx);
+
+    // A cut-off station decays instead of growing, so the unfixed code reads
+    // real.connected === false and projects the garrison to ITSELF — grown
+    // comes back exactly equal to def. Believing it connected projects it
+    // forward to the growth ceiling.
+    var room = STATIONS[f.lost].capacity * BAL.GROWTH_OVERFLOW_CEIL -
+               totalUnits(b.units);
+    assert(room > 0, f.lost + ' is already at the growth ceiling — there is no ' +
+      'projection to make and this test proves nothing');
+    assert(grown > def,
+      'the projection came back at ' + grown.toFixed(1) + ' against a present ' +
+      def.toFixed(1) + ' — _aiActGrownDefenderPower read the live `connected` flag, ' +
+      'which is not visible from outside ' + f.s.stations[f.lost].owner + '\'s network');
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Symmetry — nobody gets a bonus
+  // -------------------------------------------------------------------------
+
+  test('two powers holding the same ground see exactly the same board', function () {
+    var pids = _fogPowers();
+    assert(pids.length >= 2, 'need two powers');
+
+    // A mirror image of the 1914 map does not exist, so the claim is put the
+    // only way it can be made exactly: visibility is a function of WHICH
+    // STATIONS ARE HELD and of nothing else — not of who holds them. Hand two
+    // different powers the identical holding and the two sight maps must be
+    // byte-identical. A rule that gave any power an extra hop lands here.
+    var adj = _fogAdj(true);
+    var anchor = STATION_IDS[0];
+    var hops = _fogHops(anchor, adj);
+    var set = [anchor];
+    for (var i = 0; i < STATION_IDS.length && set.length < 3; i++) {
+      if (hops[STATION_IDS[i]] >= 4) set.push(STATION_IDS[i]);
+    }
+    assert(set.length === 3, 'could not find three well-separated stations');
+
+    var boardFor = function (who) {
+      var s = newGame(5725);
+      for (var j = 0; j < STATION_IDS.length; j++) {
+        if (s.stations[STATION_IDS[j]].owner !== 'neutral') {
+          setStationOwner(s, STATION_IDS[j], 'neutral');
+        }
+      }
+      for (var k = 0; k < set.length; k++) setStationOwner(s, set[k], who);
+      return visibleTo(s, who);
+    };
+
+    var problems = [], base = boardFor(pids[0]), baseJson = JSON.stringify(base);
+
+    // Vacuity guards. An all-2 map or an all-0 map would make every comparison
+    // below trivially equal.
+    var lit = 0, dark = 0;
+    for (var m = 0; m < STATION_IDS.length; m++) {
+      if (base[STATION_IDS[m]] === 2) lit++; else dark++;
+    }
+    assert(lit > set.length, 'the holding lights nothing beyond itself');
+    assert(dark > 0, 'the holding sees the entire map — there is no fog to be fair about');
+
+    for (var p = 1; p < pids.length; p++) {
+      if (JSON.stringify(boardFor(pids[p])) !== baseJson) {
+        problems.push(pids[p] + ' sees a different board from ' + pids[0] +
+                      ' while holding the identical ' + set.join(', '));
+      }
+    }
+    assertNone(problems, 'the AI gets the same fog — symmetric, without exception');
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. The human — no penalty and no bonus
+  // -------------------------------------------------------------------------
+
+  test('the human observes on exactly the same rule as everyone else', function () {
+    var s = newGame(5726);
+    var pids = _fogPowers();
+    s.human = (pids.indexOf('ger') >= 0) ? 'ger' : pids[0];
+    for (var t = 0; t < 200; t++) stepTick(s);
+
+    var mem = (s.seen && s.seen[s.human]) || {};
+    var vis = visibleTo(s, s.human);
+    var missing = [], invented = [], seenNow = 0, unseen = 0;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var sid = STATION_IDS[i];
+      if (vis[sid] === 2) {
+        seenNow++;
+        // NO PENALTY. observeTick sits ABOVE aiTick's `state.human` skip, so
+        // the player remembers everything they can currently see. Moved below
+        // it, the human would get BINARY fog and every one of these would fail.
+        if (!mem[sid]) missing.push(sid);
+      } else {
+        unseen++;
+        // NO BONUS. The human is not handed records for ground nobody looked
+        // at, which is the same rule every AI power is held to.
+        if (mem[sid] && mem[sid].t === s.tick) invented.push(sid);
+      }
+    }
+    assert(seenNow > 0 && unseen > 0,
+      'the human either sees everything or nothing after 200 ticks — nothing was checked');
+    assertNone(missing, s.human + ' is the human and does not remember ground it is ' +
+      'standing next to — observeTick has fallen below aiTick\'s human skip');
+    assertNone(invented, s.human + ' has a fresh record for ground it cannot see');
+
+    // The control, without which "no penalty" could pass because the human is
+    // in fact being played by the AI.
+    var acted = 0, log = s.aiLog || [];
+    for (var k = 0; k < log.length; k++) if (log[k].power === s.human) acted++;
+    assertEqual(acted, 0, s.human + ' took ' + acted + ' AI decisions — the human is ' +
+      'not being skipped, so this test proved nothing about observeTick\'s position');
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. The standings are NOT fogged, and that is on purpose
+  // -------------------------------------------------------------------------
+
+  test('who is winning stays public — ctx.leader reads the true board', function () {
+    // Deliberate hole #2 in the fog (02-visibility-and-sea.md). LEADER_WEIGHT
+    // is 45.0 and known-issues #11 established it is the only constant that can
+    // actually declare a war; fogging it would disarm the balance of power and
+    // leave the leader unopposed. This test exists so that a later reader who
+    // finds a global read inside a fogged AI and "fixes" it goes red instead of
+    // shipping a snowball.
+    var s = newGame(5727);
+    var pids = _fogPowers();
+    var blind = pids[0], big = pids[pids.length - 1];
+    assert(blind !== big, 'need two distinct powers');
+
+    // Hand almost the whole map to one power, and reduce another to a single
+    // station on the far side of it. The small one can see essentially nothing
+    // and must still name the leader correctly.
+    var keep = null;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      if (s.stations[STATION_IDS[i]].owner === blind) { keep = STATION_IDS[i]; break; }
+    }
+    assert(!!keep, blind + ' holds nothing at turn zero');
+    for (var j = 0; j < STATION_IDS.length; j++) {
+      if (STATION_IDS[j] !== keep) setStationOwner(s, STATION_IDS[j], big);
+    }
+
+    var ctx = aiContext(s, blind);
+    var vis = visibleTo(s, blind);
+    var hidden = 0;
+    for (var k = 0; k < STATION_IDS.length; k++) if (vis[STATION_IDS[k]] !== 2) hidden++;
+    assert(hidden > STATION_IDS.length / 2,
+      blind + ' can see most of the board — the test would prove nothing');
+
+    assertEqual(ctx.leader, big,
+      blind + ' cannot see the board and must STILL know ' + big + ' is winning: ' +
+      'in 1914 the standings are newspapers, embassies and attachés, not ' +
+      'reconnaissance. You can hide an army; you cannot hide having conquered Belgium.');
+    assert(ctx.leaderShare > 0.5,
+      'leaderShare is ' + ctx.leaderShare + ' with one power holding 107 of 108 stations');
+  });
+
+  // -------------------------------------------------------------------------
+  // 9 and 10. The route cache — the 1,400x regression that reports nothing
+  // -------------------------------------------------------------------------
+
+  test('every commandRoute call in ai/ai.js is handed the REAL state', function () {
+    var srcs = _fogSourceOf(['ai/ai.js']);
+    if (!srcs || !srcs.length) return skipTest('commandRoute source', 'no filesystem — run under node');
+    if (typeof _aiStripText !== 'function') {
+      return skipTest('commandRoute source', 'test/ai-tests.js not loaded (_aiStripText)');
+    }
+    var clean = _aiStripText(srcs[0].text);
+    var calls = 0, problems = [], m;
+    var re = /commandRoute\s*\(/g;
+    while ((m = re.exec(clean)) !== null) {
+      calls++;
+      // Split the argument list at TOP-LEVEL commas only. A regex cannot do
+      // this: the exact regression being guarded against — `commandRoute(a, b,
+      // _aiActBelievedAt(state, pid, t, ctx), pid)` — puts parens and commas
+      // inside argument three, and a naive `[^()]*` match skips the call
+      // entirely, i.e. the mutation would hide from its own test.
+      var depth = 1, args = [''], i;
+      for (i = re.lastIndex; i < clean.length && depth > 0; i++) {
+        var ch = clean.charAt(i);
+        if (ch === '(') depth++;
+        else if (ch === ')') { depth--; if (!depth) break; }
+        if (depth === 1 && ch === ',') { args.push(''); continue; }
+        args[args.length - 1] += ch;
+      }
+      var third = (args[2] || '').trim();
+      if (third !== 'state') {
+        problems.push('commandRoute(' + args.join(',').replace(/\s+/g, ' ').trim() +
+                      ') — 3rd argument is "' + third + '", not the real `state`');
+      }
+    }
+    assert(calls >= 2, 'found ' + calls + ' commandRoute call(s) in ai/ai.js — expected at ' +
+      'least the volley one and the staging one; the check did not run');
+    assertNone(problems,
+      '_ownRouteCache in sim/movement.js invalidates on state OBJECT IDENTITY, so a ' +
+      'believed board or a proxy handed to commandRoute drops the REAL state\'s routes ' +
+      'too and every Dijkstra in the game is recomputed per tick. Measured: routeFor ' +
+      'cached 0.115us, against a fresh proxy each call 161.1us. It produces no wrong ' +
+      'answer, only a game that crawls.');
+  });
+
+  test('the route cache still holds — _moveSearch is not being re-run per tick', function () {
+    if (!g || typeof g._moveSearch !== 'function') {
+      return skipTest('route cache', 'sim/movement.js _moveSearch is not reachable');
+    }
+    // The source check above cannot see a proxy that arrives through a helper,
+    // and the failure mode has NO WRONG ANSWER attached — only a slow game. So
+    // it is also measured. The board is pinned (seed, warm-up, window) so the
+    // count is a property of the build rather than of the run.
+    var s = newGame(5728);
+    var w;
+    for (w = 0; w < 2000; w++) stepTick(s);            // waves in flight, orders standing
+
+    var real = g._moveSearch, n = 0;
+    g._moveSearch = function () { n++; return real.apply(null, arguments); };
+    try {
+      for (w = 0; w < 200; w++) stepTick(s);
+    } finally {
+      g._moveSearch = real;
+    }
+
+    // Measured on this board: 83 searches over 200 ticks with the cache warm,
+    // and 1,071 with a believed proxy handed to commandRoute — a 12.9x jump in
+    // Dijkstras and 71.9ms -> 149.4ms of wall clock. The ceiling sits between
+    // them with room for the AI to change without a false alarm.
+    assert(n > 0, 'the wrapper never fired — _moveSearch was not the function being called');
+    assertBetween(n, 1, 400,
+      n + ' Dijkstra searches over 200 ticks (' + (n / 200).toFixed(2) + '/tick). The ' +
+      'cache is warm at ~0.42/tick; a proxy state handed to routeFor/commandRoute ' +
+      'invalidates it on every call and takes it to ~5.4/tick.');
   });
 }
 

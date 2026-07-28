@@ -318,8 +318,11 @@ function bootPlay(pid) {
     tryStep('cameraFocus', function () { cameraFocus(startHomeBox(window.PLAYER)); });
   }
 
-  // AI decision log (render/ailog.js) — hidden until `L`. Optional like the AI
-  // it inspects, so it is guarded the same way.
+  // AI decision log (render/ailog.js) — behind `?ailog=1`, then hidden until
+  // `L`. Optional like the AI it inspects, so it is guarded the same way, and
+  // it returns false without the flag rather than throwing. It is the ONE
+  // renderer that is deliberately not fog-filtered, which is exactly why the
+  // player does not get it by default: see the note at ailogEnabled().
   if (typeof initAiLog === 'function') tryStep('initAiLog', initAiLog);
 
   wireSpeedControls();

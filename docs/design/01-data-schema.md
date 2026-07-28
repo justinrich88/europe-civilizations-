@@ -437,17 +437,54 @@ Both files read this, so it is contractual rather than an implementation detail:
                                                                // gets neutral 1s
   own:      ['aal', 'ber', ...],   // sorted station ids this power holds
   hops:     { sid: n },            // link-hops from the NEAREST owned station,
-                                   // over PASSABLE ground only (own + neutral,
-                                   // the routeFor rule) while still recording
-                                   // the enemy stations on the far side of it.
-                                   // BFS capped at max(TARGET_MAX_HOPS,
-                                   // SOURCE_MAX_HOPS); absent means "further,
-                                   // or not legally reachable at all".
-  leader:      'rus' | null,       // current territory-count leader
-  leaderShare: 0.34,               // leader's share of all owned territories
+                                   // over OWN GROUND ONLY -- see the warning
+                                   // below. In practice n is only ever 0 or 1.
+  vis:      { sid: 0|2 },          // visibleTo() for this power, one solve per
+                                   // decision (fog, Milestone 5.7)
+  leader:      'rus' | null,       // current territory-count leader -- TRUE
+  leaderShare: 0.34,               // board, deliberately never fogged; see
+                                   // 02-visibility-and-sea.md
   ownForces:   1842,               // total units, for commitment sizing
 }
 ```
+
+> **`hops` never exceeds 1, and `TARGET_MAX_HOPS` / `SOURCE_MAX_HOPS` are dead
+> config.** *Measured 2026-07*, independently, twice.
+>
+> The comment this block used to carry said the BFS ran "over PASSABLE ground
+> only (own + neutral, the `routeFor` rule)" and was "capped at
+> `max(TARGET_MAX_HOPS, SOURCE_MAX_HOPS)`". Both halves are false. The
+> predicate underneath (`_aiScoreCanTraverse`, `ai/score.js`) is
+> `st.owner === pid` — **neutral is not passable**, changed when Britain
+> captured Berlin on turn one (`sim/movement.js:176`) — and the code was
+> updated while three separate comment blocks were not.
+>
+> The consequence is larger than a stale comment. The BFS **seeds every owned
+> station at hop 0** and then expands only through own ground, so its frontier
+> is empty after a single pass. `hops` therefore contains **0 and 1 and
+> nothing else**, no matter what the constants say. Sampled across a 12,000-
+> tick game, all seven powers, 24 sample points: hop values present were
+> `{0: 1391, 1: 1545}`. Nothing at 2. `TARGET_MAX_HOPS` is 2 and
+> `SOURCE_MAX_HOPS` is 3; **neither has any effect on anything.**
+>
+> **The AI therefore has no strategic horizon.** It only ever considers targets
+> directly adjacent to ground it already holds. It cannot plan two moves out,
+> cannot mass against a target it does not already border, and cannot be
+> baited — because it never looks far enough to be baited.
+>
+> **This makes fog nearly inert for the AI at the attack gate**, which is why
+> Milestone 5.7 moved balance by less than one standard deviation. Every held
+> station has `vision >= 1`, so everything one hop out is lit at level 2; and
+> a wave may only traverse own ground, so anything legally attackable is
+> adjacent to something held. Measured: **1,258 of 1,258 candidates at level
+> 2, none fogged, none hidden.** The believed board and the true board are
+> provably equal at every point where the AI decides an attack.
+>
+> The believed-board seam is still correct and still required — it becomes
+> load-bearing the instant either fact moves (a wider traversal rule, a real
+> multi-hop horizon, or `vision` dropping below 1 anywhere). But **do not tune
+> `TARGET_MAX_HOPS` in Milestone 6 expecting it to do something.** Fix the
+> horizon first, or delete the constants.
 
 ### The decision object
 

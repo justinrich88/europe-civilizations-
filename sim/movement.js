@@ -550,10 +550,14 @@ function _moveBeginLanding(state, w) {
   var st = state && state.stations ? state.stations[sid] : null;
   if (!st || st.owner === w.owner) return;              // reinforcement, not a beachhead
   if (typeof logEvent !== 'function') return;
+  // 4th argument: the beach. Stated, never consulted — this file may not know
+  // who can see it (test/fog-tests.js greps sim/ for exactly that). It is what
+  // lets render/hud.js keep a landing off the ticker when the player has no
+  // eyes on the coast it happened on.
   logEvent(state, 'landing',
     w.owner + ' puts ' + _moveLandNum(w.landing.total) + ' ashore at ' +
     (typeof STATIONS !== 'undefined' && STATIONS[sid] ? STATIONS[sid].name : sid) +
-    ' against ' + st.owner);
+    ' against ' + st.owner, sid);
 }
 
 // Commit one echelon. Returns true while units are still at sea, i.e. while the

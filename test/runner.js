@@ -1352,6 +1352,58 @@ function suiteSimCombat(d) {
     };
     assert(run(fort) < run(open), 'assaulting a fortress must cost more than assaulting a city');
   });
+
+  test('a capture is logged with the station it happened at', function () {
+    // Milestone 5.7. "ger took Brussels from neutral" on the ticker was the
+    // single largest leak on the board: every capture anywhere, live, for a
+    // player who may never have set foot in Belgium.
+    //
+    // The FILTER lives in render/hud.js and not here — state.log is sim state,
+    // render/victory.js wants the whole truth once the game is over, and
+    // test/fog-tests.js asserts as a tested fact that nothing under sim/ so
+    // much as names visibility. What the sim owes the renderer is WHICH station
+    // the event was about: logEvent's optional 4th argument.
+    //
+    // Pinned rather than merely tolerated, because a filter keyed to a field
+    // the sim silently stopped setting fails OPEN. Every capture on the board
+    // would come back on screen and nothing anywhere would say so.
+    var sid = _anyStation(S, function (st) { return st.type === 'holding' && st.defense === 1.0; });
+    var s = fns.newGame(21);
+    _clearBoard(s, 'neutral');
+    _setOwner(s, sid, 'neutral');
+    s.stations[sid].units.infantry = 10;
+    s.waves.push({ id: 998, owner: '_atk', from: sid, to: sid, path: [sid], hop: 0, progress: 1,
+                   units: { infantry: 120, artillery: 0, armour: 0 } });
+    for (var i = 0; i < 6000 && s.stations[sid].owner === 'neutral'; i++) fns.step(s);
+    assertEqual(s.stations[sid].owner, '_atk',
+      'the fixture never captured anything — this test would pass vacuously');
+
+    var caps = (s.log || []).filter(function (e) { return e.kind === 'capture'; });
+    assertEqual(caps.length, 1, 'expected exactly one capture event, got ' + caps.length);
+    assertEqual(Object.keys(caps[0]).sort().join(','), 'kind,sid,text,tick',
+      'the capture record is not { tick, kind, text, sid }');
+    assertEqual(caps[0].sid, sid,
+      'the capture was tagged with the wrong station — the ticker would test it ' +
+      'against the visibility of somewhere else entirely');
+  });
+
+  test('an event that names no station carries no sid at all', function () {
+    // The other half of "additive and optional", and it is what keeps the
+    // renderer's default safe. A declaration of war, a capitulation and a
+    // victory are about POWERS; they name no city, there is nothing for a fog
+    // filter to test, and 02-visibility-and-sea.md keeps them public on purpose
+    // ("you can hide an army; you cannot hide having conquered Belgium").
+    //
+    // So the key must be ABSENT rather than null or empty: render/hud.js reads
+    // "no sid" as "public", and a key that is present but falsy is the shape
+    // that turns a three-way decision into an accidental two-way one.
+    var s = fns.newGame(22);
+    logEvent(s, 'relations', 'A declares war on B');
+    var e = s.log[s.log.length - 1];
+    assertEqual(Object.keys(e).sort().join(','), 'kind,text,tick',
+      'a station-less event grew a key it has no value for');
+    assert(!('sid' in e), 'sid must be absent, not present-and-empty');
+  });
 }
 
 function suiteSimMultiplier(d) {
@@ -2552,11 +2604,26 @@ function suiteSimBeachhead(d) {
     var ev = _beachLandings(s);
     assertEqual(ev.length, 1,
       'an opposed landing logged ' + ev.length + ' events — one per ECHELON, or none at all');
-    // Same record shape as sim/combat.js's capture and sim/victory.js's
-    // capitulation: { tick, kind, text } and nothing else. A ticker that has to
-    // learn a second shape is a ticker that will read the wrong field.
-    assertEqual(Object.keys(ev[0]).sort().join(','), 'kind,text,tick',
-      'the landing record is not { tick, kind, text }');
+    // Same record shape as sim/combat.js's capture: { tick, kind, text, sid }
+    // and nothing else. A ticker that has to learn a second shape is a ticker
+    // that will read the wrong field.
+    //
+    // `sid` arrived with fog (Milestone 5.7) and is logEvent's optional 4th
+    // argument. It is what lets render/hud.js keep a landing off the ticker
+    // when the player has no eyes on the coast — WITHOUT the sim ever
+    // consulting visibility, which test/fog-tests.js separately greps for. It
+    // is pinned here rather than merely tolerated, because a filter keyed to a
+    // field the sim silently stopped setting fails OPEN: every landing on the
+    // board would be back on screen and nothing would say so.
+    //
+    // Entries that name no station — capitulation, elimination, victory,
+    // declarations of war — still carry exactly { tick, kind, text }; the key
+    // is added conditionally, which is what keeps the change additive.
+    assertEqual(Object.keys(ev[0]).sort().join(','), 'kind,sid,text,tick',
+      'the landing record is not { tick, kind, text, sid }');
+    assertEqual(ev[0].sid, fx.beach,
+      'the landing was tagged with the wrong station — the ticker would filter ' +
+      'it against somebody else\'s visibility');
     assertEqual(ev[0].tick, at, 'the landing was stamped with the wrong tick');
     var m = _LAND_RE.exec(ev[0].text);
     assert(!!m, 'render/hud.js cannot parse the landing sentence: "' + ev[0].text + '"');

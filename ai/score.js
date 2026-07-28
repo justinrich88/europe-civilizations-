@@ -42,6 +42,26 @@
 // never an actor: it has no relations row, atWar() must not be consulted for
 // it, and state.powers['neutral'] must never be assumed to have wars/relations.
 //
+// FOG (milestone 5.7 stage 4). Every read this file makes ABOUT SOMEBODY ELSE'S
+// STATION goes through `believedStation()` — owner, garrison and connectivity
+// alike. Reads about `pid`'s OWN ground stay on the true board, and that is not
+// a leak: a power always knows what it is standing on, and `visibleTo` returns
+// 2 for every station its subject holds. The seam is `ctx.vis`, computed once
+// per decision by aiContext; see `_aiScoreBelief` below.
+//
+// Two things deliberately stay on the true board, both recorded in
+// 02-visibility-and-sea.md so a later reader does not "fix" them:
+//
+//   * ctx.leader / ctx.leaderShare — the standings. LEADER_WEIGHT is 45.0 and
+//     known-issues #11 established it is the ONLY constant that can actually
+//     declare a war, so fogging it would silently disarm the balance of power.
+//     In 1914 the standings are newspapers, embassies and attachés: you can
+//     hide an army, you cannot hide having conquered Belgium.
+//   * routing legality (`commandRoute` / `routeFor`) — see the block above
+//     `_aiActPlanVolley` in ai/ai.js. A route is a claim about where your own
+//     army may walk, and finding the road blocked when you march is legible
+//     fog behaviour. It is also a 1,400x performance trap.
+//
 // GLOBAL HYGIENE. Top-level function declarations land on `window`
 // (known-issues #9 — a renderer's "private" helper silently replaced the sim's
 // function of the same name and cost a debugging session while 79 tests stayed
@@ -165,14 +185,24 @@ function _aiRound(v) {
 // caller must treat as out of range rather than as zero.
 //
 // The sweep is REACHABILITY, not geography: it expands only through stations
-// `pid` may legally march through (its own and neutral ones — sim/movement.js
-// routeFor), while still RECORDING the enemy stations on the far side of that
-// frontier, because those are exactly the ones worth attacking. Without this
-// the scorer offers targets sitting behind somebody else's cities, every
-// resulting volley comes back 'no-route' from applyCommand, and the power sits
-// paralysed with a decision log full of holds.
+// `pid` may legally march through — **its OWN ground, and nothing else** — while
+// still RECORDING the enemy stations on the far side of that frontier, because
+// those are exactly the ones worth attacking. Without this the scorer offers
+// targets sitting behind somebody else's cities, every resulting volley comes
+// back 'no-route' from applyCommand, and the power sits paralysed with a
+// decision log full of holds.
+//
+// NEUTRAL IS NOT PASSABLE. This comment used to say "own or neutral — the
+// routeFor rule", and it had been wrong since sim/movement.js:176 changed the
+// rule: with the capital-only opening, 101 of 108 stations are neutral at turn
+// zero, so "neutral is passable" made the whole map an open highway and Britain
+// captured Berlin on turn one without fighting anything. The CODE below was
+// updated then; two comment blocks in this file (here and above _aiSources)
+// were not. That is the known-issues #9/#18 shape — a description that stopped
+// matching the thing it describes, and stayed plausible.
+//
 // Must mirror _moveCanTraverse in sim/movement.js exactly. If the AI believes
-// it can march through neutral ground and the sim disagrees, every plan it
+// it can march through ground the sim will not let it cross, every plan it
 // makes beyond its own border is rejected as 'no-route' and the power simply
 // stops playing — a failure that looks like a passive AI, not a broken rule.
 function _aiScoreCanTraverse(state, pid, sid) {
@@ -248,9 +278,29 @@ function aiContext(state, pid) {
     personality: _aiPersonality(pid),
     own: own,
     hops: _aiHopsFromOwn(state, pid, own, cap),
+
+    // THE STANDINGS ARE NOT FOGGED, and that is a decision rather than an
+    // oversight. These two walk territoryControl across all 30 territories —
+    // global information, computed every decision. LEADER_WEIGHT is 45.0 and
+    // known-issues #11 established it is the only constant on the board that
+    // can actually declare a war, so fogging it would disarm the balance of
+    // power and leave the leader unopposed. 02-visibility-and-sea.md records
+    // this in full: "who is winning is public knowledge" — newspapers,
+    // embassies and attachés, not reconnaissance. DO NOT "FIX" THIS.
     leader: stand.leader,
     leaderShare: stand.leaderShare,
     ownForces: powerForces(state, pid),
+
+    // THE FOG SEAM (milestone 5.7 stage 4). Live visibility for this power,
+    // { sid: 0|2 }, computed ONCE per decision and handed to believedStation as
+    // its optional 4th argument by every read below. Without it believedStation
+    // recomputes visibleTo per station and the scorer becomes O(n^2) in the
+    // board — the honest warning core/vision.js carries above it.
+    //
+    // Null when core/vision.js is absent, which every consumer must read as
+    // "no fog": ai/ must stay loadable on its own (a build with core/vision.js
+    // stripped plays the unfogged game rather than crashing).
+    vis: (typeof visibleTo === 'function') ? visibleTo(state, pid) : null,
 
     // Per-decision memos. Underscored because they are not part of the pinned
     // shape — ai/ai.js may read them but must not depend on them existing.
@@ -258,7 +308,104 @@ function aiContext(state, pid) {
     // normal path, and the source sweep is the expensive part.
     _srcCache: {},
     _oddsCache: {},
+
+    // Believed station records, keyed by sid. READ-ONLY BY CONTRACT: the
+    // record is shared between every caller in this decision, so a caller that
+    // edited `units` in place would silently rewrite what the power thinks it
+    // saw. Both halves of the AI populate it (ai/ai.js `_aiActBelief`).
+    _belief: {},
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// The believed board
+//
+// One helper and one proxy builder, and both are DUPLICATED in ai/ai.js as
+// `_aiActBelief` / `_aiActBelievedAt`. That is deliberate and it is the rule
+// from known-issues #12: privates are prefixed by FILE, not by subsystem,
+// because two files that share a domain name the same concepts and collide.
+// Neither half may call the other's private — ai/ai.js must load with
+// ai/score.js absent, and ai/score.js loads first. The canonical
+// implementation both call is believedStation() in core/vision.js; what is
+// duplicated here is only the four-line adapter onto it.
+// ---------------------------------------------------------------------------
+
+// What `pid` believes is at `sid`. Memoised for the life of one ctx.
+//
+// The fallback when core/vision.js is absent is the TRUE station, which makes
+// a stripped build play the unfogged game rather than throw. It hands back the
+// live `units` object, so the read-only contract on `ctx._belief` is what keeps
+// that safe.
+function _aiScoreBelief(state, pid, sid, ctx) {
+  var memo = ctx ? ctx._belief : null;
+  if (memo && memo[sid]) return memo[sid];
+
+  var b;
+  if (typeof believedStation === 'function') {
+    b = believedStation(state, pid, sid, ctx ? ctx.vis : null);
+  } else {
+    var st = state.stations ? state.stations[sid] : null;
+    b = st
+      ? { owner: st.owner, units: st.units, connected: st.connected !== false,
+          tick: state.tick, level: 2 }
+      : { owner: null, units: null, connected: null, tick: -1, level: 0 };
+  }
+  if (memo) memo[sid] = b;
+  return b;
+}
+
+// The garrison `pid` should PLAN AGAINST at `sid`, as a units bundle.
+//
+// Levels 1 and 2 hand back what was seen. Level 0 is the interesting one: the
+// station has never been observed, so `believedStation` reports null units —
+// correct for a renderer, useless for a decision, because a decision has to
+// produce some number and null is not one.
+//
+// The prior is A FULL GARRISON. Station capacity is public, static, authored
+// data (data/stations.js): the map is known in 1914, only what is standing on
+// it is not. So "assume the ground you have never looked at is held in
+// strength" is exactly the information a staff officer has, and it fails SAFE —
+// an empty-garrison prior would read every unseen station as a walk-in and send
+// the AI charging blind at 10:1 odds it invented. aiCandidates below refuses
+// level-0 targets outright, so this is defence in depth rather than a live
+// path; it exists so that loosening the filter cannot turn into recklessness.
+function _aiScoreBelievedUnits(state, sid, bel) {
+  if (bel && bel.units) return bel.units;
+  var data = (typeof STATIONS !== 'undefined') ? STATIONS[sid] : null;
+  var u = emptyUnits();
+  if (data && data.capacity > 0) u.infantry = data.capacity;
+  return u;
+}
+
+// A ONE-STATION PROXY STATE carrying the believed garrison, so the canonical
+// stationPower() can be reused rather than re-derived (known-issues #9 rule 2).
+// This is the same trick ai/ai.js already used twice for the attacker side, and
+// it is the seam the whole of stage 4 rides on: stationPower reads nothing but
+// state.stations[sid] (sim/combat.js), so a proxy is a pure read.
+//
+// NEVER HAND THIS TO routeFor() OR commandRoute(). `_ownRouteCache` in
+// sim/movement.js invalidates on state OBJECT IDENTITY, so a fresh proxy per
+// call drops the real state's routes too and movementTick recomputes its
+// O(n^2) Dijkstras every tick. Measured on the live board: routeFor cached
+// 0.115us, against a fresh proxy each call 161.1us — 1,400x, with no wrong
+// answer, only a game that crawls.
+//
+// `attackers` is believed too: at level 2 it is the live set, and at level 1 it
+// is empty, because memory records a garrison and never records who was
+// besieging it. That matters because stationPower folds the attackers' MIX into
+// the defender's matchup.
+function _aiScoreBelievedAt(state, pid, sid, ctx) {
+  var bel = _aiScoreBelief(state, pid, sid, ctx);
+  var real = state.stations ? state.stations[sid] : null;
+  var proxy = { stations: {} };
+  proxy.stations[sid] = {
+    owner: bel.owner,
+    units: _aiScoreBelievedUnits(state, sid, bel),
+    attackers: (bel.level === 2 && real && real.attackers) ? real.attackers : {},
+    connected: bel.connected !== false,
+  };
+  return proxy;
 }
 
 
@@ -294,9 +441,12 @@ function _aiSources(state, pid, sid, ctx) {
         seen[n] = true;
         // Run OUTWARD from the target through passable ground only. This is the
         // routeFor rule read backwards: a source can only join the volley if
-        // the ground between it and the target is its own or neutral, so a
-        // station on the far side of a rival's city must not be counted into
-        // the odds for an attack it can never deliver.
+        // the ground between it and the target is ITS OWN — neutral is NOT
+        // passable (sim/movement.js:176) — so a station on the far side of a
+        // rival's, or a neutral's, city must not be counted into the odds for
+        // an attack it can never deliver. The predicate is _aiScoreCanTraverse;
+        // see the block above it for why this comment said "own or neutral" for
+        // as long as it did.
         if (_aiScoreCanTraverse(state, pid, n)) next.push(n);
         if (state.stations[n].owner === pid) {
           var send = _aiSendable(state, n);
@@ -364,7 +514,11 @@ function _aiOdds(state, pid, sid, ctx) {
   var atk = 0;
   for (var i = 0; i < srcs.length; i++) atk += srcs[i].power;
 
-  var def = stationPower(state, sid, 'defender');
+  // FOGGED. The attacker side is `pid`'s own stations and stays on the true
+  // board; the defender is read off the BELIEVED station, so a garrison that
+  // has doubled since this power last looked does not show up in the odds it
+  // scores with. Same canonical stationPower, handed a one-station proxy.
+  var def = stationPower(_aiScoreBelievedAt(state, pid, sid, ctx), sid, 'defender');
 
   var odds;
   if (atk <= _AI_POWER_EPS) odds = 0;
@@ -401,14 +555,28 @@ function _aiOdds(state, pid, sid, ctx) {
 // decision, x7 powers, every 40 ticks, over hundreds of 36,000-tick games in
 // tools/balance.js. The heuristic is O(degree^2) on a graph whose mean degree
 // is 4, and it fires on precisely the shapes a human would call a chokepoint.
-function _aiCutsLink(state, sid, owner) {
-  if (owner === 'neutral') return 0;   // nothing to disconnect; neutral has no front
+// FOGGED, and this is the ONE term in the file whose answer actually moves
+// under fog today. The target itself is always visible (see the note above
+// aiCandidates), but its NEIGHBOURS sit up to two hops from `pid`'s own ground
+// and need not be. Measured over three full games sampled every 2,000 ticks:
+// of 5,949 neighbour reads, 4,390 were live, 383 were remembered and 1,176 had
+// never been seen at all — 26% of this heuristic's input was ground the AI had
+// no right to know the ownership of.
+//
+// An unseen neighbour is simply NOT KIN. Unknown is not "known to be the same
+// owner", so it neither counts toward `kin` nor supplies an alternative link.
+// A power therefore over-credits a cut it cannot fully see, which is the right
+// direction to be wrong in: it is the same mistake a general makes with a map
+// and no reconnaissance.
+function _aiCutsLink(state, pid, sid, owner, ctx) {
+  if (!owner || owner === 'neutral') return 0;   // nothing to disconnect; neutral has no front
   var adj = _aiAdjacency();
   var nb = adj[sid] || [];
+  var believedOwner = function (n) { return _aiScoreBelief(state, pid, n, ctx).owner; };
 
   var kin = [];
   for (var i = 0; i < nb.length; i++) {
-    if (state.stations[nb[i]].owner === owner) kin.push(nb[i]);
+    if (believedOwner(nb[i]) === owner) kin.push(nb[i]);
   }
   if (kin.length < 1) return 0;
 
@@ -417,7 +585,7 @@ function _aiCutsLink(state, sid, owner) {
     var others = adj[kin[k]] || [];
     var alt = false;
     for (j = 0; j < others.length; j++) {
-      if (others[j] !== sid && state.stations[others[j]].owner === owner) { alt = true; break; }
+      if (others[j] !== sid && believedOwner(others[j]) === owner) { alt = true; break; }
     }
     if (!alt) stranded++;
   }
@@ -431,7 +599,7 @@ function _aiCutsLink(state, sid, owner) {
       var a = adj[kin[k]] || [];
       for (var m = 0; m < a.length; m++) {
         if (a[m] === sid) continue;
-        if (state.stations[a[m]].owner !== owner) continue;
+        if (believedOwner(a[m]) !== owner) continue;
         if (_aiLinked(a[m], kin[j])) { shared = true; break; }
       }
       if (!shared) return 0.5;
@@ -495,7 +663,20 @@ function aiScoreTarget(state, pid, sid, ctx) {
   var st = state.stations[sid];
   var data = STATIONS[sid];
   var terms = {};
+  // `st.owner === pid` is read off the TRUE board on purpose: a power always
+  // knows what it is standing on, and visibleTo returns 2 for every station its
+  // subject holds, so there is no fog to apply to your own ground.
   if (!st || !data || st.owner === pid) return { score: 0, terms: terms };
+
+  // Everything below that concerns WHOSE station this is reads the BELIEVED
+  // owner, which for a fogged station is whoever held it when this power last
+  // looked. `null` means never seen: the map is public, so `type` and
+  // `capacity` still score, but the capital bonus, the hostility term and the
+  // cut heuristic all need an owner and correctly contribute nothing without
+  // one. Inventing an owner for ground nobody has visited would be inventing
+  // intelligence (core/vision.js, believedStation).
+  var bel = _aiScoreBelief(state, pid, sid, ctx);
+  var owner = bel.owner;
 
   var person = ctx.personality;
   var expand = person.expandBias === undefined ? 1 : person.expandBias;
@@ -520,7 +701,7 @@ function aiScoreTarget(state, pid, sid, ctx) {
   terms[typeKey] = _aiRound(V[typeKey] * expand);
 
   // Capital bonus stacks on top of type — capitulation needs capitals (§7).
-  var cap = (typeof POWERS !== 'undefined' && POWERS[st.owner]) ? POWERS[st.owner].capital : null;
+  var cap = (typeof POWERS !== 'undefined' && POWERS[owner]) ? POWERS[owner].capital : null;
   if (cap === sid) terms.capital = _aiRound(V.capital * expand);
 
   // PER-UNIT BY DESIGN — tuning.js says "per unit of capacity", and left raw it
@@ -574,11 +755,11 @@ function aiScoreTarget(state, pid, sid, ctx) {
   if (prox > 0) terms.proximity = _aiRound(V.proximity * prox * defend);
 
   // --- cutsLink: severing the enemy's own network (§5) --------------------
-  var cut = _aiCutsLink(state, sid, st.owner);
+  var cut = _aiCutsLink(state, pid, sid, owner, ctx);
   if (cut > 0) terms.cutsLink = _aiRound(V.cutsLink * cut);
 
   // --- relations ----------------------------------------------------------
-  var host = _aiHostility(state, pid, st.owner);
+  var host = _aiHostility(state, pid, owner);
   if (host !== 0) terms.relationTerm = _aiRound(V.relationTerm * host);
 
   // Sum the ROUNDED contributions so the logged terms reconcile with the
@@ -603,6 +784,37 @@ function aiScoreTarget(state, pid, sid, ctx) {
 // Iterates STATION_IDS rather than the keys of ctx.hops. Both would work today,
 // but ctx.hops is built by insertion during a BFS and its key order is not
 // something this file should be entitled to rely on.
+//
+// ---------------------------------------------------------------------------
+// THE FOG FILTER — and a measurement that says it never fires today
+// ---------------------------------------------------------------------------
+//
+// A station this power has NEVER SEEN is not a target. You cannot decide to
+// take a city you do not know is there, and level 0 is exactly that claim.
+//
+// Measured, so that nobody mistakes this for a load-bearing line: across three
+// full games sampled every 2,000 ticks, **1,215 of 1,215 candidates were at
+// level 2** — live, right now. Not one was fogged, and not one was hidden.
+// That is structural rather than lucky, and it is worth stating because it
+// bounds what fog can do to this AI:
+//
+//   * `_aiHopsFromOwn` above seeds its BFS with every station `pid` holds and
+//     expands only through `pid`'s own ground — which is already at hops 0. Its
+//     frontier is therefore empty after one pass, so ctx.hops only ever
+//     contains 0 and 1, whatever TARGET_MAX_HOPS says.
+//   * every station a power holds has vision >= 1 (core/vision.js), so
+//     everything one hop out is lit at level 2.
+//
+// Candidates ⊆ one hop from own ground ⊆ visible. And the same rule runs the
+// other way through sim/movement.js: `_moveCanTraverse` allows only own ground,
+// so a station you can legally send a wave to is adjacent to something you
+// hold, which is a station you can see. **Under the current traversal rule, any
+// station the AI may legally attack is a station it can currently see.**
+//
+// So this filter is a guard, not a behaviour change — and it stops being one
+// the moment either of those two facts moves (a hop map that genuinely reaches
+// two, or a passability rule that lets a wave cross ground it does not hold).
+// It is cheap and it is correct; it stays.
 function aiCandidates(state, pid, ctx) {
   if (!ctx) ctx = aiContext(state, pid);
   var out = [];
@@ -612,6 +824,7 @@ function aiCandidates(state, pid, ctx) {
     if (h === undefined || h < 1 || h > BAL.AI.TARGET_MAX_HOPS) continue;
     var st = state.stations[sid];
     if (!st || st.owner === pid) continue;
+    if (_aiScoreBelief(state, pid, sid, ctx).level === 0) continue;
 
     var r = aiScoreTarget(state, pid, sid, ctx);
     out.push({

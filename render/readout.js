@@ -125,6 +125,16 @@
 //    milestone. Willingness is a fine thing to compute and a terrible thing to
 //    print.
 //
+// 4. **A SECTION MAY ONLY SPEAK ABOUT A STATION THE PLAYER CAN SEE**
+//    (Milestone 5.7). One call — `believedStation()` in core/vision.js —
+//    decides, once per frame, and the four station sections read the answer
+//    from `_rdoBelief()`. A visible station reads exactly as it always did; a
+//    fogged one gets its name, its owner and its garrison AS REMEMBERED, marked
+//    stale and dated, and no strength block at all; ground never seen gets one
+//    sentence. The long argument for where that line falls — and in particular
+//    why a remembered GARRISON is honest and a remembered DEFENCE is
+//    known-issues #18 — is at "the fog gate", below _rdoFocusOn.
+//
 // ── THE SEAM: railAddSection(spec) ───────────────────────────────────────
 //
 // The rail is a STACK of sections, not one panel. Station detail is merely one
@@ -876,6 +886,116 @@ function _rdoFocusOn(state) {
   return sid;
 }
 
+// ── the fog gate ────────────────────────────────────────────────────────
+//
+// **This panel is the highest-leverage leak on the board.** Every other surface
+// shows a fogged city as a shape or a colour; this one showed its exact
+// defending power, its exact garrison, its composition and its march times, one
+// hover away, for any of the 108 stations. A player who could not see Brussels
+// could still read what it would cost to take it.
+//
+// ONE CALL DECIDES, AND IT IS NOT THIS FILE'S CALL.
+//
+//   believedStation(state, pid, sid) -> { owner, units, connected, tick, level }
+//
+// core/vision.js composes live sight with `state.seen` and is the only function
+// in the project that can mint a level 1. Nothing here re-derives it, reads
+// `state.seen`, or asks `visibleTo` a second question — that would be two
+// authorities for one fact, which is how known-issues #9 and #18 both happened.
+//
+// THE THREE LEVELS, AND WHAT EACH IS ALLOWED TO PRINT
+// (02-visibility-and-sea.md §1, the three-level table):
+//
+//   2  visible   everything, live, exactly as before this change.
+//   1  fogged    name, type, territory, and the owner and garrison AS OF the
+//                tick this power last looked — marked stale, with an age.
+//                **NO STRENGTH BLOCK.** See below; it is the whole point.
+//   0  hidden    the idle body. Not the station's name, not its type, not its
+//                capacity: "territory shape only, no node, no number".
+//
+// WHY LEVEL 1 PRINTS A REMEMBERED GARRISON BUT NEVER A REMEMBERED DEFENCE.
+//
+// They look like the same concession and they are not. A remembered garrison is
+// a claim about the PAST and is labelled as one: "last seen … 41 days ago" is
+// true whatever has happened since, and the design asks for it by name
+// ("garrison shown stale and marked stale") because the skill fog creates is
+// deciding whether last minute's number is still true.
+//
+// A defending power is a claim about NOW. `stationPower()` folds the live
+// garrison together with fortification scale-in, the artillery strip and the
+// matchup against whoever is currently standing there — three of its four
+// inputs are facts about this instant that no memory contains. Printing it from
+// a remembered garrison would produce known-issues #18 in its purest form: a
+// number that is plausible, stable, recomputed every frame, and answering a
+// different question from the one on screen. There is no way to label it
+// honestly, because the label would have to say "this is what it WOULD hold
+// with troops it may no longer have, against attackers it has never met".
+//
+// So the fight section is live-only and hides itself, and so do supply and
+// orders — both of which read live per-tick clocks (`discSince`, the sweep
+// planner) that memory cannot age. Hiding a section costs the player nothing
+// they are entitled to; a fogged city they have to march on to price is the
+// feature.
+//
+// COST. `believedStation` without a visibility map costs one `visibleTo`, which
+// is 24-38us — the sanctioned once-per-frame budget (core/vision.js). It is
+// asked about exactly ONE station, the hovered one, and the answer is memoised
+// for the frame so that all four sections share the single call rather than
+// making four.
+
+var _rdoBel = { frame: -1, sid: null, data: null };
+
+// The fallback belief: everything, live. Used when there is no fog to apply —
+// core/vision.js absent, or `window.PLAYER` unset (tests.html, the empire
+// picker, a console session). Degrading to the TRUE board rather than to a
+// blank one is the right direction for a *renderer*: the failure mode here is
+// a build that shows what it always showed, and the failure mode of the other
+// choice is a rail that silently goes empty and reads as broken.
+function _rdoLiveBelief(state, sid) {
+  var st = state.stations[sid];
+  return {
+    owner: st.owner,
+    units: st.units,
+    connected: st.connected !== false,
+    tick: state.tick,
+    level: 2,
+  };
+}
+
+// One belief per station per frame, shared by all four sections. `_rdoFrame` is
+// bumped once per pump by _rdoRailPump, so the key is exact rather than
+// approximate.
+function _rdoBelief(state, sid) {
+  if (_rdoBel.frame === _rdoFrame && _rdoBel.sid === sid && _rdoBel.data) {
+    return _rdoBel.data;
+  }
+  var pid = window.PLAYER || null;
+  var b = (pid && typeof believedStation === 'function')
+    ? believedStation(state, pid, sid)
+    : _rdoLiveBelief(state, sid);
+  _rdoBel = { frame: _rdoFrame, sid: sid, data: b };
+  return b;
+}
+
+// "41 days ago". Quoted in DAYS, the same unit the top bar's counter uses
+// (render/hud.js: one sim-second is one day, day 0 is 28 June 1914), so "last
+// seen 41 days ago" and "Day 63" are readings off one clock. A staleness age in
+// ticks would be a second unit of time on screen for no reader's benefit.
+function _rdoAgo(ticks) {
+  if (!isFinite(ticks) || ticks < 0) return 'moments ago';
+  var days = Math.floor(ticks / _rdoTicksPerDay());
+  if (days <= 0) return 'less than a day ago';
+  return days + ' day' + (days === 1 ? '' : 's') + ' ago';
+}
+
+// Opacity for the two rows that are MEMORY rather than reading. It is a second,
+// wordless signal beside the "last seen" label and the age line, because a
+// number is the thing that gets misread and one marker three rows away is one
+// marker too far. Inline rather than a class: style.css belongs to another
+// agent this milestone. 0.65 of --ink-dim lands about on --ink-faint, which the
+// panel already uses for legible secondary text.
+var RDO_STALE_OPACITY = '0.65';
+
 // ════════════════════════════════════════════════════════════════════════
 // EMPIRE — always on screen, nothing selected
 // ════════════════════════════════════════════════════════════════════════
@@ -940,6 +1060,21 @@ var _rdoHead = { tick: -1e9, pid: null, data: null };
 // The branch order below MIRRORS growthTick() — contested → cut off → over
 // capacity → at cap → growing. That is control flow, not arithmetic; every
 // number still comes from the sim.
+//
+// ── FOG: THIS AGGREGATE IS OWN-ONLY, AND IT IS CHECKED RATHER THAN ASSUMED ──
+//
+// Every input is scoped to `pid`: powerStations(state, pid) supplies the ids,
+// the transit loop tests `waves[w].owner === pid`, and standingOrderPlan takes
+// pid. So the empire header needs no fog gate — a power always sees its own
+// cities, and level 2 is exactly what visibleTo() returns for ground you hold.
+//
+// But that is a property of a function in ANOTHER FILE, and "it only returns
+// mine" is precisely the kind of claim that is true on the afternoon it is
+// written. So the loop asserts it. The `continue` is not a filter — if it ever
+// fires, this panel has been summing somebody else's army into the player's
+// growth number, and the console says so once rather than never.
+var _rdoHeadLeaked = false;
+
 function _rdoHeaderStats(state, pid) {
   if (_rdoHead.data && _rdoHead.pid === pid &&
       (state.tick - _rdoHead.tick) < RDO_HEADER_EVERY_TICKS) {
@@ -972,6 +1107,16 @@ function _rdoHeaderStats(state, pid) {
   for (var i = 0; i < ids.length; i++) {
     var sid = ids[i];
     var st = state.stations[sid];
+    // The own-only ASSERTION. See the note above the function.
+    if (!st || st.owner !== pid) {
+      if (!_rdoHeadLeaked) {
+        _rdoHeadLeaked = true;
+        console.error('[render/readout] empire aggregate was handed ' + sid +
+          ', which ' + pid + ' does not own — powerStations() is no longer own-only ' +
+          'and this panel has been reporting a fogged army as the player\'s');
+      }
+      continue;
+    }
     var d = STATIONS[sid];
     var u = st.units;
     e.inf += u.infantry; e.art += u.artillery; e.arm += u.armour;
@@ -1189,12 +1334,15 @@ function _rdoStationBuild(host) {
   head.appendChild(n.type);
   host.appendChild(head);
 
-  var sub = el('div', 'rdo-sub');
+  // `n.sub` is kept because the OWNER row is one of the three things a fogged
+  // station reports from memory, so it has to be dimmable and hideable — at
+  // level 0 there is no owner to name at all.
+  n.sub = el('div', 'rdo-sub');
   n.swatch = el('span', 'rdo-swatch');
   n.owner = el('span', 'rdo-owner');
-  sub.appendChild(n.swatch);
-  sub.appendChild(n.owner);
-  host.appendChild(sub);
+  n.sub.appendChild(n.swatch);
+  n.sub.appendChild(n.owner);
+  host.appendChild(n.sub);
 
   // Territory + control tier. Invisible everywhere else in text, and a
   // partly-held country pays reduced benefits (00-vision.md §3). The territory
@@ -1208,10 +1356,14 @@ function _rdoStationBuild(host) {
   // hiding the decision. The composition rides under the bar as one line rather
   // than as three fixed cells of which two are usually "0".
   n.garr = _rdoRow(host, 'rdo-garr', 'garrison');
-  var bar = el('div', 'rdo-bar');
+  // `n.bar` (the track, not just the fill) is kept for the same reason: a
+  // capacity bar is an UNMARKED picture of a fill level, and there is no honest
+  // way to draw a remembered one — so the fogged body hides it and prints the
+  // remembered number in words instead.
+  n.bar = el('div', 'rdo-bar');
   n.barFill = el('div', 'rdo-bar-fill');
-  bar.appendChild(n.barFill);
-  host.appendChild(bar);
+  n.bar.appendChild(n.barFill);
+  host.appendChild(n.bar);
   n.comp = el('div', 'rdo-src rdo-comp');
   host.appendChild(n.comp);
 
@@ -1242,12 +1394,143 @@ function _rdoTypeBadge(d) {
   return t;
 }
 
+// WHICH ROWS EXIST AT WHICH LEVEL — one author, three modes.
+//
+// Every row this block can draw is switched here and nowhere else. That is not
+// tidiness: this file has already shipped the bug where a row was hidden and
+// the source lines hanging off it were not, leaving "urban · Germany → +0.60
+// lvl" attached to nothing and indistinguishable from a real reading (see
+// _rdoSources). Under fog the same slip is worse by a category — a live number
+// left standing under a fogged header is not a stale line, it is intelligence
+// the player has not earned.
+function _rdoStationChrome(n, level) {
+  // The owner has a name only once somebody has seen who holds it.
+  _rdoStyle(n.sub, 'stasub', 'display', level === 0 ? 'none' : '');
+  // The TERRITORY survives every level: 02-visibility-and-sea.md's hidden tier
+  // is "territory shape only", and the shape is drawn on the map with its name.
+  // Its control TIER does not survive — that is a count of who holds cities you
+  // cannot see — so the value cell is written empty below level 2.
+  _rdoShow(n.garr, 'stagarr', level > 0);
+  _rdoStyle(n.bar, 'stabarwrap', 'display', level === 2 ? '' : 'none');
+  _rdoShow(n.growth, 'stagrowth', level === 2);
+  if (level !== 2) {
+    _rdoShow(n.mul, 'stamul', false);
+    _rdoSources(n.mulSrc, 'stamulsrc', []);
+  }
+  // Memory, marked wordlessly as well as in words.
+  var dim = level === 1 ? RDO_STALE_OPACITY : '';
+  _rdoStyle(n.sub, 'stasub', 'opacity', dim);
+  _rdoStyle(n.garr.row, 'stagarrrow', 'opacity', dim);
+  _rdoStyle(n.comp, 'stacomp', 'opacity', dim);
+}
+
+// ── LEVEL 0 — the idle body ─────────────────────────────────────────────
+//
+// Never seen. The design's own words for this tier are "territory shape only.
+// No node, no number." So this body names NOTHING the player has not been
+// shown: not the city's name, not its type, not its capacity — a capacity is a
+// number, and a station's name on a rail is a claim that there is a station
+// there.
+//
+// It is a body rather than a hidden section on purpose. The rail is driven by
+// hover; a column that simply vanishes when the cursor crosses unexplored
+// ground reads as the panel breaking, and the player never learns that the
+// blankness IS the reading. One sentence is cheaper than that confusion.
+function _rdoStationIdle(state, n, sid) {
+  _rdoStationChrome(n, 0);
+  _rdoSet(n.name, 'staname', 'Unknown ground');
+  _rdoSet(n.type, 'statype', '');
+  _rdoSet(n.owner, 'staowner', '');
+  _rdoStyle(n.swatch, 'staswatch', 'background', 'var(--neutral-node)');
+  _rdoSet(n.terr.k, 'staterr', _rdoTerritoryName(STATIONS[sid].territory));
+  _rdoSet(n.terr.v, 'statier', '');
+  _rdoClass(n.terr.v, 'statier', 'is-contested', false);
+  _rdoClass(n.terr.v, 'statier', 'is-partial', false);
+  _rdoSet(n.garr.k, 'stagarrk', 'garrison');
+  _rdoSet(n.comp, 'stacomp', '');
+  _rdoSet(n.status, 'stastatus', 'never seen — nothing is known here');
+  _rdoClass(n.status, 'stastatus', 'is-bad', false);
+  _rdoSet(n.note, 'stanote', '');
+  return true;
+}
+
+// ── LEVEL 1 — fogged ────────────────────────────────────────────────────
+//
+// Seen once, not seen now. Reads:
+//
+//     Brussels                          city
+//     ● French Republic
+//     Belgium
+//     last seen                   14.2 units
+//     8.0 inf · 6.2 art
+//     41 days ago — may have changed
+//
+// Three markers on one fact, which is not redundancy — it is the number, the
+// label and the age, and each answers a different question. "last seen" says
+// the value is memory; "14.2 units" is the memory; "41 days ago" is the only
+// thing that lets a player decide whether to believe it, and it is the whole
+// skill the fog exists to create (02-visibility-and-sea.md §1: "decide whether
+// last minute's number is still true").
+//
+// WHAT IS NOT HERE, and each absence is the point:
+//
+//   defence / attack power   live. Three of stationPower's four inputs are
+//                            facts about this instant. See the fog gate note.
+//   fortification            live: it scales in with the garrison manning it
+//                            and is stripped by artillery standing there now.
+//   growth per day           live, and it is a rate rather than a quantity —
+//                            a remembered rate is not stale, it is fiction.
+//   the capacity bar         a picture with no room on it for the word "stale".
+//   farm multiplier          reads state.stations[…].growthMul across the board.
+//   the neutral fill clock   steps the sim forward from the LIVE garrison.
+//   the control tier         counts who holds cities the player cannot see.
+function _rdoStationFogged(state, n, sid, b) {
+  _rdoStationChrome(n, 1);
+  var d = STATIONS[sid];
+
+  _rdoSet(n.name, 'staname', d.name);
+  _rdoSet(n.type, 'statype', _rdoTypeBadge(d));
+
+  _rdoSet(n.owner, 'staowner', _rdoPowerName(b.owner));
+  _rdoStyle(n.swatch, 'staswatch', 'background',
+    _rdoPowerColor(b.owner) || 'var(--neutral-node)');
+
+  // Name only. The tier is a live count over stations the player cannot see.
+  _rdoSet(n.terr.k, 'staterr', _rdoTerritoryName(d.territory));
+  _rdoSet(n.terr.v, 'statier', '');
+  _rdoClass(n.terr.v, 'statier', 'is-contested', false);
+  _rdoClass(n.terr.v, 'statier', 'is-partial', false);
+
+  // "14.2 units", never "14.2 / 26". The ratio is half live-looking — the
+  // denominator is real and current, so the pair reads as a measurement rather
+  // than as a recollection, and the capacity is not the question anyway.
+  var u = b.units || { infantry: 0, artillery: 0, armour: 0 };
+  _rdoSet(n.garr.k, 'stagarrk', 'last seen');
+  _rdoSet(n.garr.v, 'stagarr', _rdoNum(totalUnits(u)) + ' units');
+  _rdoSet(n.comp, 'stacomp', _rdoComp(u));
+
+  // The age carries the warning colour, because "may have changed" is the
+  // actionable half of the sentence and the number above it is the bait.
+  _rdoSet(n.status, 'stastatus', _rdoAgo(state.tick - b.tick) + ' — may have changed');
+  _rdoClass(n.status, 'stastatus', 'is-bad', true);
+  _rdoSet(n.note, 'stanote', '');
+  return true;
+}
+
 function _rdoStationUpdate(state, n) {
   var sid = _rdoFocusOn(state);
   // Hiding rather than swapping to an idle body: the empire section above is
   // always on screen, so the rail is never the empty gutter this block used to
   // exist to prevent.
   if (!sid) return false;
+
+  // THE GATE. Everything below this line is the level-2 body, unchanged from
+  // before fog landed — a station you can see reads exactly as it always did.
+  var bel = _rdoBelief(state, sid);
+  if (bel.level === 0) return _rdoStationIdle(state, n, sid);
+  if (bel.level === 1) return _rdoStationFogged(state, n, sid, bel);
+  _rdoStationChrome(n, 2);
+  _rdoSet(n.garr.k, 'stagarrk', 'garrison');
 
   var d = STATIONS[sid];
   var st = state.stations[sid];
@@ -1454,6 +1737,16 @@ function _rdoSupplyBuild(host) {
 function _rdoSupplyUpdate(state, n) {
   var sid = _rdoFocusOn(state);
   if (!sid) return false;
+  // LIVE ONLY. The headline is a countdown — "decays in 34 ticks" — read off
+  // `st.discSince` against the current tick, and there is no such thing as a
+  // remembered countdown: it would be wrong by exactly the age of the memory
+  // and would look right. `state.seen` does record `connected`, but the alarm
+  // this section raises is a clock rather than a flag.
+  //
+  // This costs the player nothing they had: a cut-off pocket is always the
+  // player's OWN city, and a power always sees the ground it holds — so every
+  // station this section has ever fired on is level 2 by construction.
+  if (_rdoBelief(state, sid).level !== 2) return false;
   var st = state.stations[sid];
   // computeConnectivity() writes this every tick; `undefined` on a state that
   // has not ticked yet is not "cut off", it is "not known yet".
@@ -1555,6 +1848,22 @@ function _rdoFightBuild(host) {
 function _rdoFightUpdate(state, n) {
   var sid = _rdoFocusOn(state);
   if (!sid) return false;
+  // LIVE ONLY, AND THIS IS THE LOAD-BEARING LINE OF THE WHOLE STAGE.
+  //
+  // Every number in this section is a claim about NOW. The defending power
+  // folds the live garrison together with fortification scale-in (how many
+  // troops are manning it this instant), the artillery strip (whose guns are
+  // standing there this instant) and the matchup against those same attackers.
+  // The march row prices exits for the units currently in the station. A
+  // remembered version of any of them is known-issues #18 exactly: plausible,
+  // stable, recomputed every frame, and answering a different question from the
+  // one on screen — with the added cruelty that it is the number an assault is
+  // decided by.
+  //
+  // Hidden rather than approximated. "You find out what a city holds when you
+  // march on it" is legible fog behaviour; a fortress rated from a garrison it
+  // lost a campaign season ago is a lie the player cannot detect.
+  if (_rdoBelief(state, sid).level !== 2) return false;
   if (typeof stationPower !== 'function' || typeof fortLevel !== 'function') return false;
 
   var d = STATIONS[sid];
@@ -1822,6 +2131,16 @@ function _rdoOrdersBuild(host) {
 function _rdoOrdersUpdate(state, n) {
   var sid = _rdoFocusOn(state);
   if (!sid) return false;
+  // LIVE ONLY. `supplyTo` is a rival's standing logistics — where a power has
+  // decided to send its surplus, which is the closest thing this game has to
+  // reading somebody's orders. `state.seen` does not record it and must not:
+  // fog covers what is in a city, and an intention is not even that.
+  //
+  // Free, again, for the case that matters: supply lines only run between two
+  // cities ONE power holds (stationSuppliedBy scopes to the target's owner), so
+  // every station this section fires on is ground its viewer either holds or
+  // is looking straight at.
+  if (_rdoBelief(state, sid).level !== 2) return false;
   if (typeof stationSupply !== 'function') return false;
   // Neutral is never an actor and takes no sweeps — the same gate
   // standingOrderNext applies before it will plan anything. Without it a

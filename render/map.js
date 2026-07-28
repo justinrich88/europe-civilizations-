@@ -253,6 +253,15 @@ function controlOf(state, territoryId) {
 //
 // EVERY FIELD liveStations READS lives here, `supplyTo` included. A pseudo-state
 // that is missing one is not a smaller state, it is a state that throws.
+//
+// FOG (5.7 stage 3) DELIBERATELY ADDS NOTHING TO THIS LIST, and that is a
+// property worth stating rather than a coincidence. The mask is gated on
+// `state.human`, which this object does not have and must not gain: no viewer
+// means mask nothing, so liveStations never calls believedStation on it and
+// never reads `state.seen`. The pre-game board is therefore the unmasked board,
+// which is what the empire picker needs — it paints the seven homelands on the
+// real map — and it is why this bootstrap path did not have to be re-derived
+// for fog at all. The check is `mapFogLevels(setupPseudoState(D)) === null`.
 function setupPseudoState(D) {
   const stations = Object.create(null);
   if (D.STATIONS) {
@@ -492,6 +501,213 @@ const MAP_ALERT_MAX = 15;     // and for the largest battle. Capped, and the cap
 function mapAlertReach(power) {
   const p = (isFinite(power) && power > 0) ? power : 0;
   return clamp(Math.round(2 + 4.5 * Math.log10(1 + p)), MAP_ALERT_MIN, MAP_ALERT_MAX);
+}
+
+// ── fog of war — the mask, Milestone 5.7 stage 3 ────────────────────────
+//
+// core/vision.js decides what a power may READ. This file decides what that
+// looks like. Nothing here re-derives a level: `visibleTo` returns 0 or 2 and
+// `believedStation` composes the memory into the 0/1/2 table
+// (02-visibility-and-sea.md §1), and both are called, never reimplemented.
+//
+// FOG ADDS NO LAYER OVER THE BOARD, and that is a hard rule rather than a
+// preference. It is drawn by SUBTRACTING from #g-stations (a hidden station's
+// <g> is display:none) and by MODULATING #g-territories (an unknown country is
+// tinted with nobody's colour). A full-board rect painted over #g-stations
+// would swallow the click that commits an attack, produce no error whatsoever,
+// and simply make the game stop responding — that has happened five times on
+// this project. If a wash is ever genuinely wanted it belongs inside
+// #g-coverage, which is already pointer-events:none AND already below
+// #g-stations, so layer order makes it harmless even if the CSS rule is later
+// deleted.
+//
+// THE PALETTE IS LOCKED (00-vision.md §8: "colour carries ownership only").
+// There is no fog hue and there must never be one, or fog reads as an eighth
+// power. The three free channels are opacity, stroke dash, and absence:
+//
+//   0 hidden   the station <g> is absent from the board. The territory polygon
+//              is still drawn, untinted. "Territory shape only."
+//   1 fogged   the REMEMBERED owner colour at reduced opacity, outline dashed,
+//              garrison number in --ink-faint, and the fullness ring REMOVED —
+//              you remember who held it and roughly what was in it; you do not
+//              know how full it is now, and a ring drawn from a stale number
+//              would be a live answer to a stale question.
+//   2 visible  byte-identical to a board built before fog existed.
+//
+// WHO IS LOOKING: `state.human`, and nothing else. `window.PLAYER` is set from
+// the query string before the empire picker has run, so reading it would fog
+// the picker's board — render/start.js calls renderBoard() while GAME.human is
+// still undefined, deliberately (00-vision.md §8, "the pick happens before
+// GAME.human is set"). No viewer means MASK NOTHING, which is also what the
+// turn-zero pseudo-state and every headless harness get.
+
+// The unknown owner, for the believed board handed to territoryControl(). It is
+// deliberately a string no power id can collide with rather than null or
+// 'neutral': territoryControl counts owners and then walks POWER_IDS, so a
+// sentinel outside that list is counted and then never wins — which is exactly
+// what "somebody holds it and I do not know who" should do to a majority test.
+const MAP_FOG_UNKNOWN = '~fog~';
+
+// Fogged treatment, as three numbers. Not a colour: the remembered ownership
+// hue is kept and only its weight is reduced, so a fogged German city still
+// reads as German. Dashed, because a dash is the one silhouette channel §8
+// leaves free on a station (it means "sea" on a LINK, and a link is not a node).
+const MAP_FOG_DASH = '3.4 2.6';
+const MAP_FOG_STROKE_OP = '0.5';
+const MAP_FOG_FILL_OP = '0.42';
+
+// visibleTo() is 24-38us and pure. It is safe once a frame and quadratic in a
+// 108-station loop, so it is computed ONCE and passed down — the memo below is
+// not an optimisation of vision.js (core/vision.js: "DO NOT ADD A CACHE"), it
+// is this file declining to ask the same question 108 times in one frame.
+//
+// The key is (state identity, tick, ownerEpoch, pid). ownerEpoch alone is the
+// exact and total invalidation signal for visibility — vision.js names it as
+// the sanctioned key — and `tick` is carried as well so this can never outlive
+// a tick even if some future path moves a station without the epoch. A PAUSED
+// board therefore recomputes nothing at all, and a running one recomputes at
+// most once per tick against a 671us tick.
+let _mapFogState = null;
+let _mapFogTick = -1;
+let _mapFogEpoch = -1;
+let _mapFogPid = null;
+let _mapFogVis = null;
+let _mapFogBoard = null;
+
+// Whose eyes the board is drawn through, or null for "nobody — draw it all".
+function mapViewer(state) {
+  return (state && typeof state.human === 'string' && state.human) ? state.human : null;
+}
+
+// { sid: 0|2 } for the viewer, or null when there is no viewer and nothing is
+// masked. Every consumer in render/ goes through here so the whole frame — the
+// board, the waves, the hit test and the coverage overlay — is masked against
+// one answer rather than four that agree today.
+function mapFogLevels(state) {
+  const pid = mapViewer(state);
+  if (!pid || typeof visibleTo !== 'function') return null;
+  const tick = state.tick || 0;
+  const epoch = state.ownerEpoch || 0;
+  if (_mapFogState === state && _mapFogTick === tick &&
+      _mapFogEpoch === epoch && _mapFogPid === pid) return _mapFogVis;
+  _mapFogState = state;
+  _mapFogTick = tick;
+  _mapFogEpoch = epoch;
+  _mapFogPid = pid;
+  _mapFogVis = visibleTo(state, pid);
+  _mapFogBoard = null;                 // derived from it; recompute on demand
+  return _mapFogVis;
+}
+
+// The board AS THE VIEWER BELIEVES IT — a state-shaped object carrying nothing
+// but `owner` per station, for handing to core's territoryControl().
+//
+// This is the proxy-state idiom the AI and render/coverage.js already use, and
+// it exists so the tier arithmetic has exactly ONE implementation
+// (known-issues #9: this file once kept a second territoryControl and silently
+// overwrote the sim's). The believed owner comes out of believedStation, which
+// is the only function allowed to mint a level 1.
+//
+// ⚠ IT MUST NEVER REACH routeFor() / commandRoute(). `_ownRouteCache` in
+// sim/movement.js invalidates on state OBJECT IDENTITY, so a fresh proxy handed
+// to routing blows the real state's route cache too and movementTick recomputes
+// its Dijkstras from scratch every tick — 0.115us becomes 161us, with no wrong
+// answer anywhere, only a game that crawls (02-visibility-and-sea.md §1).
+// Nothing outside liveTerritories() below is given this object.
+function mapBelievedBoard(state, pid, vis) {
+  if (_mapFogBoard) return _mapFogBoard;
+  const stations = Object.create(null);
+  const unknown = Object.create(null);
+  const ids = (typeof STATION_IDS !== 'undefined' && STATION_IDS) ? STATION_IDS : [];
+  for (let i = 0; i < ids.length; i++) {
+    const sid = ids[i];
+    const b = believedStation(state, pid, sid, vis);
+    if (b.level === 0) {
+      stations[sid] = { owner: MAP_FOG_UNKNOWN };
+      unknown[sid] = true;
+    } else {
+      stations[sid] = { owner: b.owner };
+    }
+  }
+  _mapFogBoard = { proxy: { stations: stations }, unknown: unknown };
+  return _mapFogBoard;
+}
+
+// The control tier of one territory on the believed board.
+//
+// The arithmetic is core's, unchanged. The ONE case this adds is the case the
+// arithmetic cannot express: "contested" is a positive claim — nobody is past
+// half — and a country you have only partly seen does not support it. So a
+// contested verdict reached with any unknown station in the country is demoted
+// to the untinted class instead of the hatch. A country you have seen ALL of
+// and which really is split still hatches, which is the whole value of the mark.
+//
+// A strict majority is never demoted, because it cannot be wrong: three of four
+// stations believed German is a majority whatever the fourth turns out to be.
+function mapBelievedControl(bel, tid) {
+  const c = controlOf(bel.proxy, tid);
+  if (c.tier !== 'contested') return c;
+  const ids = (typeof stationsIn === 'function') ? stationsIn(tid) : [];
+  for (let i = 0; i < ids.length; i++) {
+    if (bel.unknown[ids[i]]) return { owner: null, tier: 'contested', cls: 'neutral' };
+  }
+  return c;
+}
+
+// Hidden: the whole station group leaves the board.
+//
+// `display` is written as an INLINE STYLE, never as an attribute. A stylesheet
+// rule silently outranks an SVG presentation attribute with no error anywhere
+// (known-issues #15, which has recurred twice on this project and once inside
+// this very system), and this is a per-frame computed visual property.
+//
+// A hidden node also drops any supply routes drawn out of it. Those live in
+// #g-links, not inside the station <g>, so display:none on the group does not
+// take them with it — and a line drawn out of a city that is no longer on the
+// board is the loudest leak fog could possibly ship. In practice a station the
+// human owns is always level 2, so this only fires on the frame after a capture
+// costs the player its sight; it is here because "in practice" is not a check.
+function mapFogHide(rec, hide) {
+  if (hide !== rec.hidden) {
+    rec.hidden = hide;
+    rec.g.style.display = hide ? 'none' : '';
+    LIVE.writes++;
+    if (hide) {
+      let had = false;
+      for (const to in rec.ordRoute) { mapOrderDrop(rec, to); had = true; }
+      if (had) { rec.ordKey = ''; rec.ordEpoch = -1; mapOrderIndex(); }
+    }
+  }
+  return hide;
+}
+
+// Fogged: remembered, not live. Opacity, dash and absence — no new colour.
+//
+// The fullness ring goes away entirely, track included. It is a PROPORTION of
+// the current garrison against capacity, and the current garrison is precisely
+// the thing you do not know; drawing it from memory would answer "how full is
+// it now" with a number from four minutes ago, which is known-issues #18 in
+// render form. The number itself stays, because a stale number marked stale is
+// the whole point of level 1 — "decide whether last minute's number is still
+// true" (02-visibility-and-sea.md §1).
+//
+// Every write here is a style. Same reason as mapFogHide above; `opacity`,
+// `display` and `stroke-dasharray` written as attributes would be outranked by
+// any class rule that ever lands on `.station-shape`.
+function mapFogStale(rec, on) {
+  if (on === rec.fogged) return;
+  rec.fogged = on;
+  const sh = rec.shape.style;
+  sh.strokeDasharray = on ? MAP_FOG_DASH : '';
+  sh.strokeOpacity = on ? MAP_FOG_STROKE_OP : '';
+  sh.fillOpacity = on ? MAP_FOG_FILL_OP : '';
+  // The number is the interface, so its treatment is the loudest half of this:
+  // --ink-faint against --garrison is the difference between "this is what is
+  // there" and "this is what was there".
+  rec.num.style.fill = on ? 'var(--ink-faint)' : '';
+  if (rec.fillArc) rec.fillArc.style.display = on ? 'none' : '';
+  if (rec.fillTrack) rec.fillTrack.style.display = on ? 'none' : '';
+  LIVE.writes += 5;
 }
 
 // ── supply routes ───────────────────────────────────────────────────────
@@ -1273,7 +1489,12 @@ function drawStations(D, layer, state) {
     // Fullness ring: faint track (the denominator) + swept arc (the value).
     // Both are built once; only the arc's dasharray is ever written again.
     const ringR = outer + RING_GAP;
-    g.appendChild(el('circle', 'station-fill-track', { r: ringR }));
+    // Kept, not appended-and-forgotten: fog removes the whole ring, and the
+    // track is the denominator half of it. Hiding the arc alone would leave a
+    // full faint circle on a fogged node saying "out of this much", which is a
+    // denominator for a numerator that is no longer on screen.
+    const fillTrack = el('circle', 'station-fill-track', { r: ringR });
+    g.appendChild(fillTrack);
     const fillArc = el('circle', 'station-fill', {
       r: ringR, pathLength: 100, 'stroke-dasharray': '0 100',
       transform: 'rotate(-90)',      // start the sweep at 12 o'clock
@@ -1308,11 +1529,14 @@ function drawStations(D, layer, state) {
     // frame for 108 stations is the other way to do this and it is slower and
     // fragile — select.js inserts its own children into these same <g>s.
     LIVE.stat[sid] = {
-      g: g, shape: shape, num: num, fillArc: fillArc,
+      g: g, shape: shape, num: num, fillArc: fillArc, fillTrack: fillTrack,
       pos: [st.pos[0], st.pos[1]],
       capacity: Number(st.capacity) || 0,
       owner: undefined, garrison: undefined, cut: undefined, fight: undefined,
       fillBucket: undefined,
+      // Fog, as last WRITTEN. Both start false, which is what an unmasked board
+      // is, so a game with no viewer never touches either.
+      hidden: false, fogged: false,
       // Supply routes: DOM on this station's first supply line and not before.
       // `ordKey` is the joined destination list as last DRAWN — the empty
       // string on an untouched board, which is what every station's empty
@@ -1639,15 +1863,44 @@ function mapBattleEnd(rec) {
 
 function liveStations(D, state) {
   if (!state || !state.stations) return;
+  // ONE visibility solve for the whole board, not one per station. Null when
+  // there is no viewer — the empire picker, the turn-zero pseudo-state, a
+  // harness — in which case nothing below masks anything and this function is
+  // the function it was before fog existed.
+  const vis = mapFogLevels(state);
+  const me = mapViewer(state);
+  const believes = !!(vis && typeof believedStation === 'function');
+
   for (const sid in LIVE.stat) {
     const rec = LIVE.stat[sid];
     const st = state.stations[sid];
     if (!st) continue;
 
-    // Ownership colour — from live state, never from SETUP. The saturated
-    // colour lives in the outline and the fill stays dark so the number keeps
-    // its contrast (§8).
-    const owner = st.owner && st.owner !== 'neutral' ? st.owner : null;
+    // ── the fog gate ────────────────────────────────────────────────────
+    //
+    // believedStation() composes live sight and memory into the 0/1/2 table and
+    // is the ONLY function that mints a 1. Every value painted below comes out
+    // of it rather than off `st`, so there is no path by which a fogged node can
+    // show a live number: the live record is simply not read.
+    let level = 2;
+    let bOwner = st.owner;
+    let bUnits = st.units;
+    let bConn = st.connected !== false;
+    if (believes) {
+      const b = believedStation(state, me, sid, vis);
+      level = b.level;
+      bOwner = b.owner;
+      bUnits = b.units;
+      bConn = b.connected;
+    }
+    // Hidden: off the board, and nothing else about it is drawn or computed.
+    if (mapFogHide(rec, level === 0)) continue;
+    mapFogStale(rec, level === 1);
+
+    // Ownership colour — from the BELIEVED board, never from SETUP and never
+    // from `st` directly. The saturated colour lives in the outline and the
+    // fill stays dark so the number keeps its contrast (§8).
+    const owner = bOwner && bOwner !== 'neutral' ? bOwner : null;
     if (owner !== rec.owner) {
       rec.owner = owner;
       const color = powerColor(D, owner);
@@ -1664,8 +1917,10 @@ function liveStations(D, state) {
     // The number is the interface. Units are floats internally (100ms attrition
     // rounds to zero on integers) — floored here and nowhere else, which is
     // also why this only writes on the frames where the integer actually moved.
-    const u = st.units;
-    const total = (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
+    // At level 1 this is the garrison AS OF `b.tick`, and mapFogStale has
+    // already said so in ink; regaining sight rewrites it on the same frame,
+    // because the value compared here came from believedStation either way.
+    const total = mapUnitTotal(bUnits);
     const n = Math.floor(total);
     if (n !== rec.garrison) {
       rec.garrison = n;
@@ -1675,7 +1930,14 @@ function liveStations(D, state) {
     // Fullness arc. Bucketed so a garrison drifting up by 0.03 units a tick
     // does not produce a DOM write every frame — the ring only moves when it
     // would move by a visible amount.
-    if (rec.fillArc && rec.capacity > 0) {
+    //
+    // LEVEL 2 ONLY. The ring is "how full is this station RIGHT NOW", and at
+    // level 1 the ring is not on screen at all (mapFogStale removes it), so
+    // computing a bucket from a remembered number would be arithmetic nobody
+    // can see, cached into rec.fillBucket, and then wrong the moment sight
+    // returns. The last written bucket is left exactly as it is and the frame
+    // that regains sight corrects it.
+    if (level === 2 && rec.fillArc && rec.capacity > 0) {
       const bucket = Math.round(mapRingFraction(total, rec.capacity) * RING_BUCKETS);
       if (bucket !== rec.fillBucket) {
         rec.fillBucket = bucket;
@@ -1711,7 +1973,17 @@ function liveStations(D, state) {
     // Both are STATE, so a paused board recomputes neither: two integer/string
     // compares per station per frame, which is the whole cost of this feature
     // until somebody draws a line.
-    const supply = (typeof stationSupply === 'function')
+    //
+    // THE HUMAN'S OWN CITIES ONLY, under fog. A supply route is logistics: it
+    // names a destination, a path and a flow rate, and drawing an enemy's would
+    // hand the player a live read of where a rival is massing and by which
+    // corridor — from a city they may only be looking at from memory. The
+    // filter is `[]` rather than a skip on purpose: an empty list is exactly
+    // what the reconciler below already means by "this city supplies nowhere",
+    // so a city that changes hands tears its lines down through the same path
+    // it always did, with no second rule about when a route dies.
+    const mine = !me || st.owner === me;
+    const supply = !mine ? [] : (typeof stationSupply === 'function')
       ? stationSupply(state, sid)
       : (st.supplyTo || []);
     const key = supply.join(',');
@@ -1745,15 +2017,25 @@ function liveStations(D, state) {
       mapOrderFlow(rec, mapOrderPlan(state, st.owner)[sid]);
     }
 
-    // Cut off from its capital: not growing, actively decaying (§5).
-    const cut = st.connected === false;
+    // Cut off from its capital: not growing, actively decaying (§5). Believed,
+    // like everything else — at level 1 this is whether it was cut when you last
+    // looked, which is a fact about the past and is drawn as one by the same
+    // dashed, dimmed treatment the rest of the node carries.
+    const cut = bConn === false;
     if (cut !== rec.cut) {
       rec.cut = cut;
       rec.g.classList.toggle('is-cut', cut);
       LIVE.writes++;
     }
 
-    const fight = stationContested(state, sid);
+    // A BATTLE YOU CANNOT SEE IS INVISIBLE. Gated on level 2 at the station,
+    // not on the fight itself: the momentum ring, the attacker's count and the
+    // combat alert are all live reads of `state.stations[sid].attackers` and
+    // `stationPower()`, so any of them on a fogged node would be a live answer
+    // beside a remembered one. Nothing is remembered about a fight either —
+    // state.seen records owner, units, connected and a tick, and a battle is
+    // none of those.
+    const fight = level === 2 && stationContested(state, sid);
     if (fight !== rec.fight) {
       rec.fight = fight;
       rec.g.classList.toggle('is-fighting', fight);
@@ -1776,11 +2058,35 @@ function liveStations(D, state) {
   }
 }
 
+// The country tint was the LOUDEST LEAK on the board and it is worth naming why.
+//
+// A territory is tinted by its controller, and that tier is derived from who
+// owns the stations in it — every one of them, seen or not. So on a board where
+// every node was correctly hidden, the tint still announced that Serbia had
+// fallen to Austria, that Russia had taken the Baltic, that the Ottomans held
+// all of Anatolia: the shape of the whole war, from cities the player had never
+// laid eyes on. Hiding the nodes and leaving the tint would have been fog that
+// hid the detail and published the summary.
+//
+// It is masked by recomputing the tier against the BELIEVED board and by
+// nothing else. The polygon is always drawn — "Hidden: territory shape only"
+// (02-visibility-and-sea.md §1) — it simply carries nobody's colour until the
+// player has seen enough of the country to say whose it is.
+//
+// The standings are NOT fogged, and that is a separate, deliberate hole:
+// 02-visibility-and-sea.md's sequencing section decides that "who is winning is
+// public knowledge", so the HUD's territory count and render/victory.js keep
+// reading the true board. Fog covers what is in a city, not who holds the map —
+// and those two files belong to other hands in any case.
 function liveTerritories(D, state) {
   if (!state || !state.stations) return;
+  const vis = mapFogLevels(state);
+  const me = mapViewer(state);
+  const bel = (vis && typeof believedStation === 'function')
+    ? mapBelievedBoard(state, me, vis) : null;
   for (const tid in LIVE.terr) {
     const rec = LIVE.terr[tid];
-    const ctrl = controlOf(state, tid);
+    const ctrl = bel ? mapBelievedControl(bel, tid) : controlOf(state, tid);
     const color = powerColor(D, ctrl.owner);
 
     // Class carries the tier; the fill carries the owner. A majority is the
@@ -1936,6 +2242,17 @@ window.linkGeomTrim = linkGeomTrim;
 window.linkRouteGeoms = linkRouteGeoms;
 window.linkRouteD = linkRouteD;
 window.linkRoutePoints = linkRoutePoints;
+
+// The fog seam, for the three other files that mask something: render/waves.js
+// (an enemy stack on a hop it cannot see), render/select.js (a hidden station
+// must not be pickable by the nearest-centre override, which never consults the
+// DOM) and render/coverage.js (no focus on a remembered farm). They call this
+// rather than visibleTo() directly, so the whole frame is masked against ONE
+// solve — and so "is fog on?" has a single answer (`null` means no viewer,
+// mask nothing) instead of four files each deciding what an absent
+// state.human means.
+window.mapFogLevels = mapFogLevels;
+window.mapViewer = mapViewer;
 
 // Counter-scale the symbols the moment the camera moves, not on the next frame.
 // A wheel zoom with the game paused produces no frames at all, and the stations

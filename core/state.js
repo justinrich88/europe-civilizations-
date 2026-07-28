@@ -472,7 +472,38 @@ function snapshot(state) {
   return JSON.parse(JSON.stringify(state));
 }
 
-function logEvent(state, kind, text) {
-  state.log.push({ tick: state.tick, kind: kind, text: text });
+// The event log. `sid` is OPTIONAL and ADDITIVE: an entry that names a station
+// carries its id, an entry that does not simply omits the key.
+//
+// WHY THE ID IS HERE AND THE FILTERING IS NOT.
+//
+// The ticker (render/hud.js) may not print "ger took Brussels from neutral"
+// for a city the player has no eyes on — that single line leaked the whole
+// board every time anything changed hands. But the FILTER cannot live here:
+//
+//   * the log is SIM STATE. Two states that differ in what a power has seen
+//     are no longer comparable, and every determinism guarantee in the project
+//     rests on that comparison (02-visibility-and-sea.md §1). A log written
+//     through a visibility gate would be a different log per observer.
+//   * `render/victory.js` wants the truth. The game is over; a fogged
+//     post-mortem is user-hostile.
+//   * `test/fog-tests.js` asserts as a tested fact that nothing under sim/ so
+//     much as NAMES visibility. Passing an id is not consulting one.
+//
+// So the sim states WHICH station an event is about, and each renderer decides
+// on its own whether it may say so. A renderer that does not care ignores the
+// field, and a call site that has no meaningful station omits the argument —
+// which is why every pre-existing three-argument call still works unmodified.
+//
+// This cannot move a seeded replay: it draws nothing from state.rng, reads no
+// clock, and pushes one more key onto an array nothing in sim/ reads back.
+// Verified rather than asserted — `node tools/balance.js 48 --seed 100`
+// reproduces the same 48 games, winner for winner and tick for tick.
+function logEvent(state, kind, text, sid) {
+  var e = { tick: state.tick, kind: kind, text: text };
+  // Added CONDITIONALLY, so an entry with no station keeps the exact shape it
+  // has always had — including through snapshot()'s JSON round trip.
+  if (typeof sid === 'string' && sid) e.sid = sid;
+  state.log.push(e);
   if (state.log.length > 400) state.log.shift();
 }

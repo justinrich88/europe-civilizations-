@@ -276,7 +276,115 @@ function _aiActSpreadWindow(oddsFloor) {
 // (known-issues.md #9, second rule).
 // ---------------------------------------------------------------------------
 
-function _aiActStackPower(state, sid, pid, stack) {
+// ---------------------------------------------------------------------------
+// THE BELIEVED BOARD (milestone 5.7 stage 4)
+//
+// Every number below that describes SOMEBODY ELSE'S station — the garrison, the
+// owner, the connectivity — is read through believedStation() rather than off
+// state.stations. Reads about this power's OWN ground stay on the true board,
+// which is not a leak: visibleTo returns 2 for every station its subject holds,
+// so there is nothing to hide from yourself.
+//
+// The seam is the proxy state this file already built twice for the attacker
+// side. It generalises for free, because sim/combat.js's stationPower reads
+// nothing but state.stations[sid] — so a one-station proxy carrying believed
+// numbers reuses the canonical formula (fort strip, terrain, matchup) instead
+// of a unit-ratio multiply. That distinction is not cosmetic: _fortBonus
+// SATURATES, so scaling a power figure by a unit ratio over-counts a full fort.
+// _aiActGrownDefenderPower already re-ran the canonical formula for exactly
+// that reason; this follows its precedent.
+//
+// #########################################################################
+// #  NEVER HAND A PROXY OR A BELIEVED STATE TO routeFor() / commandRoute() #
+// #########################################################################
+//
+// `_ownRouteCache` in sim/movement.js invalidates on state OBJECT IDENTITY (or
+// state.ownerEpoch). A fresh proxy per call therefore blows the REAL state's
+// route cache as well, and movementTick/ordersTick then recompute their O(n^2)
+// Dijkstras from scratch every tick, for every wave, forever. Measured on the
+// live board:
+//
+//   routeFor, cached                        0.115 us
+//   routeFor, fresh proxy state each call   161.1 us      <- 1,400x
+//
+// It produces NO WRONG ANSWER, only a game that crawls, which is the hardest
+// kind of regression to attribute. Both commandRoute() call sites in this file
+// (in _aiActPlanVolley and _aiActPlanStage) are commented at the call and both
+// pass the real `state`. test/fog-tests.js asserts this against the source
+// text AND against a tick-count ceiling, because a comment is not a check.
+//
+// Routing legality staying on the true board is also a DESIGN DECISION, not an
+// oversight: the AI and the player's preview may both route through ground they
+// have never seen. A route is a claim about where your own army may walk, and
+// "you find out the road is blocked when you march" is legible fog behaviour.
+// 02-visibility-and-sea.md records it as the one deliberate hole on the map.
+// ---------------------------------------------------------------------------
+
+// What `pid` believes is at `sid`, memoised for the life of one ctx.
+//
+// DUPLICATED from `_aiScoreBelief` in ai/score.js, deliberately: privates are
+// prefixed by FILE and never shared across the two halves (known-issues #12 —
+// a shared `_ai` prefix made three helpers collide and the scorer silently ran
+// against ai.js's copies). ai/ai.js must also load with ai/score.js absent.
+// The canonical implementation both adapt is believedStation() in core/vision.js.
+//
+// The fallback when core/vision.js is missing is the TRUE station, so a build
+// with core/ stripped plays the unfogged game rather than throwing.
+function _aiActBelief(state, pid, sid, ctx) {
+  var memo = ctx ? ctx._belief : null;
+  if (memo && memo[sid]) return memo[sid];
+
+  var b;
+  if (typeof believedStation === 'function') {
+    b = believedStation(state, pid, sid, ctx ? ctx.vis : null);
+  } else {
+    var st = state.stations ? state.stations[sid] : null;
+    b = st
+      ? { owner: st.owner, units: st.units, connected: st.connected !== false,
+          tick: state.tick, level: 2 }
+      : { owner: null, units: null, connected: null, tick: -1, level: 0 };
+  }
+  if (memo) memo[sid] = b;
+  return b;
+}
+
+// The garrison to PLAN AGAINST. Levels 1 and 2 hand back what was seen; level 0
+// has never been observed and believedStation reports null, which is right for
+// a renderer and useless for a decision. The prior is A FULL GARRISON, because
+// station capacity is public authored data — the map is known in 1914, only
+// what stands on it is not — and because it fails SAFE: an empty-garrison prior
+// would read unseen ground as a walk-in and send the AI charging at odds it
+// invented. aiCandidates refuses level-0 targets outright, so this is defence
+// in depth rather than a live path.
+function _aiActBelievedUnits(sid, bel) {
+  if (bel && bel.units) return bel.units;
+  var data = (typeof STATIONS !== 'undefined') ? STATIONS[sid] : null;
+  var u = emptyUnits();
+  if (data && data.capacity > 0) u.infantry = data.capacity;
+  return u;
+}
+
+// A one-station proxy state carrying the believed garrison. `attackers` is
+// believed too: live at level 2, empty at level 1, because memory records a
+// garrison and never records who was besieging it — and stationPower folds the
+// attackers' MIX into the defender's matchup. `override` replaces the units
+// (used by the two callers that ask "what if this stack were here instead").
+//
+// READ THE BANNER ABOVE BEFORE PASSING THIS ANYWHERE NEW.
+function _aiActBelievedAt(state, pid, sid, ctx, override) {
+  var bel = _aiActBelief(state, pid, sid, ctx);
+  var real = state.stations ? state.stations[sid] : null;
+  var proxy = { stations: {} };
+  proxy.stations[sid] = {
+    owner: bel.owner,
+    units: override || _aiActBelievedUnits(sid, bel),
+    attackers: (bel.level === 2 && real && real.attackers) ? real.attackers : {},
+    connected: bel.connected !== false,
+  };
+  return proxy;
+}
+
+function _aiActStackPower(state, sid, pid, stack, ctx) {
   if (typeof stationPower !== 'function') {
     // sim/combat.js absent: a crude attack-value sum keeps ai/ai.js loadable
     // on its own. Deliberately not tuned — it is a smoke-test path.
@@ -284,19 +392,26 @@ function _aiActStackPower(state, sid, pid, stack) {
     for (var i = 0; i < order.length; i++) p += stack[order[i]] * BAL.UNITS[order[i]].atk;
     return p;
   }
-  var real = state.stations[sid];
-  var proxy = { stations: {} };
+  // The matchup is computed against the BELIEVED defending mix, not the real
+  // one. Overwriting `attackers` with just this stack is the original
+  // behaviour and is kept: the question is "what would MY volley be worth
+  // here", not "what is the current battle worth".
+  var proxy = _aiActBelievedAt(state, pid, sid, ctx);
   var atk = {};
   atk[pid] = stack;
-  proxy.stations[sid] = { owner: real.owner, units: real.units, attackers: atk };
+  proxy.stations[sid].attackers = atk;
   return stationPower(proxy, sid, pid);
 }
 
-function _aiActDefenderPower(state, sid) {
+// THE ODDS GATE. This one number decides every attack in the game, and before
+// stage 4 it was read straight off the true board — the single largest leak in
+// the AI, and the one that made fog cosmetic on the player's side only.
+function _aiActDefenderPower(state, pid, sid, ctx) {
   if (typeof stationPower !== 'function') {
-    return totalUnits(state.stations[sid].units) * BAL.UNITS.infantry.def;
+    return totalUnits(_aiActBelievedUnits(sid, _aiActBelief(state, pid, sid, ctx)))
+      * BAL.UNITS.infantry.def;
   }
-  return stationPower(state, sid, 'defender');
+  return stationPower(_aiActBelievedAt(state, pid, sid, ctx), sid, 'defender');
 }
 
 // The defender power `sid` will have once its garrison has finished growing —
@@ -316,24 +431,31 @@ function _aiActDefenderPower(state, sid) {
 // Two stations project to themselves: one that is cut off (it is decaying,
 // not growing — sim/growth.js DISCONNECT_GROWTH = 0) and one already at or
 // past the ceiling (growth there is zero by construction).
-function _aiActGrownDefenderPower(state, sid, def) {
+//
+// FOGGED, and CONNECTIVITY IS THE POINT. This function used to read
+// `real.connected` — whether an enemy station is joined to its own capital's
+// network — which is not visible from outside that network by any means the
+// game models, and was the least ambiguous leak in the file. It now reads the
+// BELIEVED connectivity, so a power that watched a city get cut off goes on
+// believing it is cut off until it looks again, and a city it has never seen
+// is assumed connected (and therefore assumed to be growing), which is the
+// pessimistic reading and the right one for sizing a march.
+function _aiActGrownDefenderPower(state, pid, sid, def, ctx) {
   var d = (typeof STATIONS !== 'undefined') ? STATIONS[sid] : null;
   var real = state.stations ? state.stations[sid] : null;
   var ceil = BAL.GROWTH_OVERFLOW_CEIL;
   if (!d || !real || !(d.capacity > 0) || !(ceil > 1)) return def;
-  if (real.connected === false) return def;
-  var now = totalUnits(real.units);
+
+  var bel = _aiActBelief(state, pid, sid, ctx);
+  if (bel.connected === false) return def;
+  var units = _aiActBelievedUnits(sid, bel);
+  var now = totalUnits(units);
   var full = d.capacity * ceil;
   if (!(now > BAL.ANNIHILATION_EPSILON) || now >= full) return def;
 
   var ratio = full / now;
   if (typeof stationPower !== 'function') return def * ratio;
-  var proxy = { stations: {} };
-  proxy.stations[sid] = {
-    owner: real.owner,
-    units: splitUnits(real.units, ratio),
-    attackers: real.attackers,
-  };
+  var proxy = _aiActBelievedAt(state, pid, sid, ctx, splitUnits(units, ratio));
   var grown = stationPower(proxy, sid, 'defender');
   return grown > def ? grown : def;
 }
@@ -468,9 +590,14 @@ function _aiActSumStack(state, sids, fraction) {
 // ---------------------------------------------------------------------------
 // Plan one volley against one target. Pure — reads state, mutates nothing.
 // Returns { sources, fraction, stack, power, odds } or { reason }.
+//
+// `ctx` is the decision context from aiContext(); it carries ctx.vis, which is
+// what makes every read of the TARGET a believed read rather than a true one.
+// It is optional so a caller with no scorer loaded still gets a plan (against
+// the true board, which is the correct degradation: no scorer, no fog).
 // ---------------------------------------------------------------------------
 
-function _aiActPlanVolley(state, pid, target, oddsFloor) {
+function _aiActPlanVolley(state, pid, target, oddsFloor, ctx) {
   var near = _aiActSourcesNear(state, pid, target);
   if (!near.length) return { reason: 'no-sources' };
 
@@ -510,6 +637,14 @@ function _aiActPlanVolley(state, pid, target, oddsFloor) {
   // route applyCommand will validate against. Estimating on the geographic path
   // would mean planning a volley down a road the sender is not allowed to use,
   // and every such order comes straight back as 'no-route'.
+  //
+  // THE THIRD ARGUMENT IS THE REAL `state`, AND MUST STAY THE REAL `state`.
+  // Not a believed board, not a proxy. sim/movement.js's _ownRouteCache keys on
+  // state object identity, so a proxy here drops the real state's routes too
+  // and every Dijkstra in the game is recomputed per tick — 0.115us becomes
+  // 161.1us, 1,400x, with no wrong answer to point at. See the banner above
+  // _aiActBelievedAt, and 02-visibility-and-sea.md, which records routing on
+  // the true board as a deliberate and accepted hole in the fog.
   var elig = [];
   for (i = 0; i < considered.length; i++) {
     var route = commandRoute(considered[i].sid, target, state, pid);
@@ -565,7 +700,7 @@ function _aiActPlanVolley(state, pid, target, oddsFloor) {
     }
     if (!kept.length) continue;
     var stack = _aiActSumStack(state, kept, frac);
-    var power = _aiActStackPower(state, target, pid, stack);
+    var power = _aiActStackPower(state, target, pid, stack, ctx);
     if (!best || power > best.power) {
       kept.sort();
       best = { sources: kept, fraction: frac, stack: stack, power: power };
@@ -573,7 +708,11 @@ function _aiActPlanVolley(state, pid, target, oddsFloor) {
   }
   if (!best) return { reason: 'too-few-units' };
 
-  var def = _aiActDefenderPower(state, target);
+  // BELIEVED defence. `best.odds` is therefore the odds this power THINKS it
+  // has, which is what it decides on and what the decision log prints — and on
+  // a fogged target it is not the odds it will actually meet. That divergence
+  // is the feature, not a rounding error: it is how an ambush happens.
+  var def = _aiActDefenderPower(state, pid, target, ctx);
   best.odds = (def > BAL.ANNIHILATION_EPSILON) ? best.power / def
             : (best.power > 0 ? Infinity : 0);
 
@@ -671,7 +810,7 @@ function _aiActStageFeeders(state, pid, depot, exclude, maxHops) {
 // walks forward — and it is why staging cannot become a way of attacking at
 // bad odds: it stops the moment the odds clear, because the attack branch in
 // aiDecide is tried first on every candidate, every decision.
-function _aiActPlanStage(state, pid, target, plan, minOdds) {
+function _aiActPlanStage(state, pid, target, plan, minOdds, ctx) {
   if (!plan || !plan.window || !plan.window.length) return { reason: 'no-sources' };
 
   var depot = _aiActStageDepot(plan);
@@ -706,7 +845,12 @@ function _aiActPlanStage(state, pid, target, plan, minOdds) {
   // deliberately left reading the present — an attack launched now meets a
   // defender only one volley-ETA older, and projecting there would make the
   // AI refuse fights it can win.
-  var deficit = minOdds * _aiActGrownDefenderPower(state, target, plan.def) - plan.power;
+  //
+  // Projected from the BELIEVED garrison, not the true one. A march sized
+  // against a defender this power cannot see would be sized against
+  // intelligence it does not have; sizing against what it last saw, grown
+  // forward, is what a staff actually does.
+  var deficit = minOdds * _aiActGrownDefenderPower(state, pid, target, plan.def, ctx) - plan.power;
   if (!(deficit > 0)) return { reason: 'stage-massed' };
 
   var frac = (plan.fraction > 0) ? plan.fraction : BAL.AI.COMMIT_FRACTION;
@@ -729,6 +873,10 @@ function _aiActPlanStage(state, pid, target, plan, minOdds) {
     if (allowed <= 0) continue;
     var units = totalUnits(state.stations[sid].units);
     if (units * allowed < BAL.MIN_SEND_UNITS) continue;
+    // REAL `state`, for the same reason as in _aiActPlanVolley: a proxy here
+    // costs 1,400x on every route in the game and reports nothing wrong.
+    // Feeders and depot are both this power's own ground anyway, so there is
+    // no fog to apply — an interior march is planned on facts it owns.
     var route = commandRoute(sid, depot, state, pid);
     if (!route || route.length < 2) continue;
     afford.push({ sid: sid, allowed: allowed, units: units, hops: feeders[i].hops });
@@ -858,7 +1006,7 @@ function aiDecide(state, pid) {
     return _aiActDecision(state, pid, { reason: 'no-candidates', minOdds: minOdds });
   }
 
-  var d = _aiActWalk(state, pid, cands, minOdds, true);
+  var d = _aiActWalk(state, pid, cands, minOdds, true, ctx);
 
   // THE PEACE OF THE PARTITION. `not-at-war` as the DEEPEST reason means no
   // candidate got past the war gate at all: there is no neutral ground in
@@ -881,7 +1029,7 @@ function aiDecide(state, pid) {
   // or an existing war in reach still prefers those, and the Concert still
   // holds everywhere the board is not already partitioned.
   if (d.reason === 'not-at-war') {
-    var forced = _aiActWalk(state, pid, cands, minOdds, false);
+    var forced = _aiActWalk(state, pid, cands, minOdds, false, ctx);
     if (forced.kind === 'attack') {
       forced.reason = 'peace-exhausted';       // the peace was broken, and says so
       return forced;
@@ -902,7 +1050,7 @@ function aiDecide(state, pid) {
 // The candidate walk. `warGate` false means "the peace has run out" — see the
 // block above aiDecide's call. Split out of aiDecide only so it can be run
 // twice; nothing else calls it and nothing else should.
-function _aiActWalk(state, pid, cands, minOdds, warGate) {
+function _aiActWalk(state, pid, cands, minOdds, warGate, ctx) {
   var logRejected = !!BAL.AI.LOG_REJECTED;
   var inflight = _aiActInflightTargets(state, pid);
   var rejected = [];
@@ -923,22 +1071,33 @@ function _aiActWalk(state, pid, cands, minOdds, warGate) {
     if (!sid || !state.stations[sid]) continue;
     var score = (c && typeof c.score === 'number') ? c.score : 0;
     var terms = (c && c.terms && typeof c.terms === 'object') ? c.terms : {};
+    // TWO OWNERS, and the difference matters. `owner` is the true one and is
+    // used only to answer "is this mine?", which is never fogged — a power
+    // always knows what it holds. `seen` is the BELIEVED owner and is what the
+    // war gate consults, so a power that declares on France attacks the city it
+    // last saw France holding, whoever is actually standing in it now.
     var owner = state.stations[sid].owner;
+    var seen = _aiActBelief(state, pid, sid, ctx).owner;
     var why = null;
 
     if (owner === pid) {
       why = 'already-held';
-    } else if (warGate && owner !== 'neutral' &&
-               typeof atWar === 'function' && !atWar(state, pid, owner)) {
+    } else if (warGate && seen !== null && seen !== 'neutral' &&
+               typeof atWar === 'function' && !atWar(state, pid, seen)) {
       // Powers are at war or they are not, and nobody negotiates (§6).
       // Neutral is never gated: taking neutral ground is the whole opening.
+      // Neither is ground whose owner is unknown (`seen === null`): there is
+      // nobody to be at peace WITH. aiCandidates refuses level-0 targets, so
+      // that arm is unreachable today; it is written out rather than left to
+      // fall through to a true-board read, which would be a leak.
       why = 'not-at-war';
     } else if (_aiActAlreadyCommitted(state, pid, sid, inflight)) {
+      // Our OWN stack, on the true board: you always know where your army is.
       why = 'already-committed';
     }
 
     if (!why) {
-      var plan = _aiActPlanVolley(state, pid, sid, minOdds);
+      var plan = _aiActPlanVolley(state, pid, sid, minOdds, ctx);
       if (plan.reason) {
         why = plan.reason;
       } else if (!(plan.odds >= minOdds)) {
@@ -973,7 +1132,7 @@ function _aiActWalk(state, pid, cands, minOdds, warGate) {
   // interior is at capacity has nothing to gain by waiting, because logistic
   // growth has already stopped paying it (§2).
   if (wantPlan) {
-    var stage = _aiActPlanStage(state, pid, wantSid, wantPlan, minOdds);
+    var stage = _aiActPlanStage(state, pid, wantSid, wantPlan, minOdds, ctx);
     if (stage.reason) {
       deepReason = stage.reason;
     } else {

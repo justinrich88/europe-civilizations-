@@ -262,6 +262,11 @@ function relationsTick(state) {
       // latch rather than recomputed from a single threshold, because a bare
       // comparison makes powers oscillate in and out of war every few seconds
       // and turns the event ticker into noise.
+      // Both logEvent calls below omit the optional station id: a declaration
+      // of war is about two POWERS and names no city, so there is nothing for
+      // render/hud.js's fog filter to test. An untagged entry is public, which
+      // is right — diplomacy is newspapers and embassies, not reconnaissance
+      // (02-visibility-and-sea.md, "the standings stay public").
       if (!pa.wars) pa.wars = {};
       if (pa.wars[b]) {
         if (rel > BAL.AI.PEACE_THRESHOLD) {

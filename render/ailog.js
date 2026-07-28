@@ -31,8 +31,14 @@
 //
 // Read-only. Nothing in render/ may mutate state.
 //
-// Toggle: the `L` key (log). Unclaimed — app/main.js owns Space and 1/2/4,
-// render/select.js owns Escape and Cmd+A.
+// Toggle: the `L` key (log), behind `?ailog=1`. Unclaimed — app/main.js owns
+// Space and 1/2/4, render/select.js owns Escape and Cmd+A.
+//
+// 4. **This panel is not fog-filtered and must not be.** It is the debugging
+//    instrument that made fog affordable (02-visibility-and-sea.md §1: fog
+//    without the decision log "would still be a bad trade"), so it prints the
+//    true board for all seven powers. It is kept away from the player by being
+//    off by default rather than by being censored — see ailogEnabled().
 //
 // Every top-level name here is prefixed `ailog`/`AILOG` except the two pinned
 // entry points, because in a globals-only project a function name is a global
@@ -437,10 +443,43 @@ function toggleAiLog(force) {
   return open;
 }
 
+// ── ?ailog=1 — the panel is a DEBUG INSTRUMENT, not a game surface ───────
+//
+// **This panel is deliberately NOT fog-filtered, and it must never become
+// fog-filtered.** Every other reader in render/ now goes through
+// believedStation(); this one prints what each AI actually saw, scored and
+// decided, on the true board, for all seven powers.
+//
+// That is not an oversight in the fog work — it is the reason the fog work was
+// affordable at all. 00-vision.md §5 parked fog for v1 precisely because it
+// makes AI behaviour much harder to debug, and 02-visibility-and-sea.md §1
+// reverses that on one condition: *"when a power behaves strangely under fog
+// you can read what it believed and what it scored, instead of inferring from
+// the board. Fog without that log would still be a bad trade."* A debugger with
+// the fog applied to it answers the question you already had and is worth
+// nothing. Filtering it would not make the game fairer; it would make the one
+// tool that can tell you whether the AI peeked incapable of telling you.
+//
+// So the panel is hidden from the PLAYER instead — which is a different fix for
+// a different problem, and the honest one. Behind `?ailog=1`, matching the
+// `?player=` convention in app/main.js: absent, nothing is built and the `L`
+// key is not bound, so a player cannot reach it by accident and a build handed
+// to a tester turns it on with six characters in the URL. `toggleAiLog()` stays
+// callable from the console either way — a debug instrument you cannot open
+// while debugging is the same mistake in a smaller font.
+function ailogEnabled() {
+  try {
+    return /[?&]ailog=1\b/.test(String(location.search));
+  } catch (e) {
+    return false;                      // no location (a harness): stay closed
+  }
+}
+
 // ── entry points (pinned names, same convention as renderHud) ────────────
 
 function initAiLog() {
   if (AILOG_STATE.wired) return true;
+  if (!ailogEnabled()) return false;   // not built, not wired, not reachable
   var nodes = ailogNodes();
   if (!nodes) {
     console.warn('[render/ailog] no .app container; AI log not installed');
@@ -515,4 +554,5 @@ function renderAiLog(state) {
 window.initAiLog = initAiLog;
 window.renderAiLog = renderAiLog;
 window.toggleAiLog = toggleAiLog;
+window.ailogEnabled = ailogEnabled;
 window.AILOG_STATE = AILOG_STATE;

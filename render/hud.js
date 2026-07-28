@@ -18,6 +18,24 @@
 //
 // Reads window.PLAYER (set by app/main.js) for whose numbers to show, and
 // countTerritories() / powerForces() from core/state.js. Never mutates state.
+//
+// ── FOG (Milestone 5.7) ─────────────────────────────────────────────────
+//
+// Two of the three blocks below were reading the whole board:
+//
+//   the power strip   seven live territory counts, every frame — complete
+//                     global standings, free, without looking at anything.
+//                     Now BELIEVED counts, via visibleTo + believedStation.
+//   the ticker        "ger took Brussels from neutral" for every capture on
+//                     the map. Now filtered by whether the player can see the
+//                     station the sim named (logEvent's optional `sid`).
+//
+// The stat block is untouched and needs no gate — it is scoped to the player
+// and a power always sees its own ground. See the note above hudStats().
+//
+// The filtering happens HERE, at render time, and never in the sim: state.log
+// stays complete, because it is sim state and because render/victory.js wants
+// the truth once the game is over.
 
 'use strict';
 
@@ -72,6 +90,8 @@ var _hudChipLast = null;       // pid -> { n, alive }
 var _hudTickerItems = [];      // live <li> nodes, index 0 = newest
 var _hudTickerLastLen = -1;
 var _hudTickerLastTail = null; // identity of the newest log entry
+var _hudTickerLastEpoch = -1;  // state.ownerEpoch — the ticker is fog-filtered
+                               // at render time, and sight moves with ownership
 var _hudTickerKeys = [];       // per-row identity, so we only repaint on change
 var _hudTickerTopKey = null;   // identity of row 0, to fire the enter animation
 
@@ -121,8 +141,10 @@ function hudNodes() {
   _hudTickerItems = [];
   _hudTickerLastLen = -1;
   _hudTickerLastTail = null;
+  _hudTickerLastEpoch = -1;
   _hudTickerKeys = [];
   _hudTickerTopKey = null;
+  _hudBelief = { epoch: -2, tick: -2, pid: null, counts: null };
   return _hudNodes;
 }
 
@@ -154,6 +176,21 @@ function hudPowerName(pid) {
 
 // ── stat block ──────────────────────────────────────────────────────────
 
+// FOG: NOTHING HERE NEEDS A GATE, AND THAT IS CHECKED RATHER THAN ASSUMED.
+//
+// Both aggregates are scoped to `me` and to nothing else — countTerritories()
+// and powerForces() take a power id and walk only the stations that id owns.
+// A power always sees the ground it holds (visibleTo returns 2 for it), so the
+// player's own numbers are level 2 by construction and a believed count would
+// be the same count with a visibility pass in front of it.
+//
+// The identity holds for territories specifically, which is worth stating
+// because it is what keeps this block and hudPowerStrip() agreeing about the
+// player's own chip: majority control turns on how many stations in a country
+// ONE power holds against the country's total, and the player can see every
+// station they hold. Stations they cannot see contribute to neither count.
+//
+// `state.tick`, and therefore the day, is the sim clock and is public.
 function hudStats(state, nodes) {
   const me = window.PLAYER;
 
@@ -217,6 +254,100 @@ function buildPowerStrip(strip) {
   strip.setAttribute('data-hud-built', '1');
 }
 
+// ── the strip's numbers are BELIEVED, not true ───────────────────────────
+//
+// The strip used to print `countTerritories(state, pid)` for all seven powers,
+// every frame: complete, live, global standings, updated the instant anything
+// anywhere changed hands. That is the whole board in seven integers, and it
+// survived every other fog gate in the milestone because it never mentions a
+// station by name.
+//
+// Now each chip counts the territories the PLAYER HAS EYES INTO. A country
+// counts for a power when, on the board as the player believes it, that power
+// holds a majority of its stations; a station the player cannot see contributes
+// to nobody, so an unobserved conquest simply does not move the number until
+// somebody looks. **A number lagging reality is fog working**, and it is also
+// the one place the player is told, wordlessly, how much of Europe they have
+// stopped watching.
+//
+// ── HOW, AND THE TWO THINGS NOT DONE HERE ────────────────────────────────
+//
+// `visibleTo` is asked ONCE (24-38us, the sanctioned per-frame budget) and its
+// result is handed to `believedStation` as the optional 4th argument, which is
+// exactly the escape hatch core/vision.js documents for a caller that wants the
+// whole board — 108 O(1) lookups instead of 108 traversals. Nothing here reads
+// `state.seen`: believedStation is the only function allowed to mint a level 1
+// and re-deriving the composition beside it would be two authorities for one
+// fact (known-issues #9).
+//
+// And majority control is not re-implemented either. The believed owners are
+// assembled into a PROXY BOARD and the canonical `territoryControl()` is run
+// against it, so the three-tier rule (00-vision.md §3) has one author whichever
+// board it is asked about. The proxy is safe here and would not be everywhere:
+// 02-visibility-and-sea.md is explicit that a proxy state must never reach
+// `routeFor` / `commandRoute`, whose cache invalidates on state object identity
+// — a fresh proxy per call took a cached 0.115us route to 161us. This one is
+// handed to nothing but territoryControl, which reads `stations[sid].owner` and
+// nothing else.
+//
+// Throttled on (tick, ownerEpoch): visibility is a pure function of ownership
+// and static data, and memory only moves when observeTick runs. A paused game
+// recomputes never.
+//
+// ── THE TENSION, RECORDED BECAUSE SOMEBODY WILL FIND IT ──────────────────
+//
+// 02-visibility-and-sea.md decides in bold that **who is winning is public
+// knowledge** — "you can hide an army; you cannot hide having conquered
+// Belgium" — and that decision is load-bearing: `ctx.leader` and
+// `ctx.leaderShare` walk all 30 territories on every AI decision, and
+// LEADER_WEIGHT (45.0) is the only constant on the board that can declare a war
+// and the mechanism the balance of power runs on.
+//
+// **That mechanism is untouched.** It lives in ai/score.js and reads the true
+// board, as it must; this is the HUD, which feeds nothing. What changes is only
+// what the player is handed for free, every frame, without looking.
+var _hudBelief = { epoch: -2, tick: -2, pid: null, counts: null };
+
+// Territories per power, counted on the board the player believes in. Returns
+// null when there is no fog to apply — core/vision.js absent, or PLAYER unset
+// (a harness, the empire picker) — and the caller then falls back to the true
+// count, which is what the strip has always shown.
+function hudBelievedTerritories(state) {
+  const me = window.PLAYER || null;
+  if (!me || typeof visibleTo !== 'function' || typeof believedStation !== 'function' ||
+      typeof territoryControl !== 'function' ||
+      typeof STATION_IDS === 'undefined' || typeof TERRITORY_IDS === 'undefined') {
+    return null;
+  }
+
+  const epoch = state.ownerEpoch | 0;
+  if (_hudBelief.counts && _hudBelief.pid === me &&
+      _hudBelief.epoch === epoch && _hudBelief.tick === state.tick) {
+    return _hudBelief.counts;
+  }
+
+  const vis = visibleTo(state, me);
+  const proxy = { stations: Object.create(null) };
+  for (let i = 0; i < STATION_IDS.length; i++) {
+    const sid = STATION_IDS[i];
+    // owner null at level 0 — never seen, so it belongs to nobody as far as
+    // this player is concerned. territoryControl only ever awards a country to
+    // an id in POWER_IDS, so a null owner dilutes the majority instead of
+    // winning it, which is the correct reading: you cannot count a country you
+    // are not looking at.
+    proxy.stations[sid] = { owner: believedStation(state, me, sid, vis).owner };
+  }
+
+  const counts = Object.create(null);
+  for (let t = 0; t < TERRITORY_IDS.length; t++) {
+    const o = territoryControl(proxy, TERRITORY_IDS[t]).owner;
+    if (o) counts[o] = (counts[o] || 0) + 1;
+  }
+
+  _hudBelief = { epoch: epoch, tick: state.tick, pid: me, counts: counts };
+  return counts;
+}
+
 function hudPowerStrip(state, nodes) {
   const strip = nodes.strip;
   if (!strip) return;
@@ -227,13 +358,22 @@ function hudPowerStrip(state, nodes) {
     buildPowerStrip(strip);
   }
 
+  const believed = hudBelievedTerritories(state);
+
   for (const pid in _hudChips) {
     const rec = _hudChips[pid];
     const last = _hudChipLast[pid];
 
     const p = state.powers && state.powers[pid];
+    // Alive/dead stays TRUE. A capitulation and an elimination are logged
+    // events with no station attached, and 02-visibility-and-sea.md keeps them
+    // public for the same reason it keeps the standings public: a power ceasing
+    // to exist is a fact about Europe, not a thing you find by scouting. It is
+    // also already on the ticker, unfiltered, one row down.
     const alive = p ? !!p.alive : false;
-    const n = (typeof countTerritories === 'function') ? countTerritories(state, pid) : 0;
+    const n = believed
+      ? (believed[pid] || 0)
+      : ((typeof countTerritories === 'function') ? countTerritories(state, pid) : 0);
 
     if (n !== last.n) {
       last.n = n;
@@ -251,9 +391,14 @@ function hudPowerStrip(state, nodes) {
 
 // ── ticker ──────────────────────────────────────────────────────────────
 //
-// state.log entries are { tick, kind, text } and core/state.js caps the array
-// at 400 with a shift(), so length alone is not a change signal once the cap is
-// hit. We compare the identity of the newest entry as well — cheap, and exact.
+// state.log entries are { tick, kind, text, sid? } and core/state.js caps the
+// array at 400 with a shift(), so length alone is not a change signal once the
+// cap is hit. We compare the identity of the newest entry as well — cheap, and
+// exact — plus state.ownerEpoch, since the rows are fog-filtered and sight
+// moves with ownership.
+//
+// `sid` is the station the event is about, present only when there is one. It
+// is what the fog filter tests; see hudTickSeen().
 //
 // This is PERIPHERAL AWARENESS, not a log viewer — render/ailog.js already owns
 // detail. Three things the raw tail of state.log did not do:
@@ -473,7 +618,7 @@ function hudTickLandTier(l) {
 // Landings the player is not party to are stepped over silently rather than
 // breaking the merge, because they are not on screen — a Russian landing in the
 // Baltic must not split a British volley into two rows.
-function hudTickLandRow(log, i, rows) {
+function hudTickLandRow(log, i, rows, vis) {
   const lead = hudTickLanding(log[i]);
   // An unparseable landing shows NOTHING, where an unparseable capture falls
   // through to the raw sentence. Deliberate asymmetry: the fallback for a
@@ -489,6 +634,9 @@ function hudTickLandRow(log, i, rows) {
   let n = 1;
   let j = i - 1;
   while (j >= 0) {
+    // Same two reasons to step over rather than break: the player is not party
+    // to it, or the player cannot see the beach it happened on.
+    if (!hudTickSeen(log[j], vis)) { j--; continue; }
     const p = hudTickLanding(log[j]);
     if (!p) break;                                  // any other kind ends the run
     if (!hudTickLandTier(p)) { j--; continue; }     // invisible: step over it
@@ -525,17 +673,72 @@ function hudTickNum(n) {
   return String(n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
 }
 
+// ── THE FOG FILTER ───────────────────────────────────────────────────────
+//
+// "ger took Brussels from neutral" was a total leak and the noisiest one on the
+// board: every capture anywhere, the instant it happened, for a player who may
+// never have set foot in Belgium. Two rows of it, updating live, told you more
+// about the far side of Europe than any amount of scouting.
+//
+// The filter is HERE and not in `logEvent`. `state.log` is sim state and stays
+// complete — the victory screen wants the truth, two states that differ in what
+// somebody has seen stop being comparable, and test/fog-tests.js asserts as a
+// tested fact that nothing under sim/ so much as names visibility. So the sim
+// records WHICH station an event is about (`e.sid`, optional and additive) and
+// this file decides whether the player is told.
+//
+// AT THE MOMENT OF RENDER, not of logging. Take the city next door and the
+// capture that happened there while you were blind becomes readable — which is
+// right, because you can now see the flag flying over it. That is also why
+// hudTicker() folds `state.ownerEpoch` into its change signal: visibility moves
+// when ownership does, and the log may not have moved at all.
+//
+// THREE CASES, and the middle one is the one worth arguing about.
+//
+//   an entry WITH a station      shown only at level 2. Not level 1: a fogged
+//                                station is a memory, and an event is news —
+//                                "somebody took this an hour ago, and I only
+//                                know because the ticker said so" is the leak
+//                                with a delay on it.
+//   an entry WITHOUT a station   shown. capitulation, elimination, victory and
+//                                declarations of war name no city and are
+//                                deliberately public (02-visibility-and-sea.md:
+//                                "you can hide an army; you cannot hide having
+//                                conquered Belgium"). This is also what keeps
+//                                the 'major' promotion below meaningful.
+//   'capture' / 'landing' with   HIDDEN. The sim tags both kinds at every call
+//   no station                   site, so a missing id means either a snapshot
+//                                restored from an older build or a new call
+//                                site that forgot — and the safe reading of
+//                                "I don't know where this happened" is not
+//                                "show it to everyone". Fails closed.
+//
+// A promoted 'major' is filtered on exactly the same rule, because the filter
+// runs before the rows are built rather than after: hudTickVisible() can only
+// rescue a row that hudTickRows() was allowed to make.
+function hudTickSeen(e, vis) {
+  if (!e) return false;
+  if (!vis) return true;                       // no fog to apply — see hudTicker
+  if (typeof e.sid === 'string' && e.sid) return vis[e.sid] === 2;
+  if (e.kind === 'capture' || e.kind === 'landing') return false;
+  return true;
+}
+
 // Newest-first display rows, with capture and landing bursts coalesced. Walks
 // the log backwards and stops as soon as it has `max` rows — the other 395
 // entries are never touched.
-function hudTickRows(log, max) {
+//
+// `vis` is the player's visibility map, or null for "no fog to apply". Every
+// entry passes hudTickSeen() before it can become or extend a row.
+function hudTickRows(log, max, vis) {
   const rows = [];
   let i = log.length - 1;
   while (i >= 0 && rows.length < max) {
     const e = log[i];
     if (!e) { i--; continue; }
+    if (!hudTickSeen(e, vis)) { i--; continue; }
 
-    if (e.kind === 'landing') { i = hudTickLandRow(log, i, rows); continue; }
+    if (e.kind === 'landing') { i = hudTickLandRow(log, i, rows, vis); continue; }
 
     const cap = hudTickCapture(e);
     if (!cap) {
@@ -555,6 +758,10 @@ function hudTickRows(log, max) {
     let j = i - 1;
     let last = e;
     while (j >= 0) {
+      // A capture the player cannot see is STEPPED OVER, not a break — exactly
+      // as an unrelated power's landing is in hudTickLandRow(). It is not on
+      // screen, so it must not split one visible volley into two rows.
+      if (!hudTickSeen(log[j], vis)) { j--; continue; }
       const p = hudTickCapture(log[j]);
       if (!p || p.pid !== cap.pid) break;
       if (Math.abs(e.tick - log[j].tick) > HUD_TICKER_COALESCE_TICKS) break;
@@ -607,8 +814,8 @@ function hudTickRows(log, max) {
 // existed, with its own key, tick and tokens; this decides which of the rows the
 // log produced survives the cut (known-issues #18: the readout answers the
 // question on screen or it says nothing).
-function hudTickVisible(log, max) {
-  const rows = hudTickRows(log, max + HUD_TICKER_LOOKBACK);
+function hudTickVisible(log, max, vis) {
+  const rows = hudTickRows(log, max + HUD_TICKER_LOOKBACK, vis);
   if (rows.length <= max) return rows;
 
   const head = rows.slice(0, max);
@@ -657,11 +864,27 @@ function hudTicker(state, nodes) {
   const log = state.log || [];
   const len = log.length;
   const tail = len ? log[len - 1] : null;
-  if (len === _hudTickerLastLen && tail === _hudTickerLastTail) return;
+  // `ownerEpoch` is the third term because the ticker is now filtered by what
+  // the player can SEE, and sight changes when ownership does — take a city and
+  // the captures that happened next door while you were blind become readable,
+  // with the log itself unmoved. It is also the exact and total invalidation
+  // signal for visibility (core/vision.js says so at the memo it declines to
+  // build), so this costs one integer compare and misses nothing.
+  const epoch = state.ownerEpoch | 0;
+  if (len === _hudTickerLastLen && tail === _hudTickerLastTail &&
+      epoch === _hudTickerLastEpoch) return;
   _hudTickerLastLen = len;
   _hudTickerLastTail = tail;
+  _hudTickerLastEpoch = epoch;
 
-  const rows = hudTickVisible(log, HUD_TICKER_MAX);
+  // ONE visibleTo for the whole repaint (24-38us, and repaints are rare). null
+  // means there is no fog to apply — core/vision.js absent, or PLAYER unset in
+  // a harness — and hudTickSeen() then passes everything, which is exactly what
+  // the ticker did before this change.
+  const me = window.PLAYER || null;
+  const vis = (me && typeof visibleTo === 'function') ? visibleTo(state, me) : null;
+
+  const rows = hudTickVisible(log, HUD_TICKER_MAX, vis);
   const show = rows.length;
 
   // Grow/shrink the pool of <li> nodes to match. The list only ever changes by

@@ -261,12 +261,48 @@ function setCoverageFocus(sid) {
   return _COV.focus;
 }
 
+// ── fog ─────────────────────────────────────────────────────────────────
+//
+// Level 0 is already safe and costs nothing: focus is set from the hover
+// render/select.js owns, a hidden station's <g> is display:none, and a
+// display:none element is never an event target — so a farm the player has
+// never seen cannot be hovered and cannot become the focus.
+//
+// LEVEL 1 IS REFUSED, and that is not symmetry for its own sake. This overlay
+// is not a picture of a farm; it is a set of LIVE answers about the rest of the
+// board. _covSignature reads territoryControl(state, …) on the farm's own
+// country, and _covContributions calls the sim's growthMultiplier against the
+// present state for all 30 territories — reach, hop falloff, CONTROL TIER and
+// contested-ness, every one of them evaluated on ground the player may not be
+// able to see. Painting that beside a remembered node is a live answer to a
+// stale question: known-issues #18, the failure mode where a number is
+// plausible, stable, recomputed every frame, and describes something other than
+// what is on screen.
+//
+// There is no honest fogged version of it either. A believed multiplier would
+// need a believed control tier for every country the farm reaches, which is a
+// second implementation of the tier rule (known-issues #9) and would still be
+// wrong the moment a single station three countries away changed hands. So the
+// overlay simply says nothing until the player can see the farm, which is the
+// same bargain the fullness ring makes on a fogged node.
+function _covFogged(state, sid) {
+  if (typeof mapFogLevels !== 'function' || typeof believedStation !== 'function') return false;
+  var vis = mapFogLevels(state);
+  if (!vis) return false;                       // no viewer: nothing is masked
+  if (vis[sid] === 2) return false;
+  return true;                                  // level 0 or level 1: no answer
+}
+
 // Draw the focused farm's reach into #g-coverage. Called every frame.
 function renderCoverage(state) {
   if (!state || !state.stations) return false;
   if (!_COV.built && !_covBuild()) return false;
 
   var sid = _COV.focus;
+  if (sid && _covFogged(state, sid)) {
+    if (_COV.sig !== null) _covClearDrawn();
+    return false;
+  }
   if (!sid || !state.stations[sid] ||
       typeof growthMultiplier !== 'function' ||
       typeof multiplierStationIds !== 'function') {

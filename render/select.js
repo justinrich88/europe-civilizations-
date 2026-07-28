@@ -282,6 +282,39 @@ function selAllStationIds() {
   return Object.keys(STATIONS).sort();
 }
 
+// ── fog and the hit test ────────────────────────────────────────────────
+//
+// Fog masks the board by SUBTRACTING: render/map.js sets display:none on a
+// hidden station's <g>, so `evt.target.closest('[data-station]')` structurally
+// cannot land on one — a display:none element is not hit-tested by the browser
+// and never becomes an event target. That half is free and was verified with
+// elementFromPoint on the live board rather than assumed.
+//
+// THE OTHER HALF IS NOT FREE, and this is the whole reason this helper exists.
+// selStationAt() does not stop at the DOM hit: it then runs a NEAREST-CENTRE
+// override over `STATIONS`, the static data table, to fix the 77 overlapping
+// pairs on this map. That loop has never looked at the DOM and cannot see
+// display:none, so a click on a visible city with a hidden one 12px behind it
+// would silently retarget to the hidden one — the player attacking a city that
+// is not on their screen, from a rejection they can neither see nor explain.
+// So the override skips level 0, and only level 0.
+//
+// LEVEL 1 STAYS TARGETABLE, deliberately. You remember the city is there and
+// committing a volley against a number that was true a minute ago is the exact
+// decision fog was added to create (02-visibility-and-sea.md §1: "decide
+// whether last minute's number is still true"). Routing legality is also
+// unfogged by decision — a route may run through ground you have never seen,
+// and you find out the road is blocked when you march.
+function _selFogHidden(sid) {
+  const g = selGame();
+  if (!g || !g.stations) return false;
+  if (typeof mapFogLevels !== 'function' || typeof believedStation !== 'function') return false;
+  const vis = mapFogLevels(g);
+  if (!vis) return false;                       // no viewer: nothing is masked
+  if (vis[sid] === 2) return false;
+  return believedStation(g, g.human, sid, vis).level === 0;
+}
+
 // ── camera ──────────────────────────────────────────────────────────────
 //
 // Everything this file draws is a SYMBOL — carets and ETA labels annotate the
@@ -981,7 +1014,12 @@ function selStationAt(evt) {
     const d = Math.hypot(p[0] - pos[0], p[1] - pos[1]);
     // Strictly nearer, and ties break on the id already under the cursor, so
     // the result never flickers between two equidistant nodes.
-    if (d < bestD - 1e-9 && d <= reach) { bestD = d; best = ids[i]; }
+    // A station that is not on the board cannot win a click for it: this loop
+    // reads the static STATIONS table and has no idea display:none exists.
+    if (d < bestD - 1e-9 && d <= reach && !_selFogHidden(ids[i])) {
+      bestD = d;
+      best = ids[i];
+    }
   }
   return best;
 }

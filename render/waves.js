@@ -149,6 +149,33 @@ const WAVE_LAND_GAP = 8;
 // bucket per tick and this costs at most one DOM write per tick.
 const WAVE_LAND_BUCKETS = 100;
 
+// ── fog ──────────────────────────────────────────────────────────────────
+//
+// "Units in transit are visible" (§8) is a promise about YOUR units and about
+// units crossing ground you can see. A stack marching three provinces deep
+// through territory the player has never entered is exactly the intelligence
+// fog exists to withhold, and it is the loudest kind: a marker moving along a
+// link tells you the owner, the strength, the origin, the destination and the
+// ETA in one glance.
+//
+// THE RULE: an enemy wave is drawn only while the hop it is CURRENTLY ON has an
+// endpoint the viewer can see live (level 2). Not "has ever seen" — a wave is a
+// thing happening now and there is no memory of one; state.seen records owner,
+// units, connected and a tick, and nothing about anybody's marching columns.
+// Own waves are always drawn, in fog or out of it: you know where you sent them.
+//
+// THE TRAP, AND WHY THE GATE SITS WHERE IT DOES. renderWaves ends by removing
+// the node of every wave that was not marked in `seen` this frame — that is how
+// a landed wave's marker disappears. So the gate must come BEFORE `seen[key]`
+// is set, and the masked wave then falls through the existing removal loop and
+// its marker leaves the board. Gating anywhere AFTER that line would mark the
+// wave alive, skip its update, and leave a stationary chip parked mid-Channel
+// for the rest of the game — a ghost that is worse than no marker at all,
+// because it looks exactly like a real stack that has stopped.
+function _wavHopSeen(vis, a, b) {
+  return vis[a] === 2 || vis[b] === 2;
+}
+
 function resetWaveLayer() {
   const layer = byId('g-waves');
   if (layer) while (layer.firstChild) layer.removeChild(layer.firstChild);
@@ -360,6 +387,12 @@ function renderWaves(state) {
     ? Math.round(cameraSymbolScale() * 100000) / 100000
     : 1;
 
+  // One visibility solve for the frame, from render/map.js's seam. Null when
+  // there is no viewer (the empire picker, a harness), and then nothing here
+  // masks anything.
+  const vis = (typeof mapFogLevels === 'function') ? mapFogLevels(state) : null;
+  const me = vis ? state.human : null;
+
   const seen = Object.create(null);
 
   for (let i = 0; i < state.waves.length; i++) {
@@ -373,6 +406,12 @@ function renderWaves(state) {
     const geom = (typeof linkPathGeom === 'function')
       ? linkPathGeom(w.path[hop], w.path[hop + 1]) : null;
     if (!geom) continue;
+
+    // Fog, and it MUST be above `seen[key] = true` — see _wavHopSeen. A wave
+    // that marches out of sight is not marked, so the removal loop at the
+    // bottom takes its marker and its trail off the board this frame; a wave
+    // that marches back into sight is rebuilt by makeWaveNode on the spot.
+    if (vis && w.owner !== me && !_wavHopSeen(vis, w.path[hop], w.path[hop + 1])) continue;
 
     const key = String(w.id);
     seen[key] = true;

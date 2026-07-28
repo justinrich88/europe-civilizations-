@@ -171,6 +171,15 @@ function capitulate(state, pid, holder) {
   }
 
   state.powers[pid].alive = false;
+  // NO STATION ID, deliberately — logEvent's 4th argument is omitted here and
+  // at every other call in this file. A capitulation is not about a city; it
+  // is about a power, and the several dozen stations that just changed hands
+  // are the consequence rather than the subject. There is nothing for the
+  // ticker's fog filter to test, and there must not be: 02-visibility-and-sea.md
+  // is explicit that **who is winning is public knowledge** — "you can hide an
+  // army; you cannot hide having conquered Belgium". An untagged entry is
+  // therefore shown to everyone, which is the correct default for all three
+  // kinds this file writes (capitulation, elimination, victory).
   logEvent(state, 'capitulation',
     _vicName(pid) + ' capitulates — ' + moved + ' station' + (moved === 1 ? '' : 's') +
     ' pass to ' + _vicName(holder));
