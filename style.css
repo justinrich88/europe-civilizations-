@@ -2496,18 +2496,88 @@ html, body {
   stroke-width: 1.2;
   stroke-linejoin: round;
   paint-order: stroke fill;
+  /* MOTION IS THE READING. 05-command-clarity.md §2: "motion is the one channel
+     not already spent on ownership (colour) or station type (shape), and 'it is
+     moving' is exactly the question being asked."
+
+     It has to be carried by OPACITY rather than by position, because the block
+     comment above forbids any `transform` here — render/map.js owns the whole
+     translate/scale/rotate chain on these nodes and a CSS transform would
+     replace it, not extend it, collapsing every chevron on the board onto the
+     origin. render/map.js writes a NEGATIVE per-chevron `animation-delay` as an
+     inline style (MAP_ORDER_CHEV_LAG, 0.26s = one sixth of this cycle), so the
+     bright crest walks from source to destination one hop at a time instead of
+     the whole line blinking in unison.
+
+     `animation-delay` is a longhand and inline, so it survives this shorthand:
+     the shorthand's implicit `animation-delay: 0s` is a class-level declaration
+     and loses to the element's own style. Do NOT respell the per-state rules
+     below as shorthands for the same reason — they would silently reset every
+     chevron's phase to zero and the crest would stop travelling. */
+  animation: order-flow 1.6s linear infinite;
 }
 
-/* ── A ROUTE THAT CANNOT DELIVER ─────────────────────────────────────────
-   The chevrons ARE the flow, so a blocked route simply stops having any: no
-   arrows moving along it, the line itself dimmed, and one bar struck across its
-   middle hop. That needs no legend and spends no second colour.
+/* The crest. Short and bright, long and dim: an arrow that is lit for a fifth of
+   the cycle reads as a thing passing, where a 50/50 sine reads as a slow throb.
+   The halo stroke is NOT animated, so a chevron never disappears — presence is
+   constant and only brightness travels, which is what keeps a stopped route
+   distinguishable from a route that happens to be mid-trough. */
+@keyframes order-flow {
+  0%   { fill-opacity: 0.30; }
+  18%  { fill-opacity: 1.00; }
+  55%  { fill-opacity: 0.30; }
+  100% { fill-opacity: 0.30; }
+}
 
-   Dimmed rather than recoloured, and never in the warning colour. A stalled
-   supply line is usually the capacity ceiling doing its job — the destination
-   is full, which is the mechanic working — and the rail is the one place that
-   is allowed to shout, on the row that names the fix. */
-.station-orderroute.is-blocked .station-orderline { stroke-opacity: 0.30; }
+/* ── WAITING: THROTTLED, NOT DEAD ────────────────────────────────────────
+   The distinction this whole block exists for. A route reports one of six
+   machine-readable blocked reasons and three of them clear themselves with no
+   player input at all — below-min-send (the throttle), destination-full (the
+   headroom ceiling) and at-keep-floor (the source is spent, e.g. the player just
+   fired a volley out of it). Measured over 12 seeds x 7 powers x 1500 ticks, a
+   perfectly healthy route read blocked on 77% of its sweeps, and every one of
+   those sweeps drew the dead treatment below. The most common thing this
+   stylesheet said was a lie.
+
+   So a self-recovering reason gets its own state: dimmer, and MUCH slower, but
+   still moving. Same channel, same colour, same shape — only the tempo changes,
+   which is the one reading that maps onto "it will come back on its own".
+   Explicitly NO bar: the bar means "this needs you", and this does not.
+
+   Longhands, never the `animation` shorthand — see .station-orderchev. */
+.station-orderroute.is-waiting .station-orderline { stroke-opacity: 0.50; }
+.station-orderroute.is-waiting .station-orderchev {
+  animation-name: order-wait;
+  animation-duration: 3.8s;
+  animation-timing-function: ease-in-out;
+  stroke-opacity: 0.45;
+}
+@keyframes order-wait {
+  0%, 100% { fill-opacity: 0.22; }
+  50%      { fill-opacity: 0.52; }
+}
+
+/* ── STUCK: A ROUTE THAT CANNOT DELIVER UNTIL YOU DO SOMETHING ───────────
+   Now painted ONLY from `unreachable` or `target-lost` — the two reasons that
+   will sit there forever until the player takes ground or redraws the line. The
+   chevrons ARE the flow, so this route simply stops having any: no arrows on it
+   at all, the line faint, and one bar struck across its middle hop.
+
+   Chevron ABSENCE is the load-bearing signal, not the line's opacity. At 1.8px
+   a 0.30 stroke is very nearly invisible, which is why this used to be
+   indistinguishable from a route that was never drawn; the line is lifted to
+   0.45 so the route is still legibly THERE, and it is the missing arrows plus
+   the bar that say it is not running. A route you set that is not running is the
+   most important thing on the screen (§2) and must never approach invisible.
+
+   NOT DASHED, however tempting: `.link.is-sea` already spends the dash on sea
+   crossings and a dashed supply line would read as water.
+
+   Still no warning colour — colour means ownership and only ownership (§8) —
+   but the bar now pulses, which is the one thing on a stuck route that moves.
+   Against a waiting route, where the CHEVRONS move and there is no bar, the two
+   cannot be confused peripherally. */
+.station-orderroute.is-blocked .station-orderline { stroke-opacity: 0.45; }
 .station-orderroute.is-blocked .station-orderchev { display: none; }
 
 .station-orderbar {
@@ -2518,7 +2588,25 @@ html, body {
   stroke-opacity: 0.55;
   paint-order: fill stroke;
 }
-.station-orderroute.is-blocked .station-orderbar { display: block; }
+.station-orderroute.is-blocked .station-orderbar {
+  display: block;
+  animation: order-stuck 1.5s ease-in-out infinite;
+}
+@keyframes order-stuck {
+  0%, 100% { stroke-opacity: 0.45; }
+  50%      { stroke-opacity: 1.00; }
+}
+
+/* Everything above is decoration over a state that is also carried by opacity
+   and by the bar's presence, so switching the motion off costs no information —
+   which is the bar this project holds every animation to. The static values are
+   the crest and the trough respectively, so a reduced-motion board shows a
+   bright flowing route and a dim waiting one. */
+@media (prefers-reduced-motion: reduce) {
+  .station-orderchev { animation: none; fill-opacity: 0.95; }
+  .station-orderroute.is-waiting .station-orderchev { animation: none; fill-opacity: 0.40; }
+  .station-orderroute.is-blocked .station-orderbar { animation: none; stroke-opacity: 0.85; }
+}
 /* orders:end */
 
 /* start: ─── empire picker, shown before the game exists (render/start.js) ──

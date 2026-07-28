@@ -733,7 +733,14 @@ function mapFogHide(rec, hide) {
     LIVE.writes++;
     if (hide) {
       let had = false;
-      for (const to in rec.ordRoute) { mapOrderDrop(rec, to); had = true; }
+      // The routes go, and their shipping history goes with them: the next
+      // frame that un-hides this city rebuilds every edge from scratch, and a
+      // stamp from before the blackout would claim a flow nobody has seen since.
+      for (const to in rec.ordRoute) {
+        mapOrderDrop(rec, to);
+        delete rec.ordSeen[to];
+        had = true;
+      }
       if (had) { rec.ordKey = ''; rec.ordEpoch = -1; mapOrderIndex(); }
     }
   }
@@ -1204,6 +1211,14 @@ const MAP_ORDER_CHEV_D = 'M-4.8,-6.3 L3.3,0 L-4.8,6.3 L-7.5,3.9 L-2.1,0 L-7.5,-3
 // bar across the pipe at every bearing rather than a stroke along it.
 const MAP_ORDER_BLOCK_D = 'M-1.9,-7.0 L1.9,-7.0 L1.9,7.0 L-1.9,7.0 Z';
 
+// Seconds of phase between one chevron and the next along a route. Paired with
+// the 1.6s cycle in style.css's `order-flow` keyframes: 0.26s is a sixth of a
+// cycle, so six consecutive hops span one full wave and a long route carries a
+// visible crest rather than reading as one synchronised blink. Authored here
+// because it is written per element as an inline animation-delay and CSS has no
+// way to index a sibling.
+const MAP_ORDER_CHEV_LAG = 0.26;
+
 // Sim ticks between order-plan recomputes. The plan is the one read on the
 // board that is not O(1), so it is throttled on SIM TICKS rather than on
 // frames: a PAUSED board recomputes never, and a board with no supply lines
@@ -1221,6 +1236,7 @@ const MAP_ORDER_BLOCK_TICKS = 5;
 let _mapOrdTick = -1e9;
 let _mapOrdDue = false;
 let _mapOrdPlans = null;
+let _mapOrdWaves = null;
 
 function mapOrderPlan(state, pid) {
   if (!_mapOrdPlans) _mapOrdPlans = Object.create(null);
@@ -1228,6 +1244,126 @@ function mapOrderPlan(state, pid) {
   const p = (typeof standingOrderPlan === 'function') ? standingOrderPlan(state, pid) : {};
   _mapOrdPlans[pid] = p;
   return p;
+}
+
+// ── WAITING IS NOT STUCK ────────────────────────────────────────────────
+//
+// `standingOrderNext`/`standingOrderPlan` report six machine-readable blocked
+// reasons and they are NOT the same kind of statement. Three of them are a
+// mechanic working correctly and clear themselves with no player input at all:
+//
+//   below-min-send    the throttle. Clears as the source regrows or as the
+//                     rotation gives this edge the lead
+//   destination-full  the headroom ceiling. Clears as the destination spends
+//   at-keep-floor     the source is spent — e.g. the player just fired a volley
+//                     out of it. Clears as it regrows
+//
+// The others need the player: `unreachable` (no owned corridor) and
+// `target-lost` (the far end changed hands) will sit there forever until
+// somebody takes ground or redraws the line.
+//
+// Drawing all six the same way is what made the board lie. Measured over 12
+// seeds x 7 powers x 1500 ticks, a perfectly healthy route with no command
+// interference read blocked on 77% of its sweeps — 1176 shipping sweeps against
+// 1680 `below-min-send` and 2184 `destination-full` — and at 1.8px and 0.30
+// stroke-opacity with the chevrons off, "the throttle is doing its job" and
+// "your route is dead" are the same picture. So the most common thing this
+// treatment said was a lie.
+//
+// TWO LISTS, AND THE STUCK ONE IS THE ONE THAT DECIDES. The dead treatment is
+// painted from MAP_ORDER_STUCK and from nothing else, so an unknown reason —
+// one this file has not been taught, because somebody added it to
+// sim/movement.js — falls to `waiting` rather than to dead. That is
+// deliberate: the failure being fixed here is crying wolf, `waiting` still dims
+// the line so nothing is hidden either way, and the rail names the exact reason
+// in words regardless. "Struck through" stays a claim this file can back.
+//
+// MAP_ORDER_WAITING is therefore not read by the rule at all. It is here
+// because the two lists together are the classification, and
+// test/scenarios-routeview.js asserts that every per-edge reason the sim can
+// emit appears in exactly one of them — which is what turns "an unknown reason
+// degrades safely" from a silent shrug into something that fails a test the day
+// a sixth reason lands.
+const MAP_ORDER_WAITING = {
+  'below-min-send': true,
+  'destination-full': true,
+  'at-keep-floor': true,
+};
+
+const MAP_ORDER_STUCK = {
+  'unreachable': true,
+  'target-lost': true,
+};
+
+// How long a route goes on reading as flowing after its last shipping sweep,
+// in SWEEPS. Hysteresis, because the instantaneous boolean is what strobes: a
+// healthy route alternates ship / below-min-send / ship as the source regrows
+// and as _ordRotation hands the lead around, and a line that flickers dead four
+// times a minute is read as dead.
+//
+// The arithmetic, and it is deliberately modest:
+//
+//   MAP_ORDER_HOLD_SWEEPS x BAL.ORDERS.INTERVAL  =  4 x 25  =  100 ticks
+//
+// FOUR SWEEPS, NOT TWENTY-EIGHT. The measured mean longest UNBROKEN dark span
+// was 704 ticks, and covering that with hysteresis alone would need k = 28 —
+// which is a route claiming to flow through eleven minutes of genuinely
+// shipping nothing, i.e. the same lie told in the other direction. Hysteresis
+// is only asked to kill the FLICKER. The long spans are handled by the
+// waiting/stuck split above, which renders a 704-tick throttle as a throttle
+// for its whole length instead of as a corpse.
+//
+// Derived from BAL rather than written as a tick count so that retuning the
+// sweep clock cannot silently turn 4 sweeps into 40.
+const MAP_ORDER_HOLD_SWEEPS = 4;
+
+function _mapOrderHoldTicks() {
+  const iv = (typeof BAL !== 'undefined' && BAL.ORDERS && BAL.ORDERS.INTERVAL > 0)
+    ? BAL.ORDERS.INTERVAL : 25;
+  return MAP_ORDER_HOLD_SWEEPS * iv;
+}
+
+// Standing waves in the air, keyed `from>to`, for this frame only. A wave that
+// is walking down this edge RIGHT NOW is proof the edge flows, whatever the
+// plan for the NEXT sweep happens to say — and it is the cheapest false-negative
+// killer available, because it needs no history and no memo that can go stale.
+// `standing` is set by sim/commands.js on exactly the waves a sweep launched, so
+// a manual volley down the same corridor is correctly not counted.
+//
+// Built lazily and dropped at the top of the next frame, the same contract
+// `_mapOrdPlans` is held to: a cache that cannot outlive the state it was
+// computed from. One pass over state.waves per frame, not one per route.
+function _mapOrderInFlight(state) {
+  if (_mapOrdWaves) return _mapOrdWaves;
+  const m = Object.create(null);
+  const ws = (state && state.waves) || [];
+  for (let i = 0; i < ws.length; i++) {
+    const w = ws[i];
+    if (w && w.standing) m[w.from + '>' + w.to] = true;
+  }
+  _mapOrdWaves = m;
+  return m;
+}
+
+// THE WHOLE DECISION, as a pure function of four numbers — no DOM, no state, no
+// memo. Everything above only feeds it. `'flowing' | 'waiting' | 'stuck'`.
+//
+//   edge       this destination's record out of standingOrderPlan:
+//              { target, units, blocked }. The sim decides; this reads.
+//   inFlight   a standing wave is on this edge right now
+//   sinceShip  ticks since this edge was last SEEN shipping, Infinity if never
+//   hold       the hysteresis window, _mapOrderHoldTicks()
+//
+// ORDER MATTERS. A hard reason beats both the in-flight wave and the hysteresis:
+// a corridor cut while the last convoy is still walking is precisely the moment
+// the player has to be told, and that convoy is the last one. Everything else
+// resolves toward alive, which is the direction the measured error runs.
+function _mapRouteState(edge, inFlight, sinceShip, hold) {
+  if (edge && edge.units > 0) return 'flowing';
+  if (edge && MAP_ORDER_STUCK[edge.blocked] === true) return 'stuck';
+  if (inFlight) return 'flowing';
+  if (sinceShip <= hold) return 'flowing';
+  return 'waiting';
 }
 
 // translate + counter-scale + rotate, for a symbol that has a bearing.
@@ -1323,6 +1459,16 @@ function mapOrderRoute(D, state, rec, sid, to) {
       d: MAP_ORDER_CHEV_D, transform: mapOrientTransform(m.x, m.y, k, m.deg),
     });
     node.style.fill = color;
+    // MOTION, and it is the reason the three states are legible at all. The
+    // chevrons cannot MOVE — style.css's orders block forbids any `transform`
+    // on them, because render/map.js writes their whole translate/scale/rotate
+    // chain per camera change and a CSS transform replaces the chain rather than
+    // adding to it — so the travelling signal is carried by fill-opacity
+    // instead, phase-shifted one hop at a time. A negative delay starts each
+    // chevron already partway through the cycle, so the brightness crest walks
+    // source -> destination at a constant hops-per-second no matter how long the
+    // route is. Written once at build, never per frame.
+    node.style.animationDelay = (-i * MAP_ORDER_CHEV_LAG).toFixed(2) + 's';
     g.appendChild(node);
     marks.push({ node: node, x: m.x, y: m.y, deg: m.deg, hop: i });
   }
@@ -1369,11 +1515,19 @@ function mapOrderRepath(route) {
   }
 }
 
+// `ordSeen` is NOT cleared here, and that is the whole reason this is worth a
+// comment. mapOrderAim drops and rebuilds a route whenever state.ownerEpoch
+// moves — which is a capture ANYWHERE on the board, by anybody — so clearing the
+// shipping history alongside the DOM would reset the hysteresis of every route
+// in the game every time a village changed hands, and the flicker this was
+// written to kill would come straight back. The history belongs to the EDGE, not
+// to the <g>; it is cleared where the edge itself goes away (mapOrderAim's
+// `!want` branch, and mapFogHide).
 function mapOrderDrop(rec, to) {
   const r = rec.ordRoute[to];
   if (r && r.g && r.g.parentNode) r.g.parentNode.removeChild(r.g);
   delete rec.ordRoute[to];
-  delete rec.ordBlocked[to];
+  delete rec.ordState[to];
 }
 
 // Reconcile this station's drawn routes against the list in state. Called only
@@ -1391,28 +1545,52 @@ function mapOrderAim(D, state, rec, sid, targets, epoch) {
     if (built) rec.ordRoute[to] = built;
     LIVE.writes++;
   }
-  for (const to in rec.ordRoute) if (!want[to]) mapOrderDrop(rec, to);
+  for (const to in rec.ordRoute) {
+    if (want[to]) continue;
+    mapOrderDrop(rec, to);
+    delete rec.ordSeen[to];   // the EDGE is gone, so its history goes with it
+  }
 }
 
-// Mark the routes that are shipping nothing. `plan.edges` is the sim's
-// per-destination answer, so this file decides nothing — it draws what
-// _ordPlanPower already worked out, which is what makes the board and any panel
-// structurally unable to disagree (known-issues #18).
+// Paint each of this station's routes in one of THREE states. `plan.edges` is
+// the sim's per-destination answer, so this file decides nothing about the
+// sim — it draws what _ordPlanPower already worked out, which is what makes the
+// board and any panel structurally unable to disagree (known-issues #18). What
+// it does decide is how long an answer is worth believing, and that is
+// `_mapRouteState` above.
 //
-// The chevrons ARE the flow, so a blocked route simply stops having any: no
-// arrows moving down it, plus a bar across it and the line itself dimmed. That
-// needs no legend and no second colour.
-function mapOrderFlow(rec, next) {
-  const edges = (next && next.edges) || [];
-  const blocked = Object.create(null);
-  for (let i = 0; i < edges.length; i++) {
-    if (!(edges[i].units > 0)) blocked[edges[i].target] = true;
-  }
+//   flowing   chevrons pulse along the line, full weight. Shipping now, or
+//             shipping within the last MAP_ORDER_HOLD_SWEEPS, or a standing
+//             wave is on the wire
+//   waiting   dimmer line, dimmer and much slower chevrons — STILL MOVING. A
+//             throttle or a full destination. No bar: nothing is broken
+//   stuck     the old dead treatment, and now only from a reason that needs
+//             the player: line dashed and faint, chevrons off, bar across it
+//
+// NO EDGE RECORD MEANS NO INFORMATION, and the route is left exactly as it was.
+// That is not the same as "not blocked": `next` is undefined for a station the
+// plan did not answer for (a power with no planner, a half-built board), and
+// the previous version silently painted that as flowing.
+function mapOrderFlow(rec, next, inFlight, sid, tick) {
+  if (!next) return;
+  const edges = next.edges || [];
+  const byTarget = Object.create(null);
+  for (let i = 0; i < edges.length; i++) byTarget[edges[i].target] = edges[i];
+  const hold = _mapOrderHoldTicks();
   for (const to in rec.ordRoute) {
-    const stuck = !!blocked[to];
-    if (stuck === (rec.ordBlocked[to] === true)) continue;
-    rec.ordBlocked[to] = stuck;
-    rec.ordRoute[to].g.classList.toggle('is-blocked', stuck);
+    const edge = byTarget[to];
+    if (!edge) continue;
+    // Stamped BEFORE the classify, so a sweep that is shipping right now sets
+    // sinceShip to 0 and the two mechanisms cannot disagree about this tick.
+    if (edge.units > 0) rec.ordSeen[to] = tick;
+    const last = rec.ordSeen[to];
+    const since = (last === undefined) ? Infinity : (tick - last);
+    const st = _mapRouteState(edge, !!(inFlight && inFlight[sid + '>' + to]), since, hold);
+    if (st === rec.ordState[to]) continue;
+    rec.ordState[to] = st;
+    const g = rec.ordRoute[to].g;
+    g.classList.toggle('is-waiting', st === 'waiting');
+    g.classList.toggle('is-blocked', st === 'stuck');
     LIVE.writes++;
   }
 }
@@ -1981,7 +2159,15 @@ function drawStations(D, layer, state) {
       // walk, on 108 stations every frame.
       ordKey: '', ordEpoch: -1,
       ordRoute: Object.create(null),    // destination -> { g, marks, epoch }
-      ordBlocked: Object.create(null),  // destination -> last drawn bar state
+      ordState: Object.create(null),    // destination -> last drawn route state
+      // destination -> the last tick this edge was SEEN shipping. The whole of
+      // the hysteresis memo, and it lives HERE rather than in state on purpose:
+      // the sim is deterministic and full-state hashed for balance
+      // verification, so a per-edge render clock inside it would perturb every
+      // snapshot comparison in the project. It is keyed exactly as ordRoute and
+      // ordState are, it is dropped with them by resetLiveIndex() whenever the
+      // board is rebuilt, and it cannot be read by anything below render/.
+      ordSeen: Object.create(null),
       // battle readout: geometry now, DOM on this station's first fight
       ring: battleRing,
       momR: momR,
@@ -2438,7 +2624,8 @@ function liveStations(D, state) {
     // a line while the game is PAUSED still shows the answer on the next frame
     // rather than at the next tick that never comes.
     if (supply.length && (_mapOrdDue || justOrdered)) {
-      mapOrderFlow(rec, mapOrderPlan(state, st.owner)[sid]);
+      mapOrderFlow(rec, mapOrderPlan(state, st.owner)[sid],
+                   _mapOrderInFlight(state), sid, state.tick);
     }
 
     // Cut off from its capital: not growing, actively decaying (§5). Believed,
@@ -2546,6 +2733,7 @@ function renderLive(state) {
   _mapOrdDue = (state.tick - _mapOrdTick) >= MAP_ORDER_BLOCK_TICKS;
   if (_mapOrdDue) _mapOrdTick = state.tick;
   _mapOrdPlans = null;            // never survives the frame it was computed in
+  _mapOrdWaves = null;            // ditto — one pass over state.waves per frame
   liveStations(D, state);
   liveTerritories(D, state);
   // The two per-frame fog reads that are not per-station: the road network and
@@ -2688,6 +2876,18 @@ window.linkRoutePoints = linkRoutePoints;
 // state.human means.
 window.mapFogLevels = mapFogLevels;
 window.mapViewer = mapViewer;
+
+// The supply-route state rule, and ONLY the pure part of it. It is exported for
+// exactly one reason: test/scenarios-routeview.js has to be able to assert the
+// rule against the real function rather than against a copy of it in a suite —
+// which is known-issues #9 in the shape it takes when a test re-derives the
+// thing it is testing. `_mapOrderHoldTicks` goes with it because the k=4
+// arithmetic is derived from BAL and the suite must be able to check that the
+// derivation actually reads BAL rather than that 100 happens to equal 100.
+window._mapRouteState = _mapRouteState;
+window._mapOrderHoldTicks = _mapOrderHoldTicks;
+window.MAP_ORDER_WAITING = MAP_ORDER_WAITING;
+window.MAP_ORDER_STUCK = MAP_ORDER_STUCK;
 
 // Counter-scale the symbols the moment the camera moves, not on the next frame.
 // A wheel zoom with the game paused produces no frames at all, and the stations

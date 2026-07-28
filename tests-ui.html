@@ -53,11 +53,40 @@
 
 // The suites to inject, in order. asserts.js first (assert/resetTests), then
 // runner.js (collectData/formatResults), then the suites themselves.
+//
+// THESE ARE THE SUITES test/node.js CANNOT RUN, and each is here for its own
+// reason rather than by category:
+//
+//   select-tests      render/select.js calls document.addEventListener at the
+//                     top level, so the node harness will not evaluate it at
+//                     all, and the gestures hit-test real screen coordinates.
+//   scenarios-routeview
+//                     needs render/map.js's route classifier. That file could
+//                     be shimmed into test/node.js with a fake `window` and a
+//                     fake `document`, and it was tried; a render file in the
+//                     sim harness, propped up by two stubs, is a worse thing to
+//                     own than one extra page. Here it is the real file, loaded
+//                     by the real index.html, against a rendered board.
+//
+// It must NOT go in tests.html either: that page has no #board, so the suite
+// would SKIP — and a SKIP prints under a PASS banner, which is how a suite goes
+// quietly dead. Being loud about not running is the whole job of this file.
 var TEST_FILES = [
   'test/asserts.js',
   'test/runner.js',
   'test/select-tests.js',
+  // Loaded for its BOARD FIXTURES, not to be run — scenarios-routeview.js
+  // reuses them rather than copying them, which is the right call
+  // (known-issues #9) and the reason this line is not obviously necessary.
+  // Its own assertions run headless in test/node.js; `suiteRoutes` is
+  // deliberately absent from TEST_SUITES below so they do not run twice.
+  'test/scenarios-routes.js',
+  'test/scenarios-routeview.js',
 ];
+
+// Suite entry points to call, in order. Named rather than discovered so a suite
+// that fails to load is a hard error below instead of silently not running.
+var TEST_SUITES = ['suiteSelect', 'suiteRouteView'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');
@@ -115,20 +144,42 @@ frame.addEventListener('load', function () {
       }, Promise.resolve());
     })
     .then(function () {
-      if (typeof win.selectTestsRun !== 'function') {
-        throw new Error('test/select-tests.js loaded but exposed no ' +
-          'selectTestsRun() — did its name change?');
+      // A missing suite is a HARD ERROR, never a quiet skip. The whole failure
+      // mode this page exists to prevent is a suite that stops running and goes
+      // on printing a green banner (known-issues #8, and #22's silent guard).
+      var missing = TEST_SUITES.filter(function (n) {
+        return typeof win[n] !== 'function';
+      });
+      if (missing.length) {
+        throw new Error('these suites loaded but exposed no entry point: ' +
+          missing.join(', ') + ' — did a name change?');
       }
-      var res = win.selectTestsRun();
+
+      win.resetTests();
+      var d = (typeof win.collectData === 'function') ? win.collectData() : {};
+      TEST_SUITES.forEach(function (n) { win[n](d); });
+
+      var summary = win.summarizeTests();
       var text = (typeof win.formatResults === 'function')
         ? win.formatResults()
-        : JSON.stringify(res.summary, null, 2);
-      var fail = res.summary && res.summary.fail;
-      say(text, fail === 0 ? 'ok' : 'bad');
+        : JSON.stringify(summary, null, 2);
+
+      // A SKIP is a failure HERE, whatever it means elsewhere. In test/node.js
+      // skipping is how the harness survives data files that are not authored
+      // yet; on this page every suite's dependencies are loaded by definition,
+      // so a skip can only mean the suite could not find what it needed and
+      // said nothing about it.
+      var bad = summary.fail > 0 || summary.skip > 0;
+      say(text + (summary.skip > 0
+        ? '\n\n!! ' + summary.skip + ' SKIPPED — a skip is a failure on this ' +
+          'page: every dependency is loaded here, so a suite that skipped ' +
+          'could not find something and did not say so.'
+        : ''), bad ? 'bad' : 'ok');
+
       // Machine-readable, so a browser-driving harness can read one value
       // instead of scraping the <pre>.
-      window.UI_TEST_SUMMARY = res.summary;
-      document.title = (fail === 0 ? 'PASS' : 'FAIL') + ' — UI tests';
+      window.UI_TEST_SUMMARY = summary;
+      document.title = (bad ? 'FAIL' : 'PASS') + ' — UI tests';
     })
     .catch(function (e) {
       say('HARNESS ERROR\n\n' + (e && e.stack ? e.stack : String(e)), 'bad');
