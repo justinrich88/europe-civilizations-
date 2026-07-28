@@ -66,43 +66,19 @@ function setSendFraction(f) {
   return v;
 }
 
-// ── send unit types ─────────────────────────────────────────────────────
+// The fraction above is now a DEFAULT rather than the whole answer. The amount
+// can also be decided at the moment of the click — shift = all, alt = half —
+// which is per-commit and leaves nothing behind. That override lives entirely in
+// render/select.js, beside the click that consumes it, because it is not a
+// setting: there is no state here to hold it.
 //
-// "You can select how many units to send but not which types." Same shape as
-// the fraction above and for the same reason: it is a preference about how a
-// command is BUILT, not a fact about the world, so it is app-level UI state and
-// deliberately not in window.GAME.
-//
-// Default is all three on, so a player who never touches these controls gets
-// exactly the behaviour that existed before they were added. Turning the last
-// one off is refused rather than allowed: an empty volley is not a thing anyone
-// means, and letting the control reach a state where every send is silently
-// rejected as 'too-few-units' would be a worse bug than the one being fixed.
-
-var _sendTypes = { infantry: true, artillery: true, armour: true };
-
-// Array of enabled type ids, in BAL.UNIT_ORDER, for applyCommand's cmd.types.
-// Returns null when all three are on — "no filter" and "every filter" mean the
-// same volley, and null is the form the sim already treats as "unchanged".
-function sendTypes() {
-  const order = (typeof BAL !== 'undefined' && BAL && BAL.UNIT_ORDER)
-    ? BAL.UNIT_ORDER : ['infantry', 'artillery', 'armour'];
-  const on = order.filter(function (t) { return _sendTypes[t]; });
-  return (on.length === order.length) ? null : on;
-}
-
-function sendTypeEnabled(t) {
-  return !!_sendTypes[t];
-}
-
-function toggleSendType(t) {
-  if (!(t in _sendTypes)) return false;
-  const on = Object.keys(_sendTypes).filter(function (k) { return _sendTypes[k]; });
-  if (_sendTypes[t] && on.length === 1) return true;   // never all-off
-  _sendTypes[t] = !_sendTypes[t];
-  syncTypeButtons();
-  return _sendTypes[t];
-}
+// The INF / ART / ARM type filter that used to live here (`_sendTypes`,
+// `sendTypes()`, `sendTypeEnabled()`, `toggleSendType()`, `syncTypeButtons()`)
+// was deleted 2026-07 on the player's instruction. Choosing sources already
+// chooses unit types, so the toggles bought only "send this city's infantry but
+// leave its guns" in exchange for a permanent mode the player had to remember.
+// `cmd.types` and `_cmdFilterTypes()` remain in sim/commands.js — optional
+// plumbing, covered by tests, and nothing in the UI sets it any more.
 
 // ── chrome wiring ───────────────────────────────────────────────────────
 //
@@ -131,17 +107,6 @@ function syncFractionButtons(fraction) {
   }
 }
 
-// Same rule as syncFractionButtons: the JS value is authoritative and the
-// classes are a projection of it. Nothing reads button state back.
-function syncTypeButtons() {
-  const wrap = byId('send-control');
-  if (!wrap) return;
-  const btns = wrap.querySelectorAll('[data-unit-type]');
-  for (const b of btns) {
-    b.classList.toggle('is-active', !!_sendTypes[b.getAttribute('data-unit-type')]);
-  }
-}
-
 // One delegated listener per group rather than one per button: the markup in
 // index.html is owned by nobody in particular right now and buttons may be
 // added, so delegation survives edits that per-button binding would not.
@@ -164,18 +129,13 @@ function wireSendControls() {
     console.warn('[app/main] no #send-control in the document');
     return;
   }
-  // ONE listener for both control groups inside #send-control, matching the
-  // pattern already here rather than adding a second wiring style: the fraction
-  // and the type filter are the same kind of setting and live in the same box.
+  // One delegated listener, matching wireSpeedControls(). The fraction is the
+  // only control left in this box — the type toggles it used to share the
+  // listener with are gone.
   wrap.addEventListener('click', function (ev) {
     const frac = ev.target.closest('[data-fraction]');
     if (frac && wrap.contains(frac)) {
       setSendFraction(Number(frac.getAttribute('data-fraction')));
-      return;
-    }
-    const type = ev.target.closest('[data-unit-type]');
-    if (type && wrap.contains(type)) {
-      toggleSendType(type.getAttribute('data-unit-type'));
     }
   });
 }
@@ -283,7 +243,6 @@ function boot() {
   wireSendControls();
   wireKeys();
   syncFractionButtons(_sendFraction);
-  syncTypeButtons();
 
   // The game opens paused (core/state.js sets paused:true) so the player can
   // read the board before anything moves. setSpeed(0) makes the loop, the state
@@ -312,10 +271,6 @@ function boot() {
 // Global exports — no modules anywhere in this project.
 window.sendFraction = sendFraction;
 window.setSendFraction = setSendFraction;
-window.sendTypes = sendTypes;
-window.sendTypeEnabled = sendTypeEnabled;
-window.toggleSendType = toggleSendType;
-window.syncTypeButtons = syncTypeButtons;
 window.syncSpeedButtons = syncSpeedButtons;
 window.syncFractionButtons = syncFractionButtons;
 window.boot = boot;

@@ -429,3 +429,113 @@ is a two-second guard worth running at the top of any browser verification.
 
 **Verify the verifier.** Any browser check that cannot fail is not a check —
 before trusting a clean pass, confirm the page is running the code under test.
+
+---
+
+## 17. "Screen-constant" thresholds that were only constant under zoom
+
+Three separate authors, in three files, wrote a value meant to be a fixed
+number of SCREEN PIXELS, authored it in viewBox units, and converted it with
+`cameraScale()`. That conversion is half the transform:
+
+```
+pxPerUnit = (boardWidth / 1000) x cameraScale
+```
+
+Dividing by scale alone holds a value constant under **zoom** while letting it
+scale with the **window**. Every one of them was calibrated on a wide dev
+window and silently shrank on the window the game is actually played at.
+
+| where | authored as | intended | actual at an 800px window |
+|---|---|---|---|
+| `SEL_STATION_PICK_RADIUS` | 14 units | ~16 px | **7.2 px** |
+| `SEL_CLICK_SLOP` | 4 units | ~5 px | **2.3 px** |
+| order marker glyph | 9.4 units | legible | **4.9 px**, against an 8.8px garrison number |
+
+None of them failed a test. Hit-testing still measured 108/108, because the
+sweep clicks the exact centre of every station — a shrunken pick radius only
+matters when the player misses, which no automated sweep ever does. The pick
+radius had been added specifically to fix a player-reported miss-click, and it
+shipped at 45% strength into the complaint it was written to answer.
+
+**The tell is a unit mismatch in the comment.** Any constant whose comment says
+"screen pixels" but whose value is in viewBox units is suspect. So is any
+divisor that is `cameraScale()` alone.
+
+**The fix is to read the real matrix**, which every hit test in `select.js`
+already inverts:
+
+```js
+function _selPxPerUnit() {
+  const m = byId('board').getScreenCTM();
+  return (m && m.a > 0) ? m.a : 1;   // constant under BOTH zoom and window size
+}
+```
+
+Author the constant in screen pixels, convert at the point of use, and put the
+reference board width in the comment so a future reader can check the intent
+against the number.
+
+**Measure at the window the game is played at, not the one you develop on.**
+Two of these three were found by resizing to 800px and looking; the third was
+found only by screenshotting and failing to locate the glyph at all. A sweep
+that clicks dead centre cannot find any of them.
+
+---
+
+## 18. A readout can answer a different question from the one on screen and never look wrong
+
+`standingOrderSend(state, sid)` returns a feed city's **willingness** — how much
+it wants to ship. When the mechanic shipped, that *was* what left, so the rail
+printed it and the empire header summed it. Then the headroom ceiling landed
+("a rally is a mustering point, not a warehouse") and a destination gained a
+veto over every stream aimed at it. The two
+numbers silently stopped being the same number, and nothing in the codebase
+noticed, because *neither one had changed*.
+
+Measured live, 7 feeders into Leipzig Works at 28.5 / 28:
+
+```
+rail    "next sweep — 5.6 units · 12% of the surplus above the keep floor"
+header  "20.1 units leave on the next sweep, one every 25 ticks"
+reality  0 sends. 0 units. Forever.
+```
+
+It is worse than a wrong number. A wrong number is eventually noticed; this one
+is *plausible*, *stable*, and *recomputed every frame*, and the fix it hides —
+spend that stack, or set a rally with room — is invisible. The player watches a
+promise that never happens.
+
+Three rules, and the third is the one that generalises:
+
+1. **A panel must show what will HAPPEN, not what one side WANTS.** Any quantity
+   with two ends needs the far end in it. "Willing to send" is a fine thing to
+   compute and a terrible thing to print.
+2. **Sharing a helper is not sharing a decision.** Both the sweep and the rail
+   called into `sim/movement.js`, which felt like compliance with "never
+   reimplement a sim fact" (#9) — but the sweep took the *decision* in its own
+   loop and the rail read a *fragment*. The fix is that the decision itself is
+   one function (`_ordPlanPower`), the sweep does nothing but execute it and the
+   readout does nothing but report it. Then agreement is structural rather than
+   a property of two files being edited on the same afternoon.
+3. **A number is only proven by being compared against the event it predicts.**
+   The new test takes the prediction for every feed station on every sweep tick
+   of a 1400-tick run and compares it against what `applyCommand` actually
+   shipped, plus what the source actually paid. Nine mutations were then run
+   against it (`scratchpad/break_next.py`); the one that matters is *"the sweep
+   drifts from the plan by 10%"*, which no assertion in the old suite could see
+   and which this one catches on the first sweep.
+
+**Cost, since it decided the shape of the API.** The honest answer needs the
+destination's headroom, which needs the multi-source search, which is ~80us on
+the 108-station board against 0.2us for the willingness. One call per frame is
+0.5% of a frame and free; a *loop* over feed cities is not, so
+`standingOrderPlan(state, pid)` answers for a whole power in one search and the
+two renderers that want the set call that. Same planner, so still one authority.
+
+Also worth recording: the first version of the map's blocked-feeder bar was
+**white on white** — it inherited `fill: var(--garrison)` from `.station-order`
+and painted an invisible bar across a white arrow. Found by
+`getComputedStyle(bar).fill` returning `rgb(255,255,255)`, i.e. #15's two-line
+diagnostic, not by looking at the screen. At 7.8 on-screen pixels, "I can't see
+it" and "it isn't there" look identical.

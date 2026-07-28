@@ -738,7 +738,84 @@ const BAL = {
 
 
   // ===================================================================
-  // 11. HEADLESS BALANCE HARNESS  (00-vision.md §11)
+  // 11. STANDING ORDERS  (00-vision.md §8, scoped amendment)
+  //
+  // One pipe with two ends and an off switch, set per station:
+  //
+  //   hold   (default)  accumulate; never auto-sends. Today's behaviour.
+  //   rally             a sink; nearby feed stations stream into it.
+  //   feed              a source; ships surplus to the nearest rally, or with
+  //                     no rally set, to the nearest owned station on the front.
+  //
+  // §8 says "the board never plays itself". This is the one amendment to that
+  // sentence and the SCOPE is the amendment: a standing order moves units only
+  // between stations the player already holds. It never targets ground its
+  // owner does not hold and never initiates combat — every attack in this game
+  // is still a deliberate one-shot click. sim/movement.js enforces it in two
+  // places (applyCommand refuses a standing send at unheld ground; a standing
+  // wave stands down rather than fighting), and state.orderStats.fights is the
+  // tripwire that says so out loud.
+  // ===================================================================
+
+  ORDERS: {
+
+    // Ticks between standing-order sweeps. This is the mechanic's clock and it
+    // has to sit sensibly among the four that already exist:
+    //
+    //   CONNECTIVITY_INTERVAL       10   whole-board flood
+    //   ORDERS_INTERVAL             25   <- this
+    //   AI.ACTION_INTERVAL_TICKS    40   one AI order per power
+    //   CAPITULATE_CHECK_INTERVAL   50   whole-board scan
+    //
+    // A whole-board sweep every tick is waste for the same reason capitulation
+    // is not checked every tick — nothing here is time-critical. 25 ticks =
+    // 2.5 sim-seconds, so a feeding city ships about 1.6 times per AI order:
+    // fast enough that the stream reads as continuous rather than as a convoy
+    // schedule, slow enough that a power with twenty feed cities cannot
+    // out-click the AI's own budget. It is deliberately NOT a divisor of
+    // AI.ACTION_INTERVAL_TICKS, so the two cadences do not phase-lock into one
+    // enormous tick every 200.
+    INTERVAL: 25,
+
+    // Share of a feeding station's SURPLUS (units above the keep floor) that
+    // leaves on each sweep. The designer chose a small constant trickle over
+    // batching, so this number is what "small" means.
+    //
+    // Against SEND_FRACTION_DEFAULT (0.75) — a manual volley — 0.12 per sweep
+    // is 1/6 of one click, and at INTERVAL 25 it is ~0.5% of surplus per tick.
+    // A feed city bleeds e-folding-slowly toward its floor: after 100 ticks it
+    // has shipped 1-(0.88^4) = 40% of its surplus, after 300 ticks 78%. That
+    // is the right order of magnitude against LANDING_TICKS (120) and a
+    // decisive 2:1 battle (250 ticks): a front fed by three cities gains
+    // materially over the span of one battle, but no single sweep is a volley
+    // and losing one wave is never losing an army.
+    SEND_FRACTION: 0.12,
+
+    // A feeding station never sends below this fraction of its CAPACITY, so it
+    // can still defend itself and the rear never empties.
+    //
+    // Same rule and same number as BAL.AI.HOME_GARRISON_FLOOR (0.25), and
+    // enforced the same way — as a cap on how much may leave, never as a gate
+    // that can never open (see the block comment in ai/ai.js: growth stops at
+    // GROWTH_CAP_EPSILON, so a station is never quite full and a literal "can
+    // this source afford the full fraction?" test rejects everything forever).
+    // It is a SEPARATE constant because that one is AI personality tuning and
+    // this is a player-facing mechanic: tuning how brave the AI is must not
+    // silently change what the player's own cities do.
+    KEEP_FLOOR: 0.25,
+
+    // Smallest stream worth sending. MIN_SEND_UNITS (0.5) is the floor for a
+    // deliberate click; a standing order fires unattended every 25 ticks
+    // forever, so its floor is higher — 2.0 keeps a nearly-drained feed city
+    // from spawning an endless dribble of 0.6-unit waves that clutter the map,
+    // cost a route search each, and can never matter. Below it the sweep is a
+    // no-op for that station and it simply keeps growing until it can pay.
+    MIN_SEND: 2.0,
+  },
+
+
+  // ===================================================================
+  // 12. HEADLESS BALANCE HARNESS  (00-vision.md §11)
   //
   // Three numbers are the dashboard: win-rate spread across the seven
   // powers, mean game length, mean time-to-first-station-flip.

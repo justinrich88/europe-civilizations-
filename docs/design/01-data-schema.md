@@ -165,14 +165,25 @@ Distinct from the static data above. This is the only thing that mutates.
   ownerEpoch: 0,
   powers:   { ger: { alive:true, relations:{fra:-40,…}, startTerritories:12 } },
   stations: { ber: { owner:'ger', units:{infantry:0,artillery:0,armour:0},
-                     connected:true, growthMul:1.0 } },
+                     connected:true, growthMul:1.0,
+                     order:'hold' } },                        // standing order
   waves:    [ { id, owner, from, to, path:['ber','lei'], hop:0,
                 progress:0.0, units:{…},
+                standing:true,                                // standing orders only
                 landing:{ ashore:0, total:0, per:{…} } } ],   // beachheads only
   battles:  { ber: { startedTick, variance, wobble } },
+  orderStats: { sweeps, sends, unitsSent, standDowns, unitsLost, fights },
   log:      [],
 }
 ```
+
+`station.order` is `'hold' | 'rally' | 'feed'` and defaults to `'hold'` — see
+"Standing orders" below. It lives here rather than in `data/stations.js` because
+it is **mutable player intent**, and `data/` is static geometry.
+
+`wave.standing` is present **only on a wave created by a standing order**, and
+only ever as `true`. An ordinary send produces a wave with no such property, so
+a `send` command that predates the mechanic still yields a byte-identical wave.
 
 Hard rules:
 
@@ -186,7 +197,9 @@ Hard rules:
 All mutation flows through one entry point:
 
 ```js
-applyCommand(state, { type:'send', owner, sources:[…], target, fraction })
+applyCommand(state, { type:'send',  owner, sources:[…], target, fraction,
+                      types?, standing? })
+applyCommand(state, { type:'order', owner, stations:[…], order })
 ```
 
 which is what makes headless testing and replay free.
@@ -209,12 +222,17 @@ which is what makes headless testing and replay free.
 | # | Global | File | Responsibility |
 |---|---|---|---|
 | 1 | `growthTick(state)` | `sim/growth.js` | Logistic growth, multiplier reach scaled by control tier, disconnection decay |
-| 2 | `movementTick(state)` | `sim/movement.js` | Advance waves along links; resolve arrivals |
-| 3 | `combatTick(state)` | `sim/combat.js` | Square-law attrition wherever hostile forces share a station; flip stations |
-| 4 | `relationsTick(state)` | `sim/relations.js` | Balance-of-power drift (throttled, not every tick) |
-| 5 | `victoryTick(state)` | `sim/victory.js` | Capitulation and win detection |
+| 2 | `ordersTick(state)` | `sim/movement.js` | Standing orders: `feed` stations ship surplus to a `rally` (throttled, not every tick) |
+| 3 | `movementTick(state)` | `sim/movement.js` | Advance waves along links; resolve arrivals |
+| 4 | `combatTick(state)` | `sim/combat.js` | Square-law attrition wherever hostile forces share a station; flip stations |
+| 5 | `relationsTick(state)` | `sim/relations.js` | Balance-of-power drift (throttled, not every tick) |
+| 6 | `victoryTick(state)` | `sim/victory.js` | Capitulation and win detection |
 
 **Why this order.** Growth before movement so a station's send is based on units that already grew this tick. Movement before combat so arrivals fight on the tick they land (`progress >= 1` resolves immediately, never deferred). Combat before victory so a capital captured this tick is seen this tick.
+
+**Standing orders sit between growth and movement**, and both halves are load-bearing. After growth, so a feeding city ships units it actually has this tick rather than last tick's. Before movement, so a stream created this tick starts marching this tick — placed after movement, every standing wave idles one tick before its first step, which no end-state assertion would notice and which makes `launchTick` a permanent one-tick lie to any renderer drawing an ETA from it.
+
+`ordersTick` lives in `sim/movement.js`, not in a file of its own: every primitive it needs (the ownership-aware search, the link index, `_moveDeposit`) is already there, and a new `sim/orders.js` would also need a `<script>` tag in `index.html` — a phase that silently fails to load in the browser while passing every headless test is the exact shape of known-issues #9 and #16.
 
 Helper contracts other files may rely on:
 
@@ -224,7 +242,13 @@ Helper contracts other files may rely on:
 | `growthMultiplier(state, sid)` | `sim/growth.js` | Product of all multiplier effects reaching this station, capped at `BAL.GROWTH_MUL_CAP` |
 | `routeBetween(fromSid, toSid)` | `sim/movement.js` | **Geography.** Shortest path as an array of station ids, `null` if unreachable. Pure — depends only on `LINKS`, and must stay that way. Distance heuristics read it. |
 | `routeFor(state, pid, fromSid, toSid)` | `sim/movement.js` | **Legality.** The path a wave of `pid` may actually walk on this board, or `null` when there is none. Same shape and tie-break as `routeBetween`. |
-| `setStationOwner(state, sid, owner)` | `core/state.js` | Change who holds a station and bump `state.ownerEpoch`. The only supported way. Returns `true` if anything changed. |
+| `setStationOwner(state, sid, owner)` | `core/state.js` | Change who holds a station and bump `state.ownerEpoch`. The only supported way. Returns `true` if anything changed. **Also resets `station.order` to `'hold'`** — see "Standing orders". |
+| `setStationOrder(state, sid, order)` | `core/state.js` | Set a station's standing order after validating it. The only supported way; `applyCommand({type:'order'})` is what callers use. |
+| `stationOrder(state, sid)` | `core/state.js` | A station's order, defaulting to `'hold'` for a state built before the field existed. |
+| `ordersTick(state)` | `sim/movement.js` | Phase 2. Throttled to `BAL.ORDERS.INTERVAL`. |
+| `standingOrderSend(state, sid)` | `sim/movement.js` | The **source's willingness**: units this station wants to ship, before the destination gets a say. Pure. Not what a readout should show — see the row below. |
+| `standingOrderNext(state, sid)` | `sim/movement.js` | **What actually leaves** on the next sweep: `{ units, target, blocked }`. `units` is `0` whenever anything blocks it, `target` is the station it is aimed at (kept even when blocked, so a panel can name the rally that is full) and `blocked` is `null` when it ships or one of `no-order` / `no-seed` / `destination-full` / `unreachable` / `already-there` / `at-keep-floor` / `below-min-send`. Pure, uncached, ~80µs on the 108-station board — one call per frame is free. **This is the number a readout shows.** |
+| `standingOrderPlan(state, pid)` | `sim/movement.js` | The same answer for **every** feed city one power holds, in one search: `{ sid: { units, target, blocked } }`. Same planner, same ~80µs whether the power feeds one city or forty. Anything wanting the whole set — the empire header, the map's blocked-feeder marks — calls this, never `standingOrderNext` in a loop. |
 
 ### The traversal rule
 
@@ -250,6 +274,30 @@ Nothing in `sim/` may touch `document`, call `Math.random`, or read `Date.now`. 
 | `per` | Units of each type committed per tick, fixed at the start so echelons are a constant fraction of *original* strength and the force lands in its original mix |
 
 `w.units` continues to hold the units **still at sea**, so nothing else in the sim needs a new place to look for a wave's strength. Those units are not in `station.attackers` and therefore cannot be hit — that is the whole mechanic, and it needs no combat code. The merge-or-attack decision is re-taken **per echelon**, so a station that flips to the landing power mid-landing absorbs the remainder as reinforcements (consistent with `WAVE_REROUTE_ON_LOSS: false`), while one that flips to a third power keeps receiving attackers. The final echelon flushes whatever is left rather than trickling a sub-`MIN_SEND_UNITS` residue. Renderers may read `landing` to draw the beachhead; nothing in `sim/` reads it except `sim/movement.js`.
+
+### Standing orders
+
+One pipe with two ends and an off switch, set per station and stored as `state.stations[sid].order`. Constants live in `BAL.ORDERS` (`data/tuning.js` §11).
+
+| order | role | behaviour |
+|---|---|---|
+| `hold` *(default)* | off | Accumulate. Never auto-sends. Exactly the behaviour the game had before this existed. |
+| `rally` | sink | Nearby `feed` stations stream into it. |
+| `feed` | source | Ships a small share of its surplus, on a throttle, to the nearest `rally`; with no rally set, to the nearest owned station **on the front**. |
+
+**`00-vision.md` §8 says "the board never plays itself". This is the one amendment to that sentence, and the scope *is* the amendment.**
+
+- **Logistics can be automated; commitment cannot.** A standing order moves units **only between stations their owner already holds**. It never attacks, never targets ground its owner does not hold, and never initiates combat. Every attack in the game remains a deliberate one-shot click. Enforced in two places: `applyCommand` fails a `standing` send whose target is not held by its owner (`'standing-target-not-owned'`), and `_moveDeposit` counts any standing deposit onto unheld ground in `state.orderStats.fights` — **a tripwire that must stay 0 forever** — rather than committing it.
+- **Standing waves are not committed waves.** `BAL.WAVE_REROUTE_ON_LOSS` is `false` because a march is a committed decision, but a standing wave is not a decision anyone made about *this* march. If its destination is no longer held by its owner, or its path would take it into ground its owner does not hold, it **stands down**: it stops at the last station on its path its owner still holds and merges into that garrison. Without this, `_moveIntercepts` would feed a steady trickle into a battle a few units at a time — *defeat in detail*, the mistake §8 names as the defining one, committed automatically on the player's behalf. With the whole traversed prefix lost, the stream is dissolved and counted in `orderStats.unitsLost`; marching on would mean fighting and teleporting it elsewhere would be a bigger lie.
+- **A rally is a mustering point, not a warehouse.** Capacity is a real ceiling everywhere else in this game — `growthTick` bleeds anything over it at `OVERSTACK_DECAY`, and §2 says a full station has stopped paying dividends — so **automation obeys the same ceiling the player does.** A seed with no headroom is not a valid destination *for that sweep* (so a further rally with room beats a nearer one without); with no seed anywhere having room, the feed station is a no-op and keeps growing; and a send is **clamped to the destination's remaining headroom**, counting everything already in the air to it, so several feeders in one sweep cannot collectively bust the ceiling. Shipped without this rule and measured live: 7 feeders into a 28-capacity rally settle near **556 units — destroying 100% of everything fed to them, forever**, hidden inside a rising empire total because the drained feeders drop off the logistic ceiling and regrow. Residual: a stream sized against today's headroom lands after a march and the destination grows in the meantime, so a rally can finish ~5% over and bleed back down. That is growth's doing, not the send's; the *sizing* invariant is exact and is asserted as such.
+- **The front** is an owned station **adjacent to any station its owner does not hold** — neutral *or* hostile. With the capital-only opening 101 of 108 stations are neutral, so an enemy-only definition would be empty for most of a game and the fallback would silently never fire.
+- **An unreachable rally is a no-op, not an error.** Routing is ownership-aware and a rally can be cut off between one sweep and the next; a feed station with nowhere legal to ship simply keeps its units.
+- **An order does not survive a capture.** `setStationOwner` resets `order` to `'hold'`, so a captured `feed` cannot start draining the front-line city its new owner just paid for. Done inside the setter so no capture path can forget.
+- **The phase is throttled** to `BAL.ORDERS.INTERVAL` (25 ticks) for the same reason `CAPITULATE_CHECK_INTERVAL` exists: a whole-board scan every tick is waste and nothing here is time-critical.
+- **One planner decides, two callers read it.** `_ordPlanPower(state, pid)` is the whole decision — which seeds are open, which is nearest, the keep floor, the headroom clamp and the running per-sweep total. `_ordSweepPower` does nothing but issue what it says, and `standingOrderNext` does nothing but report it. That is *why* the readout cannot drift from the sweep, and it is asserted rather than assumed: `standingOrderNext predicts every sweep EXACTLY` compares the prediction against what `applyCommand` really shipped, per feed station, on every sweep of a 1400-tick run, with vacuity guards requiring both blocked and unblocked cases to have occurred.
+- **A blocked feeder is visible without clicking it.** On the map, the order arrow is struck through with a bar in the halo colour and dimmed (`.station-ordergroup.is-blocked`, `MAP_ORDER_BLOCK_D`). No channel was invented for this: it modulates the order marker itself, which is already the order channel, and a battle still takes the slot outright. The read is throttled on **sim ticks**, so a paused board and a board with no `feed` cities both cost nothing.
+
+`test/runner.js` → `sim / standing orders` holds all of this. Several tests carry an explicit control (a manual wave in the same race *must* fight; a floor that never binds fails the test; the willingness must be non-zero on exactly the stations the new number says ship nothing) because a test that passes against broken code is worse than no test — known-issues #8.
 
 If any of this needs to change, change it *here first*, then update `simFns()` in `test/runner.js`, then the sim.
 
@@ -293,6 +341,20 @@ The preview **must** call these rather than estimating, or the ETAs shown before
 **Input funnels to `applyCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls `applyCommand(GAME, cmd)` — the same entry point the AI uses. There is no second path by which the board changes, which is what keeps replay and headless testing free.
 
 Nothing in `render/` or `app/` may mutate state directly. Read freely, write only through `applyCommand`.
+
+**What a renderer needs for standing orders.** Four reads and one write, no more:
+
+| | |
+|---|---|
+| `state.stations[sid].order` | `'hold' \| 'rally' \| 'feed'` — what to draw on the node. `stationOrder(state, sid)` is the safe accessor. |
+| `wave.standing === true` | This stack is a standing stream, not a committed march. Absent on every other wave. Draw it thinner/dimmer than a volley — the visual difference is the player's only cue that a trail is automatic. |
+| `standingOrderNext(state, sid)` | `{ units, target, blocked }` — what **actually** leaves on the next sweep, where it goes, and why it does not. The number a panel shows for **one** station. ~80µs; one call per frame is free. |
+| `standingOrderPlan(state, pid)` | The same, for every feed city a power holds, in one search. **Anything wanting more than one station calls this** — the empire header and the map's blocked-feeder marks both do. A loop of `standingOrderNext` repeats the search per city. |
+| `standingOrderSend(state, sid)` | Units this station is **willing** to ship, `0` if none. The source's side only, and **not** what to print: the two stopped being the same number when the headroom ceiling landed, and a panel showing this one advertises a stream a full rally is taking none of. Quote it as the *fraction rule*, never as a forecast. |
+| `state.orderStats` | `{ sweeps, sends, unitsSent, standDowns, unitsLost, fights }`. `fights` is a tripwire that must always read 0. |
+| `applyCommand(GAME, { type:'order', owner:PLAYER, stations:selectedSources(), order:'feed' })` | The **only** way to set an order. Per-station validation: an unowned station in the list is rejected on its own (`'not-owned'`) and the rest still apply. |
+
+An order set on a station is cleared when it changes hands, so a panel must read `order` live rather than caching it.
 
 ---
 

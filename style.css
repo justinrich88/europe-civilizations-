@@ -1146,6 +1146,45 @@ html, body {
   line-height: 1.45;
   color: var(--ink-faint);
 }
+
+/* --- the other modifiers: supply / strength / march ----------------
+   Same grammar as the growth breakdown above, deliberately: a labelled row
+   carries the number and `.rdo-farm` lines under it carry where it came from.
+   Reusing .rdo-farm rather than inventing a second source style is the point —
+   "×1.80 farm reach" and "+18.0 fortification" should read as the same kind of
+   statement, because they are.
+
+   These sections live inside .rail-body directly (they have no .rdo-mods
+   wrapper), so the indent/rule that .rdo-mods supplies is not present and the
+   rows sit flush under the section title, which is already a rule. */
+.rdo-srcs:empty { display: none; }
+
+/* The section headline — the number the rows below it decompose. Full ink and
+   a touch larger, so the eye lands on "46.2 power" before the working. */
+.rdo-mod.is-head { margin-top: 0; }
+.rdo-mod.is-head .rdo-k { color: var(--ink-dim); }
+.rdo-mod.is-head .rdo-v { font-size: 12px; color: var(--ink); }
+
+/* ADDITIVE, and drawn as such. The station defense block is a fixed number of
+   troops added to the defence, never a factor applied to it (sim/combat.js,
+   DEFENSE_BONUS_POWER) — so it gets the garrison colour that every other
+   headcount on this panel uses, and never the dim multiplier grey. If this rule
+   ever makes a "×" appear in this row, the renderer is lying. */
+.rdo-mod.is-add .rdo-v { color: var(--garrison); }
+
+/* Cut off is the one modifier that is an emergency. */
+.rdo-mod.is-cut .rdo-v { color: var(--warn); }
+
+/* Values in these rows can carry a word ("power", "days", "8.2 / 40"), which
+   the growth rows never do. `margin-left: auto` alone would let a long value
+   push the label out of the column, so the label is allowed to shrink and the
+   value is allowed to wrap rather than overflow the 284px rail. */
+.rdo-mod .rdo-k { min-width: 0; overflow-wrap: anywhere; }
+.rdo-mod .rdo-v { overflow-wrap: anywhere; }
+
+/* The persistent empire header. No margin above the name — it is the first
+   thing in the rail and the section padding is already the gap. */
+.rdo-empire-head { margin-top: 0; margin-bottom: 5px; }
 /* readout:end */
 
 /* --- victory screen (render/victory.js) ---------------------------- */
@@ -1784,6 +1823,131 @@ html, body {
 }
 /* battle:end */
 
+/* combat-alert: ─── "a fight is happening HERE" (render/map.js) ───────────
+   Same subsystem as the battle block above, deliberately separate: the block
+   above answers *who is winning* and is read once you have found the fight.
+   This one is how you find it.
+
+   Two achromatic ripples expanding out of a fighting node, half a cycle apart.
+   The reasoning is in full in the `combat alert` comment in render/map.js; the
+   three things that constrain the CSS specifically:
+
+   1. NOTHING HERE TOUCHES THE MOMENTUM RING. The amber pulse this replaces
+      animated stroke-width on `.station-battle` itself, which made the two arc
+      LENGTHS — the only thing that ring exists to communicate — hard to
+      compare. These are separate circles starting 2.5 units outside it, and
+      `.station-battle` / `.station-mom` keep a dead-constant 3px stroke.
+
+   2. ACHROMATIC. Not `--warn`, which is the attack-verb colour down in the
+      `send:` block, and not red, which is `gbr`'s ownership hue (#c9524a).
+      Colour carries ownership only (§8); white claims no hue at all, exactly as
+      the fullness ring does, and is the highest-contrast mark available against
+      --bg.
+
+   3. pointer-events: none, twice over — here and on the parent group. This
+      layer sits inside #g-stations over the board, and at full extent a ripple
+      reaches past a neighbouring node. select.js hit-tests with
+      closest('[data-station]'), so a hit here would resolve to the WRONG
+      station and silently commit the attack somewhere else. Fourth time this
+      hazard has been written down on this project. */
+
+.station-alert {
+  fill: none;
+  fill-opacity: 0;
+  stroke: #ffffff;
+  stroke-width: 3.4;
+  /* The animation supplies this; the 0 is what a browser with animations
+     disabled falls back to, and an invisible ring is a better failure than a
+     permanent white halo on every fighting node. The reduced-motion block
+     below is the real fallback. */
+  stroke-opacity: 0;
+  pointer-events: none;
+
+  /* Load-bearing. A CSS transform on an SVG element defaults to
+     transform-box: view-box — the origin is the corner of the 1000x700 board,
+     not the node — so scale() without this flings the ripple across the map
+     instead of expanding it in place. fill-box on a circle centred at 0,0 puts
+     the origin back at the node's own centre, which is also the anchor the
+     station <g>'s counter-scale uses. */
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+
+  /* TWO animations, not one, and this is not tidiness — it is the difference
+     between a signal that survives a still frame and one that does not.
+     Position wants ease-out (the ripple leaves fast and settles, which reads as
+     an impact rather than as a throb); brightness wants to hold near its peak
+     and then drop (so the ring is still bright when it is halfway out). One
+     animation means one timing function for both, and the first version had
+     exactly that: the eased curve dragged the opacity down with the radius, so
+     by 36% of the cycle the ring was at 87% extent and half faded — measured on
+     the board, and the worst-case still frame was visibly weak. Split, each
+     channel gets the curve it needs.
+
+     Infinite, but only while the node is fighting: .station-battlegroup is
+     display:none otherwise, and a display:none element runs no animation at
+     all, so a peaceful board pays nothing for either of these. */
+  animation: station-alert-ping 1100ms ease-out infinite,
+             station-alert-fade 1100ms linear infinite;
+}
+
+/* Half a cycle behind its twin. A negative delay starts it already mid-flight
+   on the first frame rather than after a beat of nothing. This is what makes
+   the signal survive a STILL frame: the two are never faint at the same time,
+   so the brighter of the pair never drops below ~0.48 stroke-opacity, and a
+   screenshot — or a 200ms glance — always catches one of them. */
+.station-alert.is-late { animation-delay: -550ms; }
+
+/* --alert-k is written inline on .station-battlegroup by render/map.js: the
+   travel distance is the size of the fight, so it is per-station data and
+   cannot live in the sheet. The fallback covers the first frame of a fight,
+   before the tick-gated update has run. */
+@keyframes station-alert-ping {
+  from { transform: scale(1); }
+  to   { transform: scale(var(--alert-k, 1.4)); }
+}
+
+/* The brightness curve, shaped by keyframe placement rather than by an easing
+   function so the numbers below are the numbers that get painted. It holds near
+   full for the first third and is still at 0.60 at the half-cycle, which is the
+   worst case for the staggered pair: `.is-late` is half a cycle behind, so the
+   dimmest either of them can be while the other is dimmest too is f(0.5).
+   That 0.60 is what makes a fight legible in a SCREENSHOT, not just in motion.
+
+   stroke-width is walked back down alongside it because scale() multiplies the
+   stroke too — without that the ripple would get FATTER as it expanded, which
+   reads as blur rather than as distance. */
+@keyframes station-alert-fade {
+  0%   { stroke-opacity: 0.95; stroke-width: 3.6; }
+  30%  { stroke-opacity: 0.86; stroke-width: 3.2; }
+  62%  { stroke-opacity: 0.44; stroke-width: 2.0; }
+  100% { stroke-opacity: 0;    stroke-width: 0.9; }
+}
+
+/* No motion allowed: fall back to ONE static halo just outside the momentum
+   ring. It is a weaker signal than the ripple and it is meant to be — the point
+   is that a fighting node still carries a mark a peaceful node does not, and
+   that the mark is still not a hue. The second ripple is removed rather than
+   left stacked, or the two would sit exactly on top of each other and read as
+   one over-heavy ring. */
+@media (prefers-reduced-motion: reduce) {
+  .station-alert {
+    animation: none;
+    stroke-opacity: 0.75;
+    stroke-width: 2.6;
+    /* Parked at 45% of the travel it would have flown, so it reads as a
+       SEPARATE ring rather than fusing with the momentum ring 2.5 units
+       inside it — measured: at rest they very nearly touch. This also keeps
+       the size-of-the-fight channel working without motion, since --alert-k
+       is still the fight's amplitude. An invalid calc() here would simply
+       drop the transform and leave the halo at rest, which is the previous
+       behaviour, so the failure mode is a weaker signal and never a broken
+       one. */
+    transform: scale(calc(1 + (var(--alert-k, 1.4) - 1) * 0.45));
+  }
+  .station-alert.is-late { display: none; }
+}
+/* combat-alert:end */
+
 /* send: ─── gesture hint + routed attack preview (render/select.js) ────────
    Owned wholly by the selection/preview work. Appended last on purpose: the
    older `.sel-*` rules further up this file are not mine to edit, and equal
@@ -1799,41 +1963,82 @@ html, body {
    pointer events eats the click that commits an attack and produces NO error at
    all, and that has already happened twice on this project. */
 
+/* THE HINT MUST SURVIVE AT 800px.
+   It used to `display: none` below 1000px, and the player's window is 800 —
+   so the single line that teaches right-click reinforce did not exist for the
+   person who needed it. Nothing else on screen carries that information, or the
+   three commit-time modifiers added beside it.
+
+   The fix is a ROW, not a smaller font and not fewer words. Deleting
+   INF · ART · ARM freed ~156px of the send control, which is enough for one more
+   phrase and nowhere near enough for six: at 800px the bar's other tenants (send
+   control 202px, seven power chips 383px, padding and gaps 82px) leave ~133px,
+   and the ticker is already squeezed to 15px there and showing nothing.
+
+   So the hint always takes a line of its own, below the controls. Measured, this
+   costs ZERO board height at every width from 800 to 1500 — the controls row is
+   27px and the hint 14px, and 5 + 27 + 1 + 14 + 5 = 52 is exactly the bar height
+   that was already reserved. The bar looks the same size and now says six times
+   as much.
+
+   The earlier attempt kept the hint inline and tiered items away with media
+   queries. It shipped a measured 107px overflow at 1250px: a four-phrase hint is
+   390px and the shared row only has ~283px to give once the ticker claims its
+   300px floor. A row of its own has no such arithmetic to get wrong. */
 .send-hint {
   display: flex;
   align-items: center;
-  gap: 12px;
+  /* Wraps only as a last resort — below ~700px, outside the supported range,
+     where a second line is better than a clipped one. */
+  flex-wrap: wrap;
+  gap: 2px 14px;
   margin: 0;
-  /* NOT shrinkable. The bottom bar is a single non-wrapping flex row and the
-     ticker beside it is the flexible element (flex:1 1 auto, min-width:0), so
-     if this were shrinkable too the browser would split the shortfall between
-     them and clip the hint mid-word instead of letting the ticker give. The
-     narrowing is done in discrete steps by the media queries below, where it
-     can drop whole phrases rather than half of one. */
-  flex: 0 0 auto;
+  /* `order: 3` puts the hint after the powers strip and the ticker in VISUAL
+     order while leaving the DOM alone, so the wrap produces two rows (controls,
+     then hint) rather than three. `flex: 1 0 100%` is what forces the break. */
+  order: 3;
+  flex: 1 0 100%;
   overflow: hidden;
   font-size: 11px;
   line-height: 1.2;
   color: var(--ink-faint);
   white-space: nowrap;
-  border-left: 1px solid var(--line);
-  padding-left: 14px;
 }
 
-/* Narrow: keep only the reinforce hint. The two click hints describe the
-   gesture a player will discover in the first ten seconds anyway; the right
-   button is the one nothing else on screen would ever tell them about. */
-@media (max-width: 1250px) {
-  .send-hint .send-hint-item:not(:last-child) { display: none; }
+/* The bar must be allowed to wrap and to size to its content, or `flex: 0 0
+   var(--bottom-h)` pins it and the second row is simply painted outside. */
+.bottombar {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: var(--bottom-h);
+  flex: 0 0 auto;
+  row-gap: 1px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  align-content: center;
 }
 
-@media (max-width: 1000px) {
-  .send-hint { display: none; }
+/* The ticker is 15px wide at 800px — a border and an ellipsis. Below the width
+   where it can hold even one event it is not giving up anything it still had,
+   and the send control plus the power chips need the room. */
+@media (max-width: 1080px) {
+  .ticker { display: none; }
+}
+
+/* Last-resort narrowing, below the supported range: drop the two phrases that
+   describe what a player discovers in the first ten seconds. The right button
+   and the modifiers are the ones nothing else on screen would ever tell them,
+   so they are never the ones dropped. */
+@media (max-width: 700px) {
+  .send-hint .send-hint-item.is-basic { display: none; }
 }
 
 .send-hint-item b {
   color: var(--ink-dim);
   font-weight: 600;
+  /* The modifier glyphs (⇧ ⌥ ⌘) are punctuation in the body font and render
+     small and pale beside the words they qualify. */
+  font-size: 12px;
 }
 
 /* The routed preview. One polyline per source, one vertex per hop. */
@@ -1907,31 +2112,37 @@ html, body {
   font-weight: 500;
   font-size: 9.5px;
 }
-/* INF / ART / ARM. Toggles, not a radio group: several can be on at once, so
-   they must not read as "the selected one of four" the way the fraction buttons
-   do. Same active treatment, a separator and a slightly quieter inactive state
-   are what carry the difference. */
-.send-sep {
-  width: 1px;
-  height: 16px;
-  margin: 0 6px;
-  background: var(--line);
-  flex: 0 0 auto;
-}
+/* The `.send-sep` / `.send-btn.send-type` rules that styled INF · ART · ARM were
+   deleted with the buttons themselves (2026-07, "Delete them."). Nothing else in
+   this file references either class. */
 
-.send-btn.send-type {
+/* WHAT the line will send, under WHEN it arrives.
+   Quieter than the ETA on purpose: the ETA is the thing §8 says you must read to
+   avoid defeat in detail, and the payload is the thing you must be able to
+   confirm without looking away from the map. Same halo as .sel-eta so it stays
+   legible over a tinted territory, and no pointer events — an overlay that takes
+   them eats the click that commits the attack, which has happened four times on
+   this project. */
+.sel-payload {
+  fill: var(--ink-dim);
   font-family: var(--font-num);
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
+  font-size: 8.5px;
+  font-weight: 600;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--garrison-halo);
+  stroke-width: 2.6;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 
-/* An excluded type is not merely un-highlighted, it is struck through: the
-   volley genuinely will not contain it, and "off" needs to be as legible as
-   "on" when the player is wondering why a source was refused. */
-.send-btn.send-type:not(.is-active) {
-  opacity: 0.45;
-  text-decoration: line-through;
-}
+/* Attack payloads wear the attack colour at reduced weight rather than full
+   --warn: two red numbers of equal loudness on one line compete, and the ETA is
+   the one that has to win. Reinforce gets the player's own colour written inline
+   by select.js (known-issues #15). */
+.sel-payload.is-attack { fill: var(--warn); fill-opacity: 0.78; }
+.sel-payload.is-reinforce { fill: var(--accent); fill-opacity: 0.85; }
+.sel-payload.is-refused { fill: var(--ink-faint); font-weight: 500; }
 /* send:end */
 
 /* landing: ─── amphibious beachheads (render/waves.js) ────────────────────
@@ -2018,3 +2229,122 @@ html, body {
   .wave-atsea { transition: none; }
 }
 /* landing:end */
+
+/* orders: ─── standing-order markers + rail section (render/map.js,
+   render/readout.js) ───────────────────────────────────────────────────────
+
+   01-data-schema.md, "Standing orders". The map half is a small monochrome
+   arrow hung under the node: down = feed (a source, shipping out), up = rally
+   (a sink, drawing in). Nothing at all for `hold`, which is the default and is
+   what almost every station on the board carries — see the block comment above
+   MAP_ORDER_DROP in render/map.js for why drawing the default would be noise
+   rather than information.
+
+   POINTER-EVENTS: NONE, twice over — on the group and on each glyph. This is
+   not belt-and-braces. Anything painted over the board that accepts pointer
+   events swallows the click that commits an attack and the game stops
+   responding WITH NO ERROR AT ALL; that has now happened four times on this
+   project, and the marker sits inside the station <g>, i.e. inside the one
+   element on the board whose hit area is load-bearing. The group is stated
+   separately from the glyphs so a later child added to it inherits the rule
+   instead of having to remember it.
+
+   The station <g> itself must keep taking events — it is the click target — so
+   this cannot be solved by moving the marker into #g-ui (which is where it
+   would be if it were selection state; it is not, it is board state, and it has
+   to survive a board rebuild the same way the garrison number does). */
+
+.station-ordergroup {
+  pointer-events: none;
+}
+
+/* Which glyph shows is a CLASS on the group, and the `d` of each is a static
+   attribute written once at build time and never touched again. That ordering
+   is deliberate: known-issues #15 is a stylesheet rule silently outranking an
+   SVG presentation attribute, and it has recurred twice. Nothing here computes
+   a presentation attribute per frame — the only per-frame decision is a
+   diff-gated classList toggle, which is the same mechanism .is-cut and
+   .is-fighting already use on the station node. */
+.station-order {
+  display: none;
+  fill: var(--garrison);
+  fill-opacity: 0.82;
+  /* Same halo trick as the garrison number: stroked first, filled over the top,
+     so the glyph holds its edge over a tinted territory, a link line or a
+     neighbour's fullness ring. */
+  stroke: var(--garrison-halo);
+  stroke-width: 2.6;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+  pointer-events: none;
+}
+
+.station-ordergroup.is-feed  .station-order-feed  { display: block; }
+.station-ordergroup.is-rally .station-order-rally { display: block; }
+
+/* A FEED CITY THAT SHIPS NOTHING — see MAP_ORDER_BLOCK_D in render/map.js.
+   A bar struck through the arrow, drawn in the HALO colour so it cuts the white
+   glyph into two stubs rather than adding a sixth mark to a node that already
+   carries five. Subtractive, monochrome, and inside the marker's own slot, so
+   it claims no channel that was not already the order channel.
+
+   Three classes, exactly matching the two rules above, which is deliberate:
+   the `.station.is-fighting` rule below is also three and comes later, so a
+   battle still wins this slot outright — bar included — instead of leaving a
+   stray bar floating over the attacker's number. Specificity here is load-
+   bearing, not incidental. */
+.station-ordergroup.is-blocked .station-order-block { display: block; }
+
+/* SUBTRACTIVE, and this rule is the whole reason it reads. Written first as a
+   plain member of `.station-order` it inherited `fill: var(--garrison)` — WHITE
+   — and painted a white bar across a white arrow, i.e. nothing at all. Caught by
+   reading `getComputedStyle(bar).fill` on the live board rather than by looking
+   at it, which is the same two-line diagnostic known-issues #15 prescribes.
+   Equal specificity to `.station-order` and later in the file, so it wins by
+   order; the halo stroke is dropped because a halo around a cut is a rim, not a
+   cut. */
+.station-order-block {
+  fill: var(--garrison-halo);
+  fill-opacity: 1;
+  stroke: none;
+}
+
+/* ...and the arrow itself goes quiet. The bar alone is the reading; the dim is
+   what makes a stalled network legible in peripheral vision when scanning the
+   board rather than looking at one node. Set as a stylesheet rule against a
+   class, never as a per-frame JS write of `fill-opacity` — that is the exact
+   presentation-attribute trap of known-issues #15, which has already recurred
+   twice on this project. */
+.station-ordergroup.is-blocked .station-order-feed { fill-opacity: 0.42; }
+
+/* A fight owns this slot while it lasts. `.station-attackers` is drawn at
+   exactly the same offset (rec.attY === rec.ordY by construction), and in a
+   battle "how many of theirs are standing here" beats "this city is on feed" —
+   the order is still true, it is just not the thing being asked. Equal
+   specificity to the two rules above (three classes each), so it wins by coming
+   later; that is the whole reason it is placed here and not before them. */
+.station.is-fighting .station-order { display: none; }
+
+/* The rail section reuses the .rdo-* grammar wholesale — rows, values and the
+   `.rdo-farm` source lines — so it needs no layout of its own. The one thing it
+   adds is a colour for the ORDER ITSELF, because "feed" and "rally" are the
+   section's headline value and reading as plain body text made them look like a
+   description rather than a setting. Achromatic, matching the map marker: an
+   order is not owned by anybody and must not borrow a power hue. */
+.rdo-order-v {
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* A feed city shipping nothing. `is-stalled` is toggled on this row by
+   _rdoOrdersUpdate and it is the ONE place in the rail where "the number is
+   zero" is a problem the player can fix, so it is the one place the warning
+   colour is spent.
+
+   Scoped to `.rdo-order-sweep` rather than written as a bare `.is-stalled`
+   rule: the empire header's growth row carries the same class for a different
+   meaning (an empire that has stopped growing is a fact, not a fault), and a
+   loose selector would have quietly recoloured it. */
+.rdo-order-sweep.is-stalled .rdo-v { color: var(--warn); }
+/* orders:end */

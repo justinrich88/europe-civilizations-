@@ -40,9 +40,45 @@
 //   left-click a station you DO NOT own -> attack: every selected source sends.
 //   right-click a station you OWN       -> reinforce: every selected source marches.
 //   marquee drag / Ctrl+A / shift-click -> unchanged accelerators.
+//   H / R / F (no modifier)             -> standing order on the whole selection,
+//                                          which SURVIVES. See _selApplyOrder.
 //
 // The accident is structurally gone: the gesture that used to send troops to
 // one of your own cities no longer sends anything at all.
+//
+// ── commit-time modifiers (player-reported, 2026-07) ────────────────────
+//
+// "It needs to be something that can happen very quickly as the player is making
+// many moves in parallel." The persistent 25/50/75/All setting is fine as a
+// DEFAULT and wrong as the only answer: changing it costs a trip to the corner
+// of the screen, and — worse — it stays changed, so the volley after it is fired
+// at a number nobody chose. Every modifier below is therefore read off the click
+// that commits, applies to that volley only, and leaves nothing behind:
+//
+//   plain click        -> the persistent fraction (unchanged; the common case)
+//   SHIFT + click      -> send everything            (fraction 1)
+//   ALT/OPTION + click -> send half                  (fraction 0.5)
+//   CMD/META + click   -> commit and KEEP the selection, to fire the same
+//                         massed group at the next target without reselecting
+//
+// All four work on the RIGHT button too, so reinforce gets them as well.
+//
+// Why these three and not the obvious fourth:
+//
+//   * SHIFT is already the additive-selection modifier, but only ever on
+//     stations the player OWNS — and a target is by definition not owned, so the
+//     two gestures cannot both apply to one click. `d.additive` is read in
+//     exactly one place (the marquee branch of selOnMouseMove) and a commit is
+//     by construction not a marquee. Verified by measurement, not assumed.
+//   * ALT and CMD were measured arriving intact on this platform: a synthetic
+//     alt-click and cmd-click on #board both produced mousedown/mouseup with the
+//     flag set and no default action.
+//   * CTRL is unusable on macOS: a ctrl-click fires `contextmenu` between
+//     mousedown and mouseup — it IS the secondary click — so a ctrl+left gesture
+//     is indistinguishable from a right-click by the time it reaches us.
+//
+// SHIFT beats ALT if both are somehow held. Arbitrary, but fixed and documented,
+// so it can never be a surprise.
 
 'use strict';
 
@@ -51,22 +87,24 @@
 // and a twitchy mouse must not turn one into an empty marquee that silently
 // clears the selection.
 //
-// The number is calibrated at scale 1, where one viewBox unit is one screen
-// pixel-ish. Under the camera it is NOT screen-constant: at 4x the viewBox is
-// four times finer, so a raw comparison against 4 units would demand 16 screen
-// pixels of travel before a drag counted as a marquee — small marquees at zoom
-// would silently commit an attack instead. So the threshold is divided by the
-// camera scale where it is COMPARED (selClickSlop), never redefined here: the
-// authored value stays "4 units of hand-wobble at 1x" and the conversion to the
-// current zoom is one division at the point of use.
-const SEL_CLICK_SLOP = 4;
+// It has to be screen-constant, because hand-wobble is: at 4x the viewBox is
+// four times finer, so comparing against a raw unit count would demand four
+// times the travel before a drag counted as a marquee, and small marquees at
+// zoom would silently commit an attack instead. It is therefore authored in
+// SCREEN pixels and converted at the point of comparison — see selClickSlop(),
+// which also explains why converting by camera scale alone was not enough.
+// 5px at the 1156px-wide reference board is the 4 units this shipped as.
+// 5px at the 1156px-wide reference board is the 4 units this shipped as.
+const SEL_CLICK_SLOP_PX = 5;
 
-// How far from a click, in viewBox units at scale 1, a station's centre may sit
-// and still win the click from whatever node happens to be painted on top.
-// Sized to a node silhouette rather than to the whole neighbourhood: large
-// enough to cover an occluding neighbour, small enough that it never reaches
-// past one. See selStationAt().
-const SEL_STATION_PICK_RADIUS = 14;
+// How far from a click, in SCREEN PIXELS, a station's centre may sit and still
+// win the click from whatever node happens to be painted on top. Sized to a
+// node silhouette on screen, which is the scale the player's aim actually works
+// at. 16px at the 1156px-wide reference board is the 14 units this shipped as.
+// Over-reach is not a hazard here: the rule picks the NEAREST centre within the
+// radius, so a wider reach only widens the candidate set -- it cannot pick a
+// node further away than the one it picks today. See selStationAt().
+const SEL_STATION_PICK_RADIUS_PX = 16;
 
 // Gap in viewBox units between the top of a node's silhouette and the tip of
 // its caret.
@@ -132,32 +170,72 @@ function selFraction() {
   return (typeof BAL !== 'undefined' && BAL) ? BAL.SEND_FRACTION_DEFAULT : 0.75;
 }
 
-// Which unit kinds the volley may include, or null for all of them. Owned by
-// app/main.js beside sendFraction() and read the same way — at call time, with
-// typeof, so this file works whether or not that control exists.
-function _selTypes() {
-  if (typeof sendTypes === 'function') return sendTypes();
-  if (typeof window.sendTypes === 'function') return window.sendTypes();
-  return null;
+// ── the commit-time amount override ─────────────────────────────────────
+//
+// Live modifier state. Kept as state rather than read only from the committing
+// event because the PREVIEW has to answer "what will this send" while the player
+// is merely holding a key with the mouse still — so it is refreshed from every
+// mousemove, keydown and keyup, and read again off the click itself so the
+// number that fires is the one the click carried, not the one a stale keyup
+// left behind.
+const SEL_MOD = { shift: false, alt: false, meta: false };
+
+// Fold an event's modifier flags into SEL_MOD. Returns true if anything changed,
+// so callers can skip a redraw on the ~60 no-op mousemoves a second.
+function _selSyncMods(evt) {
+  const s = !!(evt && evt.shiftKey);
+  const a = !!(evt && evt.altKey);
+  const m = !!(evt && evt.metaKey);
+  if (s === SEL_MOD.shift && a === SEL_MOD.alt && m === SEL_MOD.meta) return false;
+  SEL_MOD.shift = s; SEL_MOD.alt = a; SEL_MOD.meta = m;
+  return true;
 }
 
-// The payload a source would actually send: its proportion, narrowed to the
-// enabled kinds. Used for the preview ETA and mirrored by applyCommand — a
-// preview that ignored the type filter would show an infantry-speed ETA for a
-// volley the player has restricted to artillery.
+// What this volley would actually use. The persistent setting is the default;
+// shift and alt override it for one click only.
+function selEffectiveFraction() {
+  if (SEL_MOD.shift) return 1;
+  if (SEL_MOD.alt) return 0.5;
+  return selFraction();
+}
+
+// The payload a source would actually send. Must be the same bundle
+// applyCommand() will build from `fraction`, because it drives the preview ETA
+// (a stack travels at the speed of its slowest kind), the refusal test, and the
+// payload label — a preview that disagrees with the commit is worse than none.
 function _selPayload(units) {
-  const frac = selFraction();
   if (!units || typeof splitUnits !== 'function') return null;
-  const take = splitUnits(units, frac);
-  const types = _selTypes();
-  if (!Array.isArray(types) || !types.length) return take;
-  const keep = Object.create(null);
-  for (const t of types) keep[t] = true;
-  return {
-    infantry: keep.infantry ? take.infantry : 0,
-    artillery: keep.artillery ? take.artillery : 0,
-    armour: keep.armour ? take.armour : 0,
-  };
+  return splitUnits(units, selEffectiveFraction());
+}
+
+// ── payload label (00-vision.md §8, "the number is the interface") ──────
+//
+// The fraction setting is in the corner of the screen and the player is looking
+// at the map, so each preview line carries what it will actually send. Compact,
+// because it sits beside the ETA on a line that may be one of a dozen.
+
+const SEL_TYPE_ABBR = { infantry: 'inf', artillery: 'art', armour: 'arm' };
+
+// One significant decimal below 10, whole numbers above it. Garrisons are
+// continuous (logistic growth), so "8" for 8.4 units is a lie the player can
+// check against the readout; "34" for 34.2 is not worth the extra glyph.
+function _selFmtQty(v) {
+  if (!(v > 0)) return '0';
+  return String(v >= 10 ? Math.round(v) : Math.round(v * 10) / 10);
+}
+
+function _selPayloadLabel(units) {
+  if (!units) return '';
+  const order = (typeof BAL !== 'undefined' && BAL && BAL.UNIT_ORDER)
+    ? BAL.UNIT_ORDER : ['infantry', 'artillery', 'armour'];
+  const parts = [];
+  for (const t of order) {
+    const v = units[t];
+    // 0.05 rather than 0: a kind that rounds to "0" adds a glyph and no
+    // information. Anything the label omits is below a twentieth of a unit.
+    if (v > 0.05) parts.push(_selFmtQty(v) + ' ' + (SEL_TYPE_ABBR[t] || t));
+  }
+  return parts.join(' · ');
 }
 
 // Live ownership. State is authoritative once a game exists; before that the
@@ -205,11 +283,27 @@ function selCamScale() {
   return (typeof cameraScale === 'function') ? cameraScale() : 1;
 }
 
-// SEL_CLICK_SLOP is authored in viewBox units at scale 1; dividing by the
-// current scale is what makes it a constant number of SCREEN pixels.
+// Both thresholds below are authored in SCREEN PIXELS and converted here, per
+// use, into the viewBox units the hit tests compare in.
+//
+// They used to divide by cameraScale(), which is only half the conversion:
+//   pxPerUnit = (boardWidth / 1000) x cameraScale
+// so dividing by scale alone holds them constant under ZOOM but lets them
+// scale with the WINDOW. On an 800px window the board is 516px, making every
+// "screen-constant" threshold worth 0.516x what it read as -- the pick radius
+// sat at ~52% of its intended reach on exactly the window this game is played
+// at, which is the same complaint that motivated nearest-centre picking in the
+// first place. _selPxPerUnit() reads the real matrix and is constant under
+// both. See also _selLabelHalfPx, which hit this trap and uses the same helper.
 function selClickSlop() {
-  const s = selCamScale();
-  return (isFinite(s) && s > 0) ? SEL_CLICK_SLOP / s : SEL_CLICK_SLOP;
+  const ppu = _selPxPerUnit();
+  return (isFinite(ppu) && ppu > 0) ? SEL_CLICK_SLOP_PX / ppu : SEL_CLICK_SLOP_PX;
+}
+
+// Reach of the nearest-centre rule, in viewBox units for the current window.
+function selStationPickRadius() {
+  const ppu = _selPxPerUnit();
+  return (isFinite(ppu) && ppu > 0) ? SEL_STATION_PICK_RADIUS_PX / ppu : SEL_STATION_PICK_RADIUS_PX;
 }
 
 // translate(x,y) scale(k) — the counter-scale is applied about (x,y), so the
@@ -371,6 +465,114 @@ function _selPathPoints(path) {
   return pts;
 }
 
+// §8: "the number is the interface." A preview annotation that lands on a
+// garrison number costs more than it gains, and the payload label doubled the
+// height of every annotation, so what used to graze now covers.
+//
+// Two false starts, both measured, both recorded because the reasoning is the
+// useful part:
+//
+//   1. Walk the label FURTHER ALONG its route until it clears. Every source's
+//      route converges on the same target, so this walks all of them into the
+//      same square inch: 6 payload-on-garrison collisions became 22
+//      label-on-label ones.
+//   2. Nudge sideways by a RADIAL clearance of `K / cameraScale()` board units.
+//      Screen-constant under zoom — but `pxPerUnit = (boardWidth/1000) ×
+//      cameraScale`, so that expression is a constant K × boardWidth/1000 screen
+//      pixels and shrinks with the WINDOW. At the player's 800px it came to
+//      12.4px against a label pair 24px tall and 70px wide, and six payload
+//      labels sat on garrison numbers.
+//
+// So: convert through the real screen CTM, and test the label's actual BOX
+// against the number's box rather than a radius. A radius cannot express "40px
+// wide and 14px tall", which is the shape of the thing being placed.
+
+// Screen pixels per viewBox unit, straight off the matrix every hit test in this
+// file already inverts. The only expression that is genuinely screen-constant
+// across BOTH zoom and window size.
+function _selPxPerUnit() {
+  const svg = byId('board');
+  const m = (svg && svg.getScreenCTM) ? svg.getScreenCTM() : null;
+  return (m && m.a > 0) ? m.a : 1;
+}
+
+// Half-extent of a garrison number about its station centre, in screen px.
+const SEL_GARRISON_HALF_PX = { w: 13, h: 10 };
+// Breathing room so "clear" means visibly clear, not touching.
+const SEL_LABEL_PAD_PX = 5;
+
+// Predicted screen half-extents of the {ETA above, payload below} pair. The
+// widths are estimated from character counts against the numeric font rather
+// than measured, because the box has to be known BEFORE the text is placed.
+function _selLabelHalfPx(etaText, payText) {
+  const w = Math.max(String(etaText || '').length * 6.2, String(payText || '').length * 5.2);
+  return { w: w / 2 + SEL_LABEL_PAD_PX, h: 15 + SEL_LABEL_PAD_PX };
+}
+
+// Does a label centred at `p` miss every garrison number on the board?
+function _selAnchorIsClear(p, half, ppu) {
+  const hw = (half.w + SEL_GARRISON_HALF_PX.w) / ppu;
+  const hh = (half.h + SEL_GARRISON_HALF_PX.h) / ppu;
+  const ids = selAllStationIds();
+  for (let i = 0; i < ids.length; i++) {
+    const q = selStationPos(ids[i]);
+    if (!q) continue;
+    if (Math.abs(p[0] - q[0]) < hw && Math.abs(p[1] - q[1]) < hh) return false;
+  }
+  return true;
+}
+
+// Push the label sideways off its own line until it clears, alternating sides so
+// two parallel routes do not both shove their labels the same way. Sideways
+// rather than forwards keeps the per-source spacing the anchor was chosen for
+// (see the note at the label loop) and keeps the label on the line that says
+// which source it belongs to.
+//
+// If the whole neighbourhood is crowded the least-bad candidate is returned
+// rather than nothing: a label that overlaps is still information, a missing one
+// is not.
+function _selLabelAnchor(p, dir, half) {
+  const ppu = _selPxPerUnit();
+  if (_selAnchorIsClear(p, half, ppu)) return p;
+  const len = Math.hypot(dir[0], dir[1]);
+  if (!(len > 0)) return p;
+  const nx = -dir[1] / len, ny = dir[0] / len;
+  const stepU = (half.h + SEL_GARRISON_HALF_PX.h) / ppu;
+  const steps = [1, -1, 1.7, -1.7, 2.4, -2.4, 3.2, -3.2];
+  let best = p, bestScore = -Infinity;
+  for (let i = 0; i < steps.length; i++) {
+    const q = [p[0] + nx * steps[i] * stepU, p[1] + ny * steps[i] * stepU];
+    if (_selAnchorIsClear(q, half, ppu)) return q;
+    // Least-bad = furthest from the nearest station centre, tie-broken toward
+    // the smaller displacement so a hopeless case does not fling the label away.
+    let near = Infinity;
+    const ids = selAllStationIds();
+    for (let j = 0; j < ids.length; j++) {
+      const s = selStationPos(ids[j]);
+      if (s) near = Math.min(near, Math.hypot(q[0] - s[0], q[1] - s[1]));
+    }
+    const score = near - Math.abs(steps[i]) * stepU * 0.15;
+    if (score > bestScore) { bestScore = score; best = q; }
+  }
+  return best;
+}
+
+// Local direction of the polyline at arc-length `d`, for the perpendicular above.
+function _selDirAlong(pts, d) {
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i]);
+  const want = (total > 0) ? clamp(d, total * 0.06, total * 0.62) : 0;
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const seg = dist(pts[i - 1], pts[i]);
+    if (acc + seg >= want || i === pts.length - 1) {
+      return [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]];
+    }
+    acc += seg;
+  }
+  return [1, 0];
+}
+
 function _selPolyPoints(pts) {
   const out = [];
   for (let i = 0; i < pts.length; i++) out.push(pts[i][0] + ',' + pts[i][1]);
@@ -413,9 +615,9 @@ function selPreviewRows(target) {
 
     // The payload drives the ETA, because a stack travels at the speed of its
     // slowest unit type — artillery in the volley shows up as a longer line.
-    // The payload drives the ETA AND the refusal test, so it must be the same
-    // bundle applyCommand() will build: the fraction narrowed to the unit kinds
-    // the INF/ART/ARM toggles have left on.
+    // It drives the ETA, the refusal test AND the label, so it must be the same
+    // bundle applyCommand() will build from the effective fraction, modifier
+    // included.
     let units = null;
     if (g && g.stations && g.stations[sid]) units = _selPayload(g.stations[sid].units);
 
@@ -444,6 +646,10 @@ function selPreviewRows(target) {
     rows.push({
       source: sid, from: from, to: to,
       path: path, points: pts, eta: eta,
+      // The exact bundle the commit will subtract from this source. Exposed on
+      // the row so the label and any check can read the same numbers the ETA
+      // and the refusal test were computed from.
+      units: units,
       refusal: refusal,
       routable: !refusal,
     });
@@ -556,16 +762,28 @@ function selDrawPreview(target) {
   });
   for (let i = 0; i < ranked.length; i++) {
     const r = ranked[i];
-    const off = 26 + (i % 3) * 11;
+    // Four stagger lanes rather than three: the label is now two lines tall, so
+    // the old three-lane spread put twice as much ink into the same band. Six
+    // lanes was tried and measured worse — the extra lanes push labels far enough
+    // down their routes to land in the convergence zone near the target.
+    const off = 26 + (i % 4) * 13;
     // Along the ROUTE for a routable source, along the straight line for a
-    // refused one — a refused source has no route to walk.
-    const anchor = r.routable
-      ? _selPointAlong(r.points, off)
-      : (function () {
-          const len = Math.max(1, dist(r.from, r.to));
-          const t = clamp(off / len, 0.08, 0.62);
-          return [lerp(r.from[0], r.to[0], t), lerp(r.from[1], r.to[1], t)];
-        })();
+    // refused one — a refused source has no route to walk. Then nudged sideways
+    // until it is clear of every garrison number (§8: the number is the
+    // interface, and this file may not sit on one).
+    let base, dir;
+    if (r.routable) {
+      base = _selPointAlong(r.points, off);
+      dir = _selDirAlong(r.points, off);
+    } else {
+      const len = Math.max(1, dist(r.from, r.to));
+      const t = clamp(off / len, 0.08, 0.62);
+      base = [lerp(r.from[0], r.to[0], t), lerp(r.from[1], r.to[1], t)];
+      dir = [r.to[0] - r.from[0], r.to[1] - r.from[1]];
+    }
+    const etaText = r.routable ? (Math.round(r.eta) + 't') : r.refusal;
+    const payload = _selPayloadLabel(r.units);
+    const anchor = _selLabelAnchor(base, dir, _selLabelHalfPx(etaText, payload));
 
     let lcls = 'sel-eta';
     if (!r.routable) lcls += ' is-refused';
@@ -580,11 +798,37 @@ function selDrawPreview(target) {
     const label = el('text', lcls, {
       x: 0, y: -3,
       transform: selSymbolTransform(anchor[0], anchor[1]),
-      text: r.routable ? (Math.round(r.eta) + 't') : r.refusal,
+      text: etaText,
       'data-preview-eta': r.source,
     });
     if (r.routable && friendly) label.style.fill = friendly;
     layer.appendChild(label);
+
+    // WHAT it sends, under WHEN it arrives. The persistent fraction lives in
+    // the corner of the screen and the player is looking at the map, so the
+    // number that matters travels with the line — and it moves the instant a
+    // modifier is held, which is the whole point of the override.
+    //
+    // Below the anchor while the ETA is above it, both inside the SAME
+    // counter-scaled transform, so the pair holds a constant on-screen size and
+    // a constant on-screen gap at every zoom — and so _selLabelAnchor only has
+    // one box to keep clear of the garrison numbers rather than two.
+    //
+    // Drawn for refused rows too: "too few" is a statement ABOUT the payload,
+    // and the payload is the evidence for it.
+    if (payload) {
+      const pcls = 'sel-payload' + (r.routable ? ' is-' + intent : ' is-refused');
+      const plabel = el('text', pcls, {
+        x: 0, y: 8,
+        transform: selSymbolTransform(anchor[0], anchor[1]),
+        text: payload,
+        'data-preview-payload': r.source,
+      });
+      // Inline, not a class — per-power data computed at draw time
+      // (known-issues #15).
+      if (r.routable && friendly) plabel.style.fill = friendly;
+      layer.appendChild(plabel);
+    }
   }
 
   selDrawCarets(noRoute);
@@ -662,7 +906,7 @@ function selStationAt(evt) {
   // Node silhouettes are a few units across, so a centre within this radius of
   // the click is a genuine rival for it rather than a distant station stolen
   // from across the map.
-  const reach = SEL_STATION_PICK_RADIUS / (selCamScale() || 1);
+  const reach = selStationPickRadius();
   let best = domSid;
   let bestD = Infinity;
   const home = selStationPos(domSid);
@@ -737,18 +981,23 @@ function selCommit(target) {
     return null;
   }
 
+  // Snapshot BOTH decisions before applyCommand touches anything: the amount
+  // this volley uses, and whether the group survives it. Reading SEL_MOD after
+  // the send would be reading it a frame later, and the player may already have
+  // let the key go.
+  const fraction = selEffectiveFraction();
+  const keep = SEL_MOD.meta;
+
   const cmd = {
     type: 'send',
     owner: me,
     sources: sources,
     target: target,
-    fraction: selFraction(),
+    fraction: fraction,
   };
-  // Omitted entirely when every kind is on: "no filter" and "every filter" are
-  // the same volley, and leaving the field off keeps the command object
-  // byte-identical to the ones every existing replay and test already contains.
-  const types = _selTypes();
-  if (Array.isArray(types) && types.length) cmd.types = types;
+  // No `cmd.types`. The INF/ART/ARM filter is gone from the UI, and omitting the
+  // field keeps the command object byte-identical to the ones every existing
+  // replay and test already contains.
   const res = applyCommand(g, cmd);
 
   if (!res || !res.ok) {
@@ -761,8 +1010,25 @@ function selCommit(target) {
   }
 
   // §8: "Every selected source sends its proportion at once, and selection
-  // clears." One-shot. Nothing lingers, nothing is standing.
-  clearSelection();
+  // clears." One-shot, and still the default — a volley normally comes from a
+  // group assembled for it.
+  //
+  // CMD held is the exception, and it is an exception rather than a mode
+  // precisely because it is decided by the click and not by a setting: there is
+  // no state anywhere that says "keep clearing off", so a group can never
+  // outlive the gesture that asked for it. Firing one massed army at four
+  // targets in sequence is then four clicks, not four clicks plus three
+  // reselections.
+  if (!keep) {
+    clearSelection();
+    return res;
+  }
+  // Drop anything that changed hands in the volley, then redraw against the
+  // target still under the cursor — so the payload labels immediately show the
+  // SMALLER second salvo rather than the one that just left.
+  selPrune();
+  SEL_STATE.hoverTarget = SEL_STATE.selected.has(target) ? null : target;
+  selRedraw();
   return res;
 }
 
@@ -775,6 +1041,7 @@ function selCommit(target) {
 const SEL_RCLICK_SLOP_PX = 4;
 
 function selOnMouseDown(evt) {
+  _selSyncMods(evt);
   // Right button. render/camera.js pans with it, and on macOS `contextmenu`
   // fires at MOUSEDOWN time — before any movement exists to measure — so a
   // reinforce wired to contextmenu would fire a volley at whatever node the pan
@@ -801,6 +1068,12 @@ function selOnMouseDown(evt) {
 }
 
 function selOnMouseMove(evt) {
+  // Every mousemove carries the live modifier flags, which makes this the
+  // cheapest correct place to notice a key held down while the pointer moved —
+  // including the case where the key went down while the window was unfocused
+  // and no keydown ever arrived. Redraw only on an actual change.
+  const modsChanged = _selSyncMods(evt);
+
   const rd = SEL_STATE.rdrag;
   if (rd && !rd.moved) {
     if (Math.abs(evt.clientX - rd.cx) > SEL_RCLICK_SLOP_PX ||
@@ -815,7 +1088,7 @@ function selOnMouseMove(evt) {
     if (!p) return;
     d.x1 = p[0];
     d.y1 = p[1];
-    // Screen-constant threshold, not viewBox-constant — see SEL_CLICK_SLOP.
+    // Screen-constant threshold, not viewBox-constant — see selClickSlop().
     const slop = selClickSlop();
     if (Math.abs(d.x1 - d.x0) > slop || Math.abs(d.y1 - d.y0) > slop) {
       d.moved = true;
@@ -841,6 +1114,10 @@ function selOnMouseMove(evt) {
   const target = (sid && SEL_STATE.selected.size && !SEL_STATE.selected.has(sid)) ? sid : null;
   if (target !== SEL_STATE.hoverTarget) {
     SEL_STATE.hoverTarget = target;
+    selRedraw();
+  } else if (modsChanged && SEL_STATE.hoverTarget) {
+    // Same target, different amount: the payload labels and the ETAs both move
+    // when shift or alt goes down, so the override is legible before the click.
     selRedraw();
   }
 }
@@ -876,6 +1153,11 @@ function selSetFocus(sid) {
 }
 
 function selOnMouseUp(evt) {
+  // Before anything commits. selCommit() reads SEL_MOD, and THIS event is the
+  // authority on what the player was holding when they released — a keyup that
+  // beat the mouseup by a frame must not decide the size of the volley.
+  _selSyncMods(evt);
+
   if (evt.button === 2) {
     const rd = SEL_STATE.rdrag;
     SEL_STATE.rdrag = null;
@@ -959,7 +1241,17 @@ function selOnDblClick(evt) {
   else selSet(ids);
 }
 
+// Shift / Alt / Cmd going down or up with the pointer perfectly still still has
+// to move the preview — the player aims first and decides the amount second.
+// One handler for both edges; the event's own flags are the truth on each.
+function selOnModKey(evt) {
+  if (!_selSyncMods(evt)) return;
+  if (SEL_STATE.hoverTarget) selRedraw();
+}
+
 function selOnKeyDown(evt) {
+  selOnModKey(evt);
+
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
@@ -973,7 +1265,98 @@ function selOnKeyDown(evt) {
     // the count on screen disagree with the empire you actually hold.
     evt.preventDefault();
     selSet(selAllStationIds().filter(selIsMine));
+    return;
   }
+
+  // H / R / F — the standing order of every selected station, in one command.
+  //
+  // BARE KEYS ONLY. Every modifier on this board already means something at the
+  // moment of a click (shift = all, alt = half, cmd = keep the group, ctrl+A =
+  // select everything), and a key that fires while one of them is held would
+  // fire in the middle of somebody aiming a volley. So the guard is all four,
+  // not just the two that currently collide.
+  if (!evt.shiftKey && !evt.altKey && !evt.metaKey && !evt.ctrlKey) {
+    const order = SEL_ORDER_KEYS[evt.key];
+    if (order) {
+      evt.preventDefault();
+      _selApplyOrder(order);
+    }
+  }
+}
+
+// ── standing orders (01-data-schema.md, "Standing orders") ──────────────
+//
+// One pipe with two ends and an off switch, set per station: `hold` (the
+// default and the off switch), `rally` (a sink) and `feed` (a source). The sim
+// half lives in sim/movement.js; this is the whole of setting one.
+//
+// WHY A KEY AND NOT A BUTTON. The complaint that produced the commit-time
+// modifiers applies here word for word — *"it needs to be something that can
+// happen very quickly as the player is making many moves in parallel."* An
+// order is set on a GROUP: marquee the rear provinces, press F, marquee the
+// front, press R. A per-station panel control would make that twenty round
+// trips to the rail, and the player would simply not use the mechanic.
+//
+// Lowercase and uppercase both, because caps lock is not a mode anyone here
+// opted into. Shift+F is NOT this key — see the modifier guard above.
+const SEL_ORDER_KEYS = {
+  h: 'hold', H: 'hold',
+  r: 'rally', R: 'rally',
+  f: 'feed', F: 'feed',
+};
+
+// THE SELECTION SURVIVES. This is the one deliberate difference from selCommit,
+// and it is not an oversight:
+//
+//   * A volley is SPENT. Its sources have just emptied themselves at a target,
+//     so keeping them selected would offer up a group that no longer exists in
+//     any useful form — hence §8's "selection clears".
+//   * An order costs nothing and CHANGES nothing about the group. Setting one
+//     is almost always followed by setting another (feed the rear, then rally
+//     the front), and every intermediate state is a legitimate thing to want:
+//     press F, look at the map, press H because that was the wrong group.
+//     Clearing here would mean re-marqueeing the same cities to correct a
+//     one-key mistake.
+//
+// ONE applyCommand FOR THE WHOLE GROUP, not one per station. `{type:'order'}`
+// already takes a list and already validates per station — an unowned entry is
+// rejected on its own and the rest still apply (01-data-schema.md) — so a loop
+// here would be N commands doing what one does, and would report N results the
+// caller then has to merge.
+function _selApplyOrder(order) {
+  const g = selGame();
+  const me = selPlayer();
+  if (!g || !me) return null;
+
+  // Filtered here as well as validated in applyCommand. Not belt-and-braces:
+  // "nothing selected" and "nothing selected is still mine" must both be silent
+  // no-ops, and without the filter the second case would fire a command whose
+  // every station comes back 'not-owned' and log a warning at the player for
+  // pressing a key over a group that changed hands while they were looking.
+  const stations = selectedSources().filter(selIsMine);
+  if (!stations.length) return null;
+
+  if (typeof applyCommand !== 'function') {
+    console.warn('[render/select] applyCommand is not loaded — order dropped');
+    return null;
+  }
+
+  const res = applyCommand(g, {
+    type: 'order',
+    owner: me,
+    stations: stations,
+    order: order,
+  });
+
+  if (!res || !res.ok) {
+    console.warn('[render/select] order rejected:', res && res.reason, res && res.rejected);
+  }
+  // No selRedraw(). Nothing this file DRAWS depends on an order — the marker is
+  // render/map.js's, on the station node, repainted by renderLive every frame
+  // (which runs while paused, see app/loop.js), and the rail reads the order
+  // live. Redrawing the carets and every preview line here would be work for a
+  // picture that is already correct.
+  return res;
 }
 
 // ── pinned API (01-data-schema.md, "Render / app API") ──────────────────
@@ -1013,6 +1396,13 @@ function initSelection() {
   window.addEventListener('mousemove', selOnMouseMove);
   window.addEventListener('mouseup', selOnMouseUp);
   window.addEventListener('keydown', selOnKeyDown);
+  window.addEventListener('keyup', selOnModKey);
+  // Cmd+Tab away with shift held and the flags would be frozen on forever;
+  // a blur is the one moment we know for certain that nothing is held.
+  window.addEventListener('blur', function () {
+    if (!_selSyncMods(null)) return;
+    if (SEL_STATE.hoverTarget) selRedraw();
+  });
   // Dragging on an SVG otherwise starts a native image drag halfway through
   // the marquee and the mouseup never arrives.
   svg.addEventListener('dragstart', function (e) { e.preventDefault(); });
@@ -1043,6 +1433,10 @@ function initSelection() {
 window.initSelection = initSelection;
 window.selectedSources = selectedSources;
 window.clearSelection = clearSelection;
+// The amount the next click would actually use — the persistent setting or the
+// modifier override. Exported so the payload label, the preview and any check
+// read one function rather than three copies of the same precedence rule.
+window.selEffectiveFraction = selEffectiveFraction;
 
 // Self-bootstrap, matching render/map.js: the board is drivable before
 // app/main.js exists. Once the app layer lands it sets APP_OWNS_RENDER and

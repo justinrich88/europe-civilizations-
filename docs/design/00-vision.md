@@ -250,10 +250,18 @@ Read directly off your screenshot (`docs/reference/virus-wars.png`), and worth c
 The core offensive gesture is **select several of your stations, then click one enemy or neutral station** — every selected station sends simultaneously at that single target. This is how you assemble overwhelming force (§5) out of a scattered empire without micromanaging each stack.
 
 - **Selecting sources** — drag a marquee across your own stations, shift-click to add or remove, double-click a territory to select all its stations. `Ctrl+A` selects everything you own.
-- **Committing** — one click on the target. Every selected source sends its proportion at once, and selection clears.
-- **Proportion** — each source sends a share of the units currently sitting in it. A persistent 25 / 50 / 75 / All setting applies to the whole volley; default 75%, and it's a tuning constant. Set once, not per attack.
-- Selected stations and the target are joined by preview lines while you hover, so a volley is legible *before* you commit it.
-- **One-shot.** A command fires a single wave and is done — no standing supply lines, nothing to cancel. Every attack is a deliberate decision about what to spend right now, and the board never plays itself.
+- **Committing** — one click on the target. Every selected source sends its proportion at once, and selection clears. `⌘`-click commits and *keeps* the group, so one massed force can be thrown at several targets without reselecting.
+- **Proportion** — each source sends a share of the units currently sitting in it. A persistent 25 / 50 / 75 / All setting applies to the whole volley; default 75%, and it's a tuning constant. Set once, not per attack — then overridden at the click when you need it: `⇧` sends everything, `⌥` sends half. The modifier is read off the committing event, so the amount is decided by the click that fires the volley and nothing else.
+- Selected stations and the target are joined by preview lines while you hover, carrying **both an ETA and the payload** (`54 inf`, `1.5 inf · 11 art`), so a volley is legible *before* you commit it.
+- **One-shot.** An *attack* fires a single wave and is done — nothing to cancel. Every attack is a deliberate decision about what to spend right now.
+
+> **Amendment (Milestone 5.6): logistics can be automated; commitment cannot.**
+>
+> This section originally said there are no standing supply lines and the board never plays itself. That is now true of *attacks only*. Cities carry a standing order — **Hold** (default), **Rally** (a sink, pulling a small constant stream from neighbours), **Feed** (a source, pushing its surplus toward the front) — set with `H`/`R`/`F` on any selection.
+>
+> The line the amendment does not cross: **a standing wave never attacks and never fights.** It may only move between stations its owner already holds, and a stream whose destination flips mid-transit *stands down* at the last held city on its path rather than arriving into a battle. Automating a trickle into a contested city would be committing defeat in detail (§5, §8) on the player's behalf — the exact mistake this game is built to punish. So the automation carries units to the front and stops there; what to spend, and when, stays a decision.
+>
+> Two consequences worth stating. Orders **reset to Hold on capture**, since a captured Feed city would drain the front its new owner just paid for. And a Feed city dropping off the logistic ceiling starts growing again — §2's "full stations should be spent" falling out of the mechanic for free.
 
 **Stacks arrive staggered, not synchronised.** Each travels at its own speed and fights on arrival. Combined with square-law combat (§5), this makes *defeat in detail* the defining mistake of the game: throw five distant cities at one target and they'll be destroyed one at a time, while five nearby cities landing together will overwhelm it. Massing near a front before committing becomes the central skill, and distance genuinely matters rather than being flavour.
 

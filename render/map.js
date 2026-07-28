@@ -357,6 +357,224 @@ const MAP_MOM_ATK = 2;        // attacker arcs built; a 3rd+ power folds into th
 const MAP_MOM_BUCKETS = 100;  // 1% steps — same "rewrite on a visible change" rule
 const MAP_MOM_NEUTRAL = '#8b94a4';
 
+// ── combat alert — "there is a fight HERE", from across the board ───────
+//
+// The momentum ring answers *who is winning*. It does not answer *is anyone
+// fighting at all* from four inches away: at 1x a saturated ring on a 15-unit
+// node is a small mark among 108 small marks, and the player has to sweep the
+// board to find it. The complaint, verbatim: *"it should be more visibly
+// obvious when combat is happening at a particular location."*
+//
+// So the ring keeps its job and a second signal takes the new one: two
+// ACHROMATIC RIPPLES expanding out of the node and fading, 50% out of phase
+// with each other. Everything about that sentence is load-bearing.
+//
+// MOTION, not colour. Peripheral vision resolves almost no detail and almost no
+// hue, but it is extremely sensitive to motion and to luminance change. An
+// expanding ring is the strongest cue available for "look over here" and it is
+// pure CSS, so the renderer pays nothing per frame for it.
+//
+// OUTSIDE the momentum ring, never on it. The amber pulse that used to live on
+// `.station-battle` was switched off because animating a stroke WIDTH makes two
+// adjacent arc LENGTHS hard to compare, and that comparison is the ring's whole
+// job. Nothing here touches the ring: the ripples start 2.5 units clear of it
+// and travel outward, so the arcs keep a dead-constant 3px stroke.
+//
+// WHITE, not red — despite red being what was asked for. Red is not available
+// on this board. `--warn` (#d1604a) is already the attack-verb colour in
+// render/select.js, and `gbr` is #c9524a — an actual ownership hue. A red pulse
+// would be the exact failure the amber pulse was removed for, twice over.
+// Achromatic is the same escape the fullness ring takes: it claims no hue, so
+// it cannot be misread as ownership (§8), and white is the highest-contrast
+// mark available on a #0c0f14 board. It still reads as a flash.
+//
+// TWO, staggered. One ripple is invisible in a still frame caught at its faint
+// end — and a still frame is how this gets reviewed, and how a player who
+// glances at the board for 200ms sees it. Half a cycle apart, the brighter of
+// the pair never drops below ~0.48 stroke-opacity, so there is always something
+// to see.
+//
+// The AMPLITUDE carries the size of the fight: a skirmish throws a 5-unit
+// ripple, an army-scale battle a 13-unit one. Chosen over "how close is this to
+// resolving" because it is the reading nobody can get backwards — big ring, big
+// fight — and because it does not change between frames, so it never flickers.
+// It is one inherited custom property on the battlegroup, diff-gated on an
+// integer, which in practice is one DOM write per fight for its whole duration.
+//
+// Cost on a peaceful board: zero. The circles live in the battlegroup, which is
+// built on a station's first battle and is `display:none` unless the node
+// carries `.is-fighting` — and a `display:none` element runs no animation.
+const MAP_ALERT_GAP = 2.5;    // ripples start this far outside the momentum ring
+const MAP_ALERT_MIN = 6;      // travel, board units, for the smallest skirmish
+const MAP_ALERT_MAX = 15;     // and for the largest battle. Capped, and the cap
+                              // is the reason the mapping is not simply linear:
+                              // the board's nearest-neighbour gap is 16.9 units,
+                              // and a ripple that reaches a neighbour's garrison
+                              // number is a second problem, not a louder signal.
+
+// How far this fight's ripple travels, in board units. log10 because Power in
+// play spans two or three orders of magnitude across a match and a linear map
+// would put every fight but the last at the floor. Rounded to a whole unit so
+// the value is a bucket: a battle whose Power drifts by 0.4 a tick produces no
+// write at all.
+//
+// The coefficients are not decoration. The first pass (4 + 3·log10) was measured
+// on a staged board and every real fight came out between 8 and 11 units — a
+// 3-unit spread, about 3 screen pixels at 1x, which is a channel nobody can
+// read. 2 + 4.5·log10 puts a village skirmish at the 6-unit floor and a capital
+// assault at the 15-unit cap, a 2.5x ripple, which is a difference you see
+// without being told to look for it.
+function mapAlertReach(power) {
+  const p = (isFinite(power) && power > 0) ? power : 0;
+  return clamp(Math.round(2 + 4.5 * Math.log10(1 + p)), MAP_ALERT_MIN, MAP_ALERT_MAX);
+}
+
+// ── standing-order marker ───────────────────────────────────────────────
+//
+// 01-data-schema.md, "Standing orders": one pipe with two ends and an off
+// switch. The player needs to see their logistics network as a NETWORK —
+// which cities are draining and which are collecting — without clicking each
+// one, or the mechanic is set once and then forgotten about.
+//
+// NOTHING IS DRAWN FOR 'hold'. It is the default and, on any real board, it is
+// what ~all 108 stations carry. Drawing it would put a mark on every node to
+// say "no instruction", which is not information; drawing only the deliberate
+// orders means the marks on the map ARE the player's intent, and the count of
+// them is the size of their logistics network. It also makes the whole feature
+// free on a board where nobody has used it: the DOM below is built lazily, on a
+// station's first non-hold order, exactly like the battle group above — so a
+// board with no orders renders byte-identically to one built before this
+// existed, which is checkable rather than asserted.
+//
+// WHICH CHANNEL. Every obvious one on this board is taken and each is taken by
+// something more important:
+//
+//   colour            = ownership, seven power hues (§8, non-negotiable)
+//   node silhouette   = station type, four shapes (§8)
+//   caret ABOVE       = selection (render/select.js)
+//   expanding rings   = a fight is happening here (.station-alert)
+//   amber float label = multiplier ×N (.station-modifier, upper right)
+//   broken-link glyph = cut off from the capital (.station-cut, upper right)
+//   achromatic arc    = how full this station is (.station-fill)
+//
+// So this takes a POSITION nothing else claims plus a DIRECTION, and no hue at
+// all. The slot is directly BELOW the node and below the station's name — at
+// the same radius the attacker's number uses, which is the only other thing
+// down there and which only exists during a fight (the marker stands down while
+// `.is-fighting`, since a battle is the more time-critical reading and the two
+// would otherwise sit on each other).
+//
+// Direction carries which end of the pipe this is, and it is not arbitrary:
+// the marker hangs below the node, so an arrow pointing UP points INTO the city
+// (rally, a sink) and an arrow pointing DOWN points OUT of it (feed, a source).
+// Nobody has to be told which way round that is.
+//
+// Monochrome, so it cannot be read as a second ownership channel — the same
+// escape the fullness ring and the combat ripples take.
+// Drop below the momentum ring, in the station's own local space. The slot has
+// two neighbours and the number is set by clearing both:
+//
+//   the station NAME  y = r + 9 baseline, 8px, descending to about r + 11.
+//   the ATTACKER'S    y = rec.attY (momR + 9), dominant-baseline central and
+//   number            up to 16 units tall, so it spans roughly momR ± 8.
+//
+// 14 puts the glyph's top edge (7.6 units up from its centre) at about r + 12.4
+// — clear of the name by 1.4 units — and it still collides with the attacker's
+// number, which is why the marker stands down while `.is-fighting`. In a battle
+// the fight is the reading; the order has not gone anywhere.
+const MAP_ORDER_DROP = 14;
+
+// SIZE IS MEASURED, NOT CHOSEN. The first pass authored a 9.4-unit glyph, which
+// on the 800px window this game is actually played at renders 4.9 SCREEN PIXELS
+// tall — against a garrison number of 8.8px on the same node. Screenshotted, it
+// could not be found on the board at all, which is the whole feature failing:
+// the marker exists so the logistics network is legible WITHOUT clicking each
+// city. 15.2 units comes out at 7.8px, comfortably readable and still visibly
+// secondary to the number §8 calls the interface. (Both figures are on-screen
+// constants — the marker lives inside the station <g>, which map.js already
+// counter-scales by cameraSymbolScale(), so it holds that size at every zoom
+// with no extra transform of its own.)
+//
+// Both glyphs are STATIC path data, authored once here and never rewritten.
+// Which of the two is visible is a class on the group, exactly as .is-cut and
+// .is-fighting already work on the station <g> — a discrete state, not a
+// per-frame computed value, so there is no presentation attribute for a
+// stylesheet rule to silently outrank (known-issues #15). The only per-frame
+// decision is a diff-gated classList toggle.
+const MAP_ORDER_FEED_D =
+  'M-2.2,-7.6 L2.2,-7.6 L2.2,0.6 L6.2,0.6 L0,7.6 L-6.2,0.6 L-2.2,0.6 Z';
+const MAP_ORDER_RALLY_D =
+  'M-2.2,7.6 L2.2,7.6 L2.2,-0.6 L6.2,-0.6 L0,-7.6 L-6.2,-0.6 L-2.2,-0.6 Z';
+
+// ── A FEED CITY THAT SHIPS NOTHING ──────────────────────────────────────
+//
+// A feed city pointed at a full rally ships zero units forever and, until this,
+// looked identical on the board to one running perfectly. The rail says so once
+// you hover it; the whole point of the marker is that you should not have to.
+//
+// NO NEW CHANNEL WAS AVAILABLE and none was invented. Every channel listed above
+// MAP_ORDER_DROP is still taken by the thing that took it — colour is ownership,
+// silhouette is station type, the caret above is selection, the white rings are
+// combat, the amber label is a multiplier, and the slot below the node is this
+// marker. So the blocked state is a MODULATION OF THE ORDER CHANNEL ITSELF
+// rather than a new mark: the same glyph, in the same place, with a bar struck
+// through it. A barred arrow is a closed pipe and needs no legend.
+//
+// The bar is drawn in the HALO colour, not in ink. That makes it subtractive —
+// it cuts the white arrow into two stubs instead of adding a third mark to a
+// corner of the node that is already carrying five — and it is legible at the
+// size that matters: 3.6 of the glyph's 15.2 units, which is 1.85 screen pixels
+// at the 800px-wide window this game is played at, cutting a shape that is
+// 7.8px tall. Measured on screen, not chosen; the same discipline the glyph's
+// own size was set by.
+//
+// Static path data, display toggled by a CLASS, exactly like the two arrows.
+// Nothing here computes a presentation attribute per frame, so there is no
+// stylesheet rule for known-issues #15 to silently outrank.
+const MAP_ORDER_BLOCK_D = 'M-7.6,-1.8 L7.6,-1.8 L7.6,1.8 L-7.6,1.8 Z';
+
+// Sim ticks between blocked-feeder recomputes. The plan is the one read on the
+// board that is not O(1) — ~80 microseconds on the live 108-station board,
+// measured — so it is throttled on SIM TICKS rather than on frames: a PAUSED
+// board recomputes never, and a board with no feed cities pays nothing at all
+// because the branch below is never entered. 5 ticks against
+// BAL.ORDERS.INTERVAL's 25 means the marks can never be more than a fifth of a
+// sweep stale, and a freshly-issued order refreshes immediately regardless (see
+// `justOrdered` in liveStations).
+//
+// ONE PLAN PER POWER PER FRAME, not one per station: standingOrderPlan answers
+// for every feed city a power holds in a single search, so forty feeders cost
+// what one costs. `_mapOrdPlans` is built lazily inside a frame and dropped at
+// the top of the next one — a cache that cannot outlive the state it was
+// computed from, which is the only kind this file is allowed to keep.
+const MAP_ORDER_BLOCK_TICKS = 5;
+let _mapOrdTick = -1e9;
+let _mapOrdDue = false;
+let _mapOrdPlans = null;
+
+function mapOrderPlan(state, pid) {
+  if (!_mapOrdPlans) _mapOrdPlans = Object.create(null);
+  if (_mapOrdPlans[pid]) return _mapOrdPlans[pid];
+  const p = (typeof standingOrderPlan === 'function') ? standingOrderPlan(state, pid) : {};
+  _mapOrdPlans[pid] = p;
+  return p;
+}
+
+// Built on a station's FIRST non-hold order and reused forever after. One
+// insert per station per game, at most.
+function mapOrderNodes(rec) {
+  if (rec.ord) return rec.ord;
+  const g = el('g', 'station-ordergroup', {
+    transform: 'translate(0,' + rec.ordY + ')',
+  });
+  g.appendChild(el('path', 'station-order station-order-feed', { d: MAP_ORDER_FEED_D }));
+  g.appendChild(el('path', 'station-order station-order-rally', { d: MAP_ORDER_RALLY_D }));
+  g.appendChild(el('path', 'station-order station-order-block', { d: MAP_ORDER_BLOCK_D }));
+  rec.g.appendChild(g);
+  rec.ord = g;
+  return g;
+}
+
 function mapUnitTotal(u) {
   if (!u) return 0;
   return (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
@@ -588,6 +806,11 @@ function drawStations(D, layer, state) {
       capacity: Number(st.capacity) || 0,
       owner: undefined, garrison: undefined, cut: undefined, fight: undefined,
       fillBucket: undefined,
+      // Standing order: geometry now, DOM on this station's first non-hold
+      // order. `undefined` rather than 'hold' on purpose — the first frame then
+      // writes 'hold' into it and takes the build branch exactly never, so an
+      // untouched board pays nothing.
+      order: undefined, ord: null, ordY: momR + MAP_ORDER_DROP, ordBlocked: false,
       // battle readout: geometry now, DOM on this station's first fight
       ring: battleRing,
       momR: momR,
@@ -700,6 +923,16 @@ function mapBattleNodes(rec) {
   if (rec.bat) return rec.bat;
   const g = el('g', 'station-battlegroup');
 
+  // Combat alert, first in the group so it paints UNDER the momentum arcs and
+  // the attacker number — the alert is there to be caught out of the corner of
+  // the eye, the readout is there to be read, and the readout wins any overlap.
+  // Both circles are identical; the phase offset is a class, and the amplitude
+  // is a custom property inherited from this group, so per-fight state is one
+  // property on one element rather than two.
+  const alertR = rec.momR + MAP_ALERT_GAP;
+  g.appendChild(el('circle', 'station-alert', { r: alertR }));
+  g.appendChild(el('circle', 'station-alert is-late', { r: alertR }));
+
   const arcs = [rec.ring];
   const cache = [{ len: null, off: null, color: null }];
   for (let i = 0; i < MAP_MOM_ATK; i++) {
@@ -725,7 +958,10 @@ function mapBattleNodes(rec) {
   g.appendChild(num);
 
   rec.g.appendChild(g);
-  rec.bat = { arcs: arcs, cache: cache, num: num, text: null, color: null, tick: -1 };
+  rec.bat = {
+    arcs: arcs, cache: cache, num: num, text: null, color: null, tick: -1,
+    g: g, alertR: alertR, reach: null,
+  };
   return rec.bat;
 }
 
@@ -819,6 +1055,20 @@ function mapBattleLive(D, state, sid, rec) {
 
   let total = 0;
   for (const s of slices) total += s.p;
+
+  // Combat alert amplitude. A scale FACTOR rather than a radius, because the
+  // ripple expands by animating `transform: scale()` about its own centre and
+  // the circles are built at a radius that varies with node size. Written as an
+  // inline custom property on the group — a per-frame visual value must be a
+  // style, not an attribute (docs/testing/known-issues.md #15), and custom
+  // properties inherit, so one write feeds both ripples.
+  const reach = mapAlertReach(total);
+  if (reach !== bat.reach) {
+    bat.reach = reach;
+    const k = Math.round(((bat.alertR + reach) / bat.alertR) * 100) / 100;
+    bat.g.style.setProperty('--alert-k', String(k));
+    LIVE.writes++;
+  }
 
   // Nothing to divide by: a garrison of zero being walked into, or a battle
   // record that outlived its units. Draw the ring as pure attacker rather than
@@ -925,6 +1175,60 @@ function liveStations(D, state) {
       }
     }
 
+    // Standing order. Read through core's accessor, never off the raw field:
+    // stationOrder() defaults a state built before the field existed, and this
+    // renderer must not be the second place that rule is written down.
+    //
+    // NEVER CACHED ACROSS A CAPTURE. setStationOwner() resets `order` to 'hold'
+    // (01-data-schema.md: "An order does not survive a capture"), so a captured
+    // feed city's marker has to vanish on its own — which it does, because the
+    // value compared here is re-read from state every frame and the only thing
+    // remembered is what was last WRITTEN to the DOM. There is no path by which
+    // this file can keep showing an order the sim has already cleared.
+    const order = (typeof stationOrder === 'function')
+      ? stationOrder(state, sid)
+      : ((st.order) || 'hold');
+    let justOrdered = false;
+    if (order !== rec.order) {
+      const first = rec.order === undefined;
+      rec.order = order;
+      justOrdered = true;
+      // Nothing is drawn for 'hold', and on the first frame every station is on
+      // 'hold' — so the group is built only when an order actually arrives, and
+      // a board nobody has given an order to has no order DOM at all.
+      if (order !== 'hold' || !first) {
+        const g = mapOrderNodes(rec);
+        g.classList.toggle('is-feed', order === 'feed');
+        g.classList.toggle('is-rally', order === 'rally');
+        LIVE.writes++;
+      }
+    }
+
+    // Is this feed city actually shipping? See MAP_ORDER_BLOCK_D. Only feed
+    // cities pay anything here: a board on `hold` — which is every board until
+    // the player presses F — never enters this branch at all, and a station
+    // whose answer has not changed costs one boolean compare and zero DOM
+    // writes. `justOrdered` overrides the tick throttle so pressing F while the
+    // game is PAUSED still shows the answer on the next frame rather than at
+    // the next tick that never comes.
+    if (order === 'feed') {
+      if (_mapOrdDue || justOrdered) {
+        const nx = mapOrderPlan(state, st.owner)[sid];
+        const stuck = !(nx && nx.units > 0);
+        if (stuck !== rec.ordBlocked) {
+          rec.ordBlocked = stuck;
+          mapOrderNodes(rec).classList.toggle('is-blocked', stuck);
+          LIVE.writes++;
+        }
+      }
+    } else if (rec.ordBlocked) {
+      // Dropped back to hold, promoted to rally, or captured — an order does
+      // not survive a change of owner (01-data-schema.md), so this is also the
+      // path that clears the bar off a city that has just changed hands.
+      rec.ordBlocked = false;
+      if (rec.ord) { rec.ord.classList.toggle('is-blocked', false); LIVE.writes++; }
+    }
+
     // Cut off from its capital: not growing, actively decaying (§5).
     const cut = st.connected === false;
     if (cut !== rec.cut) {
@@ -993,6 +1297,12 @@ function renderLive(state) {
   // the onCameraChange subscription at the bottom of this file, which fires
   // even when the loop is paused and producing no frames at all.
   mapApplySymbolScale(false);
+  // The blocked-feeder read's tick gate, opened once here rather than tested per
+  // station: a paused board never advances state.tick, so it never reopens and
+  // the whole read costs nothing while the game is stopped.
+  _mapOrdDue = (state.tick - _mapOrdTick) >= MAP_ORDER_BLOCK_TICKS;
+  if (_mapOrdDue) _mapOrdTick = state.tick;
+  _mapOrdPlans = null;            // never survives the frame it was computed in
   liveStations(D, state);
   liveTerritories(D, state);
   return LIVE.writes - before;

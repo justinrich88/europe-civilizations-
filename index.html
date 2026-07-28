@@ -91,27 +91,39 @@
       <button type="button" class="btn send-btn is-active" data-fraction="0.75">75</button>
       <button type="button" class="btn send-btn" data-fraction="1">All</button>
 
-      <!-- WHICH types, beside HOW MANY. Same delegated listener, same
-           `is-active` projection, same "set once, not per attack" rule as the
-           fraction — these are toggles, not a radio group, and all three are on
-           by default so a player who ignores them gets the old behaviour. -->
-      <span class="send-sep" aria-hidden="true"></span>
-      <button type="button" class="btn send-btn send-type is-active" data-unit-type="infantry"
-              title="Include infantry in the volley">INF</button>
-      <button type="button" class="btn send-btn send-type is-active" data-unit-type="artillery"
-              title="Include artillery in the volley">ART</button>
-      <button type="button" class="btn send-btn send-type is-active" data-unit-type="armour"
-              title="Include armour in the volley">ARM</button>
+      <!-- The INF · ART · ARM type toggles used to sit here. Deleted 2026-07 on
+           the player's instruction ("Delete them."). Choosing SOURCES already
+           chooses types — the Ruhr makes armour, Leipzig makes artillery,
+           everywhere else infantry — so the toggles only bought "send this
+           city's infantry but leave its guns", which is not worth a permanent
+           mode on a bar the player fires volleys from. `cmd.types` still exists
+           in sim/commands.js; nothing in the UI sets it. -->
     </div>
 
-    <!-- Discoverability for the gesture table in render/select.js. A left-click
-         on one of your own cities only ever SELECTS it now — the friendly march
-         moved to the right button — and nothing else on screen would tell you
-         that. One line, always visible, no tutorial. -->
+    <!-- Discoverability for the gesture table in render/select.js. Nothing else
+         on screen would ever tell you that the friendly march lives on the RIGHT
+         button, or that the amount can be overridden at the moment of the click.
+         Always visible — the player's window is 800px and the old
+         `@media (max-width:1000px){display:none}` meant this line did not exist
+         for them at all. It now wraps to its own row instead of vanishing.
+
+         Tiers: `.is-basic` items describe what anyone discovers in ten seconds
+         and are the first to go; the modifiers and the right button are the ones
+         that are genuinely unguessable, so they are the last to go. -->
     <p class="send-hint" id="send-hint">
-      <span class="send-hint-item"><b>click</b> yours to select</span>
-      <span class="send-hint-item"><b>click</b> enemy to attack</span>
-      <span class="send-hint-item"><b>right-click</b> yours to reinforce</span>
+      <span class="send-hint-item is-basic"><b>click</b> yours = select</span>
+      <span class="send-hint-item is-basic"><b>click</b> enemy = attack</span>
+      <span class="send-hint-item"><b>right-click</b> = reinforce</span>
+      <span class="send-hint-item"><b>&#8679;</b>click = all</span>
+      <span class="send-hint-item"><b>&#8997;</b>click = half</span>
+      <span class="send-hint-item"><b>&#8984;</b>click = keep group</span>
+      <!-- Standing orders (render/select.js, _selApplyOrder). Not `.is-basic`:
+           a key that acts on the current selection is invisible to anyone who
+           does not already know it exists, which is precisely the tier this
+           line is for. Written as three bare letters because that is what the
+           player types — no modifier, which is itself the thing to know, since
+           every other accelerator on this bar needs one. -->
+      <span class="send-hint-item"><b>H R F</b> = hold&#183;rally&#183;feed</span>
     </p>
 
     <div class="powers" id="powers-strip"></div>

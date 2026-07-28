@@ -91,6 +91,23 @@ function newGame(seed) {
     waves: [],
     battles: {},
     log: [],
+    // Standing-order accounting (sim/movement.js). Counters, not a log: they
+    // live in state so a snapshot still explains itself and so a headless batch
+    // can assert on them without instrumenting the sim.
+    //
+    // `fights` is a TRIPWIRE and must stay 0 forever. A standing order moves
+    // units only between stations their owner already holds; if one ever
+    // deposited onto ground its owner does not hold it would have started a
+    // battle nobody clicked for, which is the one thing this mechanic may not
+    // do (00-vision.md §8, and data/tuning.js §11).
+    orderStats: {
+      sweeps: 0,       // standing-order phases that actually ran (throttled)
+      sends: 0,        // waves created by a standing order
+      unitsSent: 0,    // units those waves carried at launch
+      standDowns: 0,   // standing waves that halted instead of fighting
+      unitsLost: 0,    // units dissolved with no held station to fall back to
+      fights: 0,       // MUST BE ZERO
+    },
   };
 
   POWER_IDS.forEach(function (pid) {
@@ -131,6 +148,11 @@ function newGame(seed) {
       },
       connected: true,   // recomputed each tick from the capital, sim/movement.js
       growthMul: 1,      // recomputed from multiplier stations in range
+      // Standing order — MUTABLE PLAYER INTENT, which is why it lives here and
+      // not in data/stations.js (that file is static geometry). 'hold' is the
+      // off switch and the default, so a board nobody has touched behaves
+      // exactly as it did before this mechanic existed.
+      order: 'hold',     // 'hold' | 'rally' | 'feed'
     };
   });
 
@@ -161,7 +183,51 @@ function setStationOwner(state, sid, owner) {
   if (st.owner === owner) return false;
   st.owner = owner;
   state.ownerEpoch = (state.ownerEpoch || 0) + 1;
+  // A STANDING ORDER DOES NOT SURVIVE A CAPTURE. It is one player's intent
+  // about their own board, and the power that just took the city never
+  // expressed it. Left in place, a captured 'feed' would immediately start
+  // draining the freshly-taken front-line city its new owner most needs to
+  // hold — an automated mechanic quietly working against the player, which is
+  // the failure mode the whole scoping rule exists to prevent. A captured
+  // 'rally' is milder but no more legitimate.
+  //
+  // Reset happens HERE rather than in the capture paths so no caller can
+  // forget: setStationOwner is already the only supported way ownership
+  // changes, so it is the only place this can leak from.
+  st.order = 'hold';
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Standing order — the other half of the same discipline.
+//
+// The only supported way to change a station's order. Validates the value, so
+// a typo cannot put an unknown string in state where the orders phase would
+// silently ignore it forever. Player and AI reach this through
+// applyCommand({type:'order', ...}); nothing in render/ or app/ may call it
+// directly, for the same reason nothing there may write units.
+// ---------------------------------------------------------------------------
+
+var STATION_ORDERS = ['feed', 'hold', 'rally'];   // sorted; 'hold' is the default
+
+function isStationOrder(order) {
+  return STATION_ORDERS.indexOf(order) >= 0;
+}
+
+function setStationOrder(state, sid, order) {
+  var st = state && state.stations ? state.stations[sid] : null;
+  if (!st) return false;
+  if (!isStationOrder(order)) return false;
+  if (st.order === order) return false;
+  st.order = order;
+  return true;
+}
+
+// A station's standing order, defaulting to 'hold' for a state built before
+// this field existed (a saved snapshot, or a hand-built test fixture).
+function stationOrder(state, sid) {
+  var st = state && state.stations ? state.stations[sid] : null;
+  return (st && st.order) || 'hold';
 }
 
 // ---------------------------------------------------------------------------

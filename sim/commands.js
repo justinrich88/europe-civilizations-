@@ -221,6 +221,7 @@ function applyCommand(state, cmd) {
   };
 
   if (!state || !cmd || typeof cmd !== 'object') return _cmdFail(result, 'no-command');
+  if (cmd.type === 'order') return _cmdApplyOrder(state, cmd, result);
   if (cmd.type !== 'send') return _cmdFail(result, 'unknown-type');
   if (state.winner) return _cmdFail(result, 'game-over');
 
@@ -233,6 +234,21 @@ function applyCommand(state, cmd) {
 
   var target = cmd.target;
   if (!target || !state.stations[target]) return _cmdFail(result, 'unknown-target');
+
+  // A STANDING SEND MAY ONLY EVER AIM AT GROUND ITS OWNER ALREADY HOLDS.
+  //
+  // `standing: true` marks a wave created by a standing order (sim/movement.js)
+  // rather than by a click. Those are logistics, not commitment: they must never
+  // attack, never target ground the sender does not own and never initiate
+  // combat (00-vision.md §8 as amended, data/tuning.js §11). Enforced here, at
+  // the single mutation entry point, because that is the only place it cannot be
+  // routed around — a caller that builds waves some other way does not exist.
+  //
+  // A whole-command failure rather than a per-source rejection: the target is
+  // the part that is wrong, so no source could have saved it.
+  if (cmd.standing && state.stations[target].owner !== owner) {
+    return _cmdFail(result, 'standing-target-not-owned');
+  }
 
   var fraction = (cmd.fraction === undefined || cmd.fraction === null)
     ? BAL.SEND_FRACTION_DEFAULT : cmd.fraction;
@@ -307,6 +323,11 @@ function applyCommand(state, cmd) {
       launchTick: state.tick,
       eta: eta,
     };
+    // Set only when true, so a wave from an ordinary send is byte-identical to
+    // the one this file produced before standing orders existed — which is what
+    // keeps snapshot comparisons and replay determinism honest. Renderers read
+    // it to draw a standing stream differently from a committed march.
+    if (cmd.standing) wave.standing = true;
     state.waves.push(wave);
     result.waves.push(wave);
     result.accepted.push({
@@ -319,6 +340,77 @@ function applyCommand(state, cmd) {
     });
   }
 
+  result.ok = true;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// { type:'order', owner, stations:[stationId,…], order:'hold'|'rally'|'feed' }
+//
+// Sets a STANDING ORDER on stations the owner holds (00-vision.md §8 as
+// amended; sim/movement.js runs them). 'hold' is the default and the off
+// switch, so clearing an order is the same command with the same shape.
+//
+// It goes through applyCommand for the reason everything else does: nothing in
+// render/ or app/ may mutate state, and a station's order is state. The
+// alternative — a UI writing state.stations[sid].order directly — would be a
+// second path by which the board changes, and the whole replay/headless-testing
+// property of this project rests on there not being one.
+//
+// ADDITIVE. Before this existed, any cmd.type other than 'send' failed with
+// 'unknown-type' and touched nothing; every pre-existing caller still gets
+// byte-identical behaviour, exactly as cmd.types was added.
+//
+// Per-station validation, like a volley's sources: one unowned station in a
+// list does not cost the player the other nine.
+// ---------------------------------------------------------------------------
+function _cmdApplyOrder(state, cmd, result) {
+  if (!state.stations || !state.powers) return _cmdFail(result, 'no-command');
+  if (state.winner) return _cmdFail(result, 'game-over');
+
+  var owner = cmd.owner;
+  if (!owner || !state.powers[owner]) return _cmdFail(result, 'unknown-owner');
+  if (owner === 'neutral') return _cmdFail(result, 'neutral-cannot-act');
+  if (state.powers[owner].alive === false) return _cmdFail(result, 'power-eliminated');
+
+  var order = cmd.order;
+  var known = (typeof isStationOrder === 'function')
+    ? isStationOrder(order)
+    : (order === 'hold' || order === 'rally' || order === 'feed');
+  if (!known) return _cmdFail(result, 'unknown-order');
+
+  if (!Array.isArray(cmd.stations) || cmd.stations.length === 0) {
+    return _cmdFail(result, 'no-stations');
+  }
+
+  // Deduped and sorted for the same reason a volley's sources are: the caller's
+  // array order must not be able to change the outcome or the log.
+  var seen = {}, ids = [];
+  for (var i = 0; i < cmd.stations.length; i++) {
+    var sid = cmd.stations[i];
+    if (typeof sid !== 'string' || seen[sid]) continue;
+    seen[sid] = true;
+    ids.push(sid);
+  }
+  ids.sort();
+
+  for (var j = 0; j < ids.length; j++) {
+    var id = ids[j];
+    var st = state.stations[id];
+    if (!st) { _cmdReject(result, id, 'unknown-station'); continue; }
+    // You may only give orders to your own cities. Setting one on a rival's
+    // station would be commanding ground you do not hold, which is the same
+    // boundary the send rules draw.
+    if (st.owner !== owner) { _cmdReject(result, id, 'not-owned'); continue; }
+    if (typeof setStationOrder === 'function') setStationOrder(state, id, order);
+    else st.order = order;
+    result.accepted.push({ station: id, order: order });
+  }
+
+  if (!result.accepted.length) {
+    result.reason = result.rejected.length ? 'all-stations-rejected' : 'no-stations';
+    return result;
+  }
   result.ok = true;
   return result;
 }
