@@ -267,6 +267,11 @@ function runAllTests() {
   // Fog family — test/fog-tests.js; skips loudly until core/vision.js lands.
   if (typeof suiteFog === 'function') suiteFog(d);
 
+  // The guide — test/help-tests.js. render/help.js is the one file under
+  // render/ the headless harness loads, and it can be because everything
+  // asserted is derived content: no DOM is touched until helpShow() is called.
+  if (typeof suiteHelp === 'function') suiteHelp(d);
+
   return TEST_RESULTS;
 }
 
@@ -2060,6 +2065,58 @@ function suiteSimRouting(d) {
     assertEqual(r2.waves.length, 1, 'expected exactly one wave');
     assertEqual(r2.waves[0].path.join('>'), [de.src, de.gate, de.target].join('>'),
       'the accepted wave did not route through the held gate');
+  });
+
+  // -------------------------------------------------------------------------
+  // THE FALLBACK GIVES THE SAME VERDICT AS THE REAL RULE.
+  //
+  // commandRoute() prefers routeFor() and falls back to its own search when
+  // sim/movement.js has not loaded. That fallback's passability test had been
+  // left on the OLD rule — `owner === pid || owner === 'neutral'` — for the
+  // whole of the capital-only opening, where 101 of 108 stations are neutral,
+  // so the one configuration it exists for would have accepted a volley
+  // marching straight through unfought neutral garrisons.
+  //
+  // Nobody runs a path that only runs when something else has already failed
+  // (known-issues #20), so something has to run it on purpose. This is that.
+  // The global is restored in a `finally`: leaving routeFor undefined would
+  // silently retask every suite after this one.
+  test('commandRoute falls back to the SAME passability rule, not the old one', function () {
+    if (typeof routeFor !== 'function') return;          // nothing to shadow
+    var de = _routeDeadEnd(adj);
+    assert(de, 'no degree-1 station on the map to build a cut-vertex fixture from');
+    var s = _routeBoard(fns, 45, pid, [de.src]);
+    assertEqual(s.stations[de.gate].owner, 'neutral', 'fixture gate was not neutral');
+
+    // The authority's answer, taken first so the comparison is against a
+    // measured value rather than against a constant written down here.
+    var real = routeFor(s, pid, de.src, de.target);
+    assertEqual(real, null, 'fixture: routeFor already allows the neutral gate');
+
+    var saved = routeFor;
+    var viaFallback;
+    try {
+      globalThis.routeFor = undefined;
+      viaFallback = commandRoute(de.src, de.target, s, pid);
+    } finally {
+      globalThis.routeFor = saved;
+    }
+    assertEqual(viaFallback, null,
+      'the fallback routed through neutral ' + de.gate + ' — it must mirror ' +
+      '_moveCanTraverse, which stopped treating neutral as a corridor');
+
+    // ...and it still finds the route the real rule finds, so this is a fix to
+    // the passability test and not a fallback that now refuses everything.
+    _setOwner(s, de.gate, pid);
+    try {
+      globalThis.routeFor = undefined;
+      viaFallback = commandRoute(de.src, de.target, s, pid);
+    } finally {
+      globalThis.routeFor = saved;
+    }
+    assert(viaFallback && viaFallback.join('>') === [de.src, de.gate, de.target].join('>'),
+      'the fallback lost a route over ground the power HOLDS: ' +
+      (viaFallback ? viaFallback.join('>') : 'null'));
   });
 
   test('a capture bumps ownerEpoch and invalidates the route cache', function () {
@@ -4164,6 +4221,87 @@ function suiteStandingOrders(d) {
     _run(fns, b.s, 400);
     assertEqual(b.s.orderStats.sends, 0, 'the sweep shipped after all');
     assertEqual(b.s.orderStats.unitsSent, 0, 'the sweep moved units after all');
+  });
+
+  // -------------------------------------------------------------------------
+  // THE STARVATION BUG. Several cities feeding ONE destination whose headroom
+  // is SCARCE — which is the normal state of a front that is spending what it
+  // receives, and the exact gesture the mechanic was built for: marquee the
+  // rear, press R, click the front.
+  //
+  // The sweep planned its sources in STATION_IDS order and booked headroom as
+  // it went, so the alphabetically-first feeder took the whole of a scarce
+  // destination's room on every single sweep and every other feeder read
+  // `destination-full` forever. Measured on a live board before the fix, five
+  // feeders over 160 sweeps:
+  //
+  //     ber 160    bre 2    brn 2    fra 1    ham 1
+  //
+  // and with `ber` removed from the group it was `bre` — the SMALLEST of the
+  // five — that won 61 while `ham`, more than twice its capacity, took 2. So it
+  // was not size, not distance and not need: it was the id. That is a ranking
+  // the sim applies off screen, which is the one thing this whole design keeps
+  // deleting (see THE EVEN SPLIT in sim/movement.js), and it is what "they're
+  // not consistently still sending troops" looks like from the player's chair.
+  //
+  // THE ASSERTION IS FAIRNESS, NOT THROUGHPUT, because throughput was never
+  // wrong — the destination got fed either way. What was wrong is WHICH city
+  // paid, every time.
+  test('a scarce destination is fed by every source in turn, not always the first by id',
+  function () {
+    var b = _ordBoard(fns, d, 78, pid, 9);
+    var cap = d.POWERS[pid].capital;
+    // The destination is NOT the capital: the capital is the biggest garrison
+    // on the board and making it the sink would leave the group's shares so
+    // lopsided that a fairness claim would be about capacity rather than order.
+    var rest = b.own.filter(function (x) { return x !== cap; });
+    var dest = rest[rest.length - 1];
+    var sources = [cap].concat(rest.slice(0, 4)).sort();
+    _ordLink(b.s, pid, sources, dest);
+    assert(sources.length >= 4, 'fixture: not enough sources to starve');
+
+    // Bled every tick, so the destination always has SOME room and never
+    // enough for everybody — the equilibrium a front in use actually sits at.
+    // A destination pinned full would block every source equally and prove
+    // nothing; one pinned empty would have room for all of them and prove less.
+    var sends = {}, i;
+    for (i = 0; i < sources.length; i++) sends[sources[i]] = 0;
+
+    var sweeps = 0;
+    for (var t = 0; t < 40 * O.INTERVAL; t++) {
+      if (b.s.tick % O.INTERVAL === 0) {
+        sweeps++;
+        var plan = standingOrderPlan(b.s, pid);
+        for (i = 0; i < sources.length; i++) {
+          var p = plan[sources[i]];
+          if (p && p.units > 0) sends[sources[i]]++;
+        }
+      }
+      fns.step(b.s);
+      var du = b.s.stations[dest].units;
+      if (totalUnits(du) > 3) du.infantry -= 0.10;
+    }
+
+    var counts = [], total = 0;
+    for (i = 0; i < sources.length; i++) {
+      counts.push(sends[sources[i]]);
+      total += sends[sources[i]];
+    }
+    var most = Math.max.apply(null, counts);
+    var least = Math.min.apply(null, counts);
+
+    // VACUITY, both ways. A board where nothing ever ships would have a perfect
+    // spread, and a board with room for everyone every sweep would too — so the
+    // fixture has to prove it is actually contended before the fairness claim
+    // means anything.
+    assert(total > sweeps, 'VACUITY: the group shipped ' + total + ' times over ' +
+      sweeps + ' sweeps — the destination was not being fed at all');
+    assert(most < sweeps * sources.length,
+      'VACUITY: every source shipped on every sweep, so the destination was never scarce');
+
+    assert(least * 3 >= most,
+      'a scarce destination was fed by the same city over and over: sends by source, ' +
+      'in id order, were [' + counts.join(', ') + '] over ' + sweeps + ' sweeps');
   });
 
   }

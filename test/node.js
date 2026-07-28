@@ -13,7 +13,14 @@ const SCRIPTS = [
   'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
   'sim/relations.js', 'sim/victory.js', 'sim/step.js',
   'ai/score.js', 'ai/ai.js',
-  'test/asserts.js', 'test/ai-tests.js', 'test/fog-tests.js', 'test/runner.js',
+  // The ONLY render/ file this harness loads. render/help.js declares the
+  // guide's derived content (numbers off BAL and STATIONS) at the top level and
+  // touches no DOM until helpShow() is called, so it evaluates cleanly in a
+  // context with no `document` and no `window` — its exports are guarded for
+  // exactly that. test/help-tests.js asserts the content against the same data.
+  'render/help.js',
+  'test/asserts.js', 'test/ai-tests.js', 'test/fog-tests.js', 'test/help-tests.js',
+  'test/runner.js',
 ];
 for (const rel of SCRIPTS) {
   const f = path.join(root, rel);
