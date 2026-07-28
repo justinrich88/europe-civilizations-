@@ -223,10 +223,35 @@ function _aiActAtanh(x) {
 //
 //     ticks = atanh(1 / r) / COMBAT_RATE
 //
-// so at MIN_ODDS = 1.4 a winning fight is over in ~18 ticks. Anything landing
-// after that is not reinforcement. A turtle demanding ~1.9:1 gets an even
-// tighter window, which is the correct reading of its personality: it only
-// moves when the whole fist lands at once.
+// Anything landing after that is not reinforcement. A turtle demanding ~1.9:1
+// gets a tighter window, which is the correct reading of its personality: it
+// only moves when the whole fist lands at once.
+//
+// DERIVE THE NUMBER, DO NOT QUOTE ONE. This comment used to read "~18 ticks at
+// MIN_ODDS = 1.4". It was wrong by a factor of 22 and had been for as long as
+// BAL.COMBAT_RATE has been 0.0022 — the figure predates that constant and
+// nothing recomputed it when the constant moved. The window is a FUNCTION of
+// two tuning values and it must be read as one:
+//
+//     window(r) = atanh(1 / r) / BAL.COMBAT_RATE
+//
+//     r      COMBAT_RATE   ticks   sim-seconds
+//     1.4      0.0022       407        41        <- MIN_ODDS, the default
+//     1.5      0.0022       366        37
+//     1.89     0.0022       266        27        <- turtle (MIN_ODDS x 1.35)
+//     2.0      0.0022       250        25
+//
+// Recompute the column, do not edit it in place, if either constant changes:
+//
+//     node -e 'a=x=>0.5*Math.log((1+x)/(1-x)); console.log(a(1/1.4)/0.0022)'
+//
+// The check that would have caught it is the one from known-issues.md #11 —
+// multiply a constant out against the thing it has to move. 18 ticks is 1.8
+// sim-seconds, less than half of BAL.AI.ACTION_INTERVAL_TICKS (40) and a
+// fraction of any real march; a window that tight would have called almost
+// every genuine volley "defeat in detail" and stood the AI still. The behaviour
+// was always right, because the CODE computes the window from the constants.
+// Only the comment was quoting a number the code stopped producing.
 // ---------------------------------------------------------------------------
 
 function _aiActSpreadWindow(oddsFloor) {

@@ -21,7 +21,14 @@
   --border-inner:  #0b0e13;   /* internal territory borders — thin */
   --border-coast:  #33465e;   /* coastline — thicker, cooler */
   --link:          #3c4756;
-  --link-sea:      #35526b;
+  /* Sea crossings. Was #35526b, which is rgb(53,82,107) against a sea that
+     composites to roughly rgb(47,73,96) — the same hue family about 25%
+     brighter, i.e. invisible. §8 reserves colour for ownership, so this may not
+     answer with a hue: it stays in the same neutral blue and buys its contrast
+     with LIGHTNESS (and, in .link.is-sea, weight and dash period). Kept
+     desaturated so it cannot be mistaken for a power — the nearest power colour
+     is Germany's #4f74c8, which is twice as saturated and much darker. */
+  --link-sea:      #9db8d0;
 
   /* the number is the interface */
   --garrison:      #ffffff;
@@ -191,20 +198,45 @@ html, body {
   stroke-width: 2;
 }
 
-/* links */
+/* links
+
+   Every link is a <path> (render/map.js), trimmed at both ends to the live
+   symbol radius so a line starts where the node stops instead of running under
+   it, and a SEA link is bowed into an arc that clears both symbols. `fill: none`
+   is therefore load-bearing rather than tidy — a filled quadratic would paint a
+   lens over the board.
+
+   pointer-events: none, on both. These now have curvature and a wider stroke,
+   and #g-links sits under #g-stations across the whole board; select.js
+   hit-tests with closest('[data-station]'), so anything here that took a click
+   would silently swallow the gesture that commits an attack. That has bitten
+   this project five times and none of them announced themselves. */
 
 .link {
   stroke: var(--link);
   stroke-width: 1.4;
   stroke-opacity: 0.7;
   fill: none;
+  pointer-events: none;
 }
 
+/* THE CURVE is the primary signal that this is water — a dash never survived
+   being drawn in a dark blue on a dark blue sea, and on the five shortest
+   crossings there was no line to dash at all. The rest is lightness and
+   weight, never hue (00-vision.md §8, "colour carries ownership only"):
+
+     stroke      light neutral blue, ~3.5x the luminance of the sea behind it
+     width       1.9 against .link's 1.4, so it reads as the heavier route
+     dasharray   9 6 against 5 5 — a 15px period instead of 10. The short
+                 crossings only carry ~20px of visible arc, and at the old
+                 period that arrived as two ambiguous ticks; at this one it is
+                 a dash, a gap and a dash, which reads as deliberate. */
 .link.is-sea {
   stroke: var(--link-sea);
-  stroke-dasharray: 5 5;
-  stroke-width: 1.6;
-  stroke-opacity: 0.85;
+  stroke-dasharray: 9 6;
+  stroke-width: 1.9;
+  stroke-opacity: 0.9;
+  stroke-linecap: round;
 }
 
 /* stations — shape is type, colour is ownership, nothing else */
@@ -2181,7 +2213,9 @@ html, body {
   font-size: 12px;
 }
 
-/* The routed preview. One polyline per source, one vertex per hop. */
+/* The routed preview. One <path> per source, one quadratic per hop — the
+   link's own arc, so a preview over a sea crossing bows exactly where the link
+   and the wave do (render/map.js's link-geometry seam). */
 .sel-path {
   fill: none;
   stroke: var(--warn);
@@ -2376,10 +2410,11 @@ html, body {
    cities it streams surplus to, and each entry is drawn as the ROUTE the units
    will actually walk:
 
-     the LINE      a solid polyline through every hop of the route, in the
-                   OWNER'S POWER COLOUR.
-     the CHEVRONS  small arrowheads at each hop's midpoint, pointing the way the
-                   supply flows.
+     the LINE      a solid <path> through every hop of the route, riding each
+                   link's own curve — bowed on a sea crossing, straight on land
+                   — in the OWNER'S POWER COLOUR.
+     the CHEVRONS  small arrowheads at the midpoint of each hop's ARC, pointing
+                   the way the supply flows.
      the BAR       one stroke across the middle hop, shown only while the route
                    cannot deliver.
 

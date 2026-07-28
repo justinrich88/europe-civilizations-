@@ -480,6 +480,13 @@ function _moveIsSeaArrival(w) {
   return !!(l && l.sea);
 }
 
+// Ticker-legible unit count. One decimal below 10, whole numbers above — the
+// ticker is peripheral awareness and "puts 23.7 ashore" is noise, but a 0.6-unit
+// landing rounding to "0" would be a lie about an event that happened.
+function _moveLandNum(n) {
+  return String(n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
+}
+
 // The at-sea remainder lives in w.units, as it always has — nothing else in the
 // sim needs to learn a new place to look for a wave's strength. w.landing is
 // the bookkeeping a renderer needs on top of that:
@@ -493,7 +500,44 @@ function _moveIsSeaArrival(w) {
 // Fixing `per` at the start rather than recomputing it from the remainder is
 // what makes the echelon a constant fraction of ORIGINAL strength; recomputing
 // would give an exponential decay that never finishes.
-function _moveBeginLanding(w) {
+//
+// ── THE LANDING EVENT ──────────────────────────────────────────────────────
+//
+// This is the only moment an amphibious assault is a discrete, nameable thing:
+// after it the wave is a trickle of echelons and then it is just a battle.
+// Before this event existed the only surface a landing had was the station
+// readout (render/readout.js), which required hovering that exact station
+// inside the ~12 sim-second landing window — measured across 12 headless games,
+// 7,182 sea crossings and 4,282 beachhead landings produced ZERO ticker lines.
+//
+// Three properties, all deliberate:
+//
+//   * ONLY OPPOSED LANDINGS ARE LOGGED. A wave coming ashore at a port its own
+//     side already holds merges into the garrison and starts no fight; it is
+//     sea-borne reinforcement, not a beachhead, and it is HALF of all landings
+//     (measured: 2,219 of 4,356 over 12 games). A standing-order wave is never
+//     an assault by construction (see the STANDING WAVES block above), so it is
+//     excluded on the same test rather than on a second one. What is left —
+//     ~178 per game, one per 104 ticks — is exactly the set of events where
+//     units go into station.attackers off a boat.
+//
+//   * THE NUMBER IS THE ONE THAT LANDS. `L.total` is read back out of the
+//     record this function just built, POST sea toll, which is the same number
+//     _moveLandEchelon divides into echelons and the same one the readout
+//     prints. It is not recomputed from w.units and not derived from anything
+//     (docs/testing/known-issues.md #18).
+//
+//   * THE DEFENDER IS NAMED AT LANDING TIME. The beach can change hands twice
+//     before the last echelon is ashore, so "who was standing there" cannot be
+//     looked up later from the station — it has to be recorded now, which is
+//     also why render/hud.js tiers off the logged text rather than off the live
+//     board.
+//
+// logEvent lives in core/state.js and only pushes onto state.log — no document,
+// no rng (sim/combat.js already calls it from _capture for the same reason).
+// Adding it here therefore cannot move a seeded replay: verified by running
+// `node tools/balance.js 48 --seed 100` before and after, byte-identical.
+function _moveBeginLanding(state, w) {
   var per = emptyUnits();
   var n = BAL.LANDING_TICKS > 1 ? BAL.LANDING_TICKS : 1;
   for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
@@ -501,6 +545,15 @@ function _moveBeginLanding(w) {
     per[t] = w.units[t] / n;
   }
   w.landing = { ashore: 0, total: totalUnits(w.units), per: per };
+
+  var sid = w.path[w.path.length - 1];
+  var st = state && state.stations ? state.stations[sid] : null;
+  if (!st || st.owner === w.owner) return;              // reinforcement, not a beachhead
+  if (typeof logEvent !== 'function') return;
+  logEvent(state, 'landing',
+    w.owner + ' puts ' + _moveLandNum(w.landing.total) + ' ashore at ' +
+    (typeof STATIONS !== 'undefined' && STATIONS[sid] ? STATIONS[sid].name : sid) +
+    ' against ' + st.owner);
 }
 
 // Commit one echelon. Returns true while units are still at sea, i.e. while the
@@ -582,7 +635,7 @@ function resolveArrival(state, w) {
     return false;
   }
 
-  _moveBeginLanding(w);
+  _moveBeginLanding(state, w);
   return _moveLandEchelon(state, w);
 }
 

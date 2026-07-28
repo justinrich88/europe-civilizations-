@@ -264,6 +264,9 @@ function runAllTests() {
   // AI family — test/ai-tests.js; skips loudly until ai/ lands.
   if (typeof suiteAI === 'function') suiteAI(d);
 
+  // Fog family — test/fog-tests.js; skips loudly until core/vision.js lands.
+  if (typeof suiteFog === 'function') suiteFog(d);
+
   return TEST_RESULTS;
 }
 
@@ -2523,6 +2526,124 @@ function suiteSimBeachhead(d) {
     // threshold sits between the two on purpose.
     assert(s.stations[fx.beach].attackers['_atk'].artillery > 9.5,
       'a zero-hop wave was charged a sea crossing it never made');
+  });
+
+  // ---- the landing EVENT ---------------------------------------------------
+  //
+  // Before this existed, an amphibious assault produced no notification of any
+  // kind: measured over 12 headless games, 4,282 landings and zero ticker lines.
+  // The event is what render/hud.js tiers off, so these assertions are about the
+  // two things a ticker line can get wrong — saying something that did not
+  // happen, and saying a number that is not the one on the board
+  // (docs/testing/known-issues.md #18).
+  function _beachLandings(s) {
+    return (s.log || []).filter(function (e) { return e.kind === 'landing'; });
+  }
+  var _LAND_RE = /^(\S+) puts ([0-9.]+) ashore at (.+) against (\S+)$/;
+
+  test('an opposed landing logs exactly one landing event, in the sim log shape', function () {
+    var s = _beachBoard(fns, 30);
+    s.stations[fx.beach].units.infantry = 20;
+    _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 0, armour: 0 }, '_atk');
+
+    var at = s.tick;
+    _beachMove(s, N + 200);
+
+    var ev = _beachLandings(s);
+    assertEqual(ev.length, 1,
+      'an opposed landing logged ' + ev.length + ' events — one per ECHELON, or none at all');
+    // Same record shape as sim/combat.js's capture and sim/victory.js's
+    // capitulation: { tick, kind, text } and nothing else. A ticker that has to
+    // learn a second shape is a ticker that will read the wrong field.
+    assertEqual(Object.keys(ev[0]).sort().join(','), 'kind,text,tick',
+      'the landing record is not { tick, kind, text }');
+    assertEqual(ev[0].tick, at, 'the landing was stamped with the wrong tick');
+    var m = _LAND_RE.exec(ev[0].text);
+    assert(!!m, 'render/hud.js cannot parse the landing sentence: "' + ev[0].text + '"');
+    assertEqual(m[1], '_atk', 'the landing named the wrong power');
+    assertEqual(m[3], (d.STATIONS[fx.beach] ? d.STATIONS[fx.beach].name : fx.beach),
+      'the landing named the wrong place');
+    assertEqual(m[4], 'neutral', 'the landing named the wrong defender');
+  });
+
+  test('the logged force is the force that ACTUALLY comes ashore', function () {
+    // known-issues #18: a number is only proven by being compared against the
+    // event it predicts. The sentence says "puts N ashore"; this counts what
+    // reaches station.attackers and demands they agree. Movement phase only, so
+    // no combat eats the evidence.
+    var s = _beachBoard(fns, 31);
+    s.stations[fx.beach].units.infantry = 20;
+    // Artillery on board on purpose: the sea toll is charged before the landing
+    // record is built, so a sentence written from the PRE-toll stack would
+    // over-report by SEA_ARTILLERY_LOSS and nothing else here would notice.
+    _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 20, armour: 0 }, '_atk');
+    _beachMove(s, N + 200);
+
+    assertEqual(s.waves.length, 0, 'the landing never finished');
+    var ashore = totalUnits(s.stations[fx.beach].attackers['_atk']);
+    assert(ashore < 70 - 1e-9, 'the sea artillery toll was never charged — fixture is not a crossing');
+
+    var m = _LAND_RE.exec(_beachLandings(s)[0].text);
+    assert(!!m, 'landing sentence did not parse');
+    var expect = (typeof _moveLandNum === 'function')
+      ? _moveLandNum(ashore)
+      : String(ashore >= 10 ? Math.round(ashore) : Math.round(ashore * 10) / 10);
+    assertEqual(m[2], expect,
+      'the ticker would say "' + m[2] + ' ashore" while ' + ashore.toFixed(3) +
+      ' units actually landed');
+  });
+
+  test('sea-borne REINFORCEMENT into a friendly port logs nothing', function () {
+    // Half of all landings on a live board (measured: 2,219 of 4,356 over 12
+    // games) are a wave coming ashore where its own side already stands. That is
+    // logistics, not a beachhead — it deposits into the garrison and starts no
+    // fight — and logging it would double the ticker's landing traffic with
+    // events that carry no news.
+    var s = _beachBoard(fns, 32);
+    _setOwner(s, fx.beach, '_atk');
+    s.stations[fx.beach].units.infantry = 10;
+    var w = _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 0, armour: 0 }, '_atk');
+    _beachMove(s, N + 200);
+
+    assert(!!w.landing, 'the fixture never landed — this test would pass vacuously');
+    assertEqual(_beachLandings(s).length, 0,
+      'reinforcement by sea was logged as an opposed landing');
+  });
+
+  test('a LAND arrival logs no landing', function () {
+    var s = _beachBoard(fns, 33);
+    s.stations[fx.beach].units.infantry = 5;
+    _beachWave(s, fx.land, fx.beach, { infantry: 40, artillery: 0, armour: 0 }, '_atk');
+    movementTick(s);
+    assertEqual(_beachLandings(s).length, 0, 'an overland arrival was logged as a landing');
+  });
+
+  test('logging a landing does not perturb the seeded stream', function () {
+    // Determinism is a hard guarantee (00-vision.md §9) and a presentational
+    // event must not be able to move a replay. logEvent only pushes onto
+    // state.log, so this asserts the observable form of that: the same seed run
+    // twice, with landings happening in both, agrees on everything EXCEPT the
+    // log, and the rng cursor is untouched by the landing itself.
+    function play(seed) {
+      var s = _beachBoard(fns, seed);
+      s.stations[fx.beach].units.infantry = 20;
+      _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 20, armour: 0 }, '_atk');
+      for (var t = 0; t < N + 200; t++) fns.step(s);
+      return s;
+    }
+    var a = play(34), b = play(34);
+    assert(_beachLandings(a).length === 1, 'no landing happened — nothing was being tested');
+    assertEqual(JSON.stringify(a.rng), JSON.stringify(b.rng),
+      'the rng cursor diverged between two runs of the same seed');
+    var sa = snapshot(a), sb = snapshot(b);
+    delete sa.log; delete sb.log;
+    assertEqual(JSON.stringify(sa), JSON.stringify(sb),
+      'two runs of the same seed produced different boards');
+    // And the landing tick itself spent no randomness: the cursor before and
+    // after the tick the landing lands on must be equal to a run that is
+    // identical in every other respect.
+    assert(JSON.stringify(a.log) === JSON.stringify(b.log),
+      'the log itself is not reproducible from the seed');
   });
 }
 

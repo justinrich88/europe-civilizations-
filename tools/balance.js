@@ -37,7 +37,7 @@ const root = path.join(__dirname, '..');
 // Same list as test/node.js, minus the test harness itself. Missing files are
 // skipped so this runs while later milestones are still being written.
 const SCRIPTS = [
-  'core/rng.js', 'core/util.js', 'core/state.js',
+  'core/rng.js', 'core/util.js', 'core/state.js', 'core/vision.js',
   'data/tuning.js',
   'data/map.js', 'data/stations.js', 'data/scenario.js',
   'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
@@ -58,6 +58,18 @@ for (const rel of SCRIPTS) {
 
 if (typeof stepTick !== 'function' || typeof applyCommand !== 'function') {
   console.error('balance: the sim is not loaded — need stepTick() and applyCommand().');
+  process.exit(2);
+}
+
+// The fog gate, asserted separately and loudly. Forgetting core/vision.js in
+// SCRIPTS above is a SILENT failure of exactly the worst kind: visibleTo would
+// simply be undefined, the AI would fall back to reading the whole board, every
+// game would still run to completion, and this harness would report a clean set
+// of numbers for a game nobody is playing. A missing file is skipped by design
+// (later milestones are still being written), so nothing else can catch this.
+if (typeof visibleTo !== 'function' || typeof stationVision !== 'function') {
+  console.error('balance: core/vision.js is not loaded — need visibleTo() and stationVision().');
+  console.error('         Without it the AI reads the true board and these numbers are for a different game.');
   process.exit(2);
 }
 

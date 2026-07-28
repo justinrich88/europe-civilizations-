@@ -132,6 +132,38 @@ The lucky part: `aiContext(state, pid)` is already a pinned seam that builds
 per-decision cached facts including a hop map. Visibility filtering belongs
 there, and adding it later touches one function rather than the whole AI.
 
+> *Struck 2026-07. The last sentence is **false**, and it was measured false
+> before a line of fog was written. Tracing every path by which the AI learns
+> about a station found **22 reads**, only 4 of them inside `aiContext`.
+> Filtering there changes which stations become **candidates** and nothing
+> about **what the AI knows once one is a candidate** — and the number that
+> decides every attack, the defender's live garrison, is read through three
+> call sites (`_aiActDefenderPower`, `_aiActStackPower`,
+> `_aiActGrownDefenderPower`) in two files, none of which receives `ctx`.
+> `_aiActPlanVolley` and `_aiActPlanStage` have no `ctx` parameter at all.
+> Real cost: **~8 functions across 2 files, 5 of them signature changes.***
+>
+> *The seam that does work is one the AI already built for itself: it
+> constructs single-station **proxy states** twice over, purely so it can reuse
+> the canonical `stationPower` instead of re-deriving it. A believed board
+> rides in on that same machinery.*
+>
+> *And one hard prohibition, because it costs nothing to state and 1,400× to
+> discover: **never hand a proxy or believed state to `routeFor` /
+> `commandRoute`.** `_ownRouteCache` (`sim/movement.js`) invalidates on state
+> **object identity**, so a fresh proxy per call blows the real state's route
+> cache too, and `movementTick` then recomputes its Dijkstras from scratch
+> every tick. Measured on the live board: `routeFor` cached **0.115 µs**, with
+> a fresh proxy each call **161.1 µs**. It produces no wrong answer — only a
+> game that crawls, which is the hardest kind of regression to attribute.*
+>
+> ***Decision: routing legality stays on the true board.** The AI and the
+> player's preview may both route through ground they have never seen. A route
+> is a claim about where your own army may walk, and "you find out the road is
+> blocked when you march" is legible fog behaviour rather than a bug. This is
+> the one place the fog is deliberately incomplete on the map, and the
+> sequencing section below names the other one.*
+
 ### Cost, honestly
 
 This is the largest of the three. It touches `render/map.js` (masking, stale
@@ -152,6 +184,14 @@ state). Call it a milestone of its own, not a bolt-on.
 than a naval system"*. Concretely: **10 sea links**, touching **17 of 108
 stations**, with `SEA_SPEED_MUL` slowing everything and
 `SEA_ARTILLERY_SPEED_MUL` punishing artillery specifically.
+
+> *Revised 2026-07. Milestone 5.5 shipped change (a) below: there are now **32
+> sea links**, not 10. Everything downstream of that count in this document was
+> written against the old board — in particular the fog cost estimate in §1,
+> since vision flows over `LINKS` and therefore leaks across three times as much
+> water as costed here. Britain at vision 1 sees the continental terminus of
+> every crossing it holds. That is wanted, but it is a **decision**, not an
+> accident, and it is recorded here because nothing else records it.*
 
 So "sea attacks originate and end at coastal cities" is *already structurally
 true* — but it is thin. Ten fixed pairs is a set of bridges, not a sea. Britain
@@ -209,6 +249,34 @@ against a board the AI can *see*. Restrict what it can see and every one of
 those decisions changes. A balance pass run first would have to be thrown away
 and run again.
 
+Two things reading the code adds to that argument.
+
+**The standings stay public — the second deliberate hole in the fog.**
+`ctx.leader` and `ctx.leaderShare` are built by walking `territoryControl`
+across **all 30 territories**: global information, computed every decision.
+`LEADER_WEIGHT` is 45.0 and is the only constant on the board that can actually
+declare a war — it is the mechanism §5 relies on to keep the square-law
+snowball honest. Fogging it would silently disarm the balance of power and
+leave the leader unopposed, which is the exact failure the Concert exists to
+prevent.
+
+> **Decision: who is winning is public knowledge.** In 1914 the standings are
+> newspapers, embassies and attachés, not reconnaissance. You can hide an army;
+> you cannot hide having conquered Belgium. Fog covers *what is in a city*, not
+> *who holds the map*.
+
+This is a balance-defining choice rather than a detail, and it is written down
+because a later reader will otherwise find global reads inside a fogged AI and
+"fix" them.
+
+**Milestone 6 is now carrying two un-rebalanced structural changes, not one.**
+The note above about a real sea graph changing hop distances — and therefore
+`TARGET_MAX_HOPS` and `SOURCE_MAX_HOPS`, the constants deciding whether the AI
+defeats itself in detail — was written as a future risk. It has already
+happened: 5.5 shipped 32 sea links against the 10 this document was costed on.
+Fog is the second. Both must be in before Milestone 6 runs, and Milestone 6
+must run **once**.
+
 Sea is the milder case but points the same way: a real sea graph changes hop
 distances, which changes `TARGET_MAX_HOPS` and `SOURCE_MAX_HOPS`, which are the
 constants that decide whether the AI defeats itself in detail.
@@ -217,8 +285,39 @@ Revised order:
 
 | # | Milestone | Status |
 |---|---|---|
-| 4 | AI powers | in progress |
-| 5 | Readability — includes neutrals reading as *hardening* | next |
-| **5.5** | **Sea graph + beachhead landings** | new |
-| **5.7** | **Fog of war** | new |
-| 6 | Balance pass — run **once**, under fog and sea | moved |
+| 4 | AI powers | **done** |
+| 5 | Readability — includes neutrals reading as *hardening* | **done** (5.6, 5.6b) |
+| **5.5** | **Sea graph + beachhead landings** | **done** — 32 sea links, echelon landings |
+| **5.6c** | **Making the sea *visible*** | **done** — see below |
+| **5.7** | **Fog of war** | in progress |
+| 6 | Balance pass — run **once**, under fog and sea | blocked on 5.7 |
+
+### 5.6c — the milestone nobody planned
+
+Milestone 5.5 was reported complete and was, in the sim. Instrumenting 12 full
+games afterwards found **7,182 sea crossings and 4,282 beachhead landings** —
+and a player who had never seen one. Every part of the feature worked and none
+of it was on screen:
+
+- Links were drawn centre-to-centre while station symbols have a 12px radius,
+  so `dov→lil` — 21px between centres, and **24% of all crossings** with
+  `lil→lon` — had **−10.1px** of visible line. Five sea links rendered at
+  literally zero.
+- The beachhead marker stood off *along* the link, competing for length it did
+  not have, and rendered **12.2px inside the destination city's battle ring**.
+- 4,282 landings produced **zero** ticker lines. An amphibious assault and a
+  road march read identically.
+
+Fixed by bowing sea links into arcs whose sagitta is *derived* from the symbol
+radius (so a short crossing bows hard, a long one gently, and the bow melts
+away as you zoom in and symbols counter-scale), trimming every link to the
+symbol edge, and pushing the landing marker **perpendicular** to the arc rather
+than back along it. Minimum visible sea arc is now **12.4px across all 32
+links** and holds from 1× to 4×.
+
+> **The lesson, which is the reason this section exists.** A green test suite
+> and a working sim proved the feature existed; neither could see that it was
+> invisible. `test/node.js` loads no `render/` file **by design**, so every
+> render-layer bug this project has logged (known-issues #15 twice, #16, #18,
+> #20) lived in a tree that was passing. A feature is not done when the sim
+> does it. It is done when a player can see it happen.

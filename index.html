@@ -173,6 +173,11 @@
 
 <script src="core/state.js"></script>
 
+<!-- The fog gate. Immediately after core/state.js and BEFORE sim/, ai/ and
+     render/, because both consumers (render masking, AI candidate filtering)
+     load later and nothing in sim/ may call it at all. -->
+<script src="core/vision.js"></script>
+
 <script src="sim/commands.js"></script>
 <script src="sim/growth.js"></script>
 <script src="sim/movement.js"></script>

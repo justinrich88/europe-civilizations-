@@ -259,6 +259,10 @@ function hudPowerStrip(state, nodes) {
 
 // Loudness tier for a log kind. Anything unrecognised is background, so a new
 // kind added by the sim later degrades to quiet rather than shouting.
+//
+// 'landing' is deliberately absent: an amphibious assault's tier depends on
+// which END of it the player is on, which is a property of the row and not of
+// the kind. hudTickLandRow() sets it. See the LANDINGS block below.
 function hudTickWeight(kind) {
   if (kind === 'victory' || kind === 'capitulation' || kind === 'elimination') return 'major';
   if (kind === 'relations') return 'mid';
@@ -346,15 +350,172 @@ function hudTickMine(cap) {
   return cap.pid === PLAYER || cap.from === PLAYER;
 }
 
-// Newest-first display rows, with capture bursts coalesced. Walks the log
-// backwards and stops as soon as it has `max` rows — the other 395 entries are
-// never touched.
+// ── LANDINGS ────────────────────────────────────────────────────────────
+//
+// sim/movement.js logs an OPPOSED landing as
+//
+//     <pid> puts <n> ashore at <Place> against <pid>
+//
+// which is the same contract hudTickCapture() has with sim/combat.js: parse it
+// back out to merge and to tier, fall through to the generic path if the
+// wording ever changes.
+//
+// THE THROTTLE, AND WHY IT IS A FILTER RATHER THAN A CAP.
+//
+// Measured over 12 headless games (223,062 ticks): 4,356 landings, of which the
+// sim already discards the 2,219 that are sea-borne reinforcement into a port
+// the lander already holds. That leaves 178 opposed landings per game — one
+// every 104 ticks, ~10 sim-seconds. The ticker is five rows in a 52px bar over
+// the sea and the header of this file is explicit that more rows is not free
+// real estate, it is a taller bar eating the board. 178 rows a game through a
+// five-row window means the ticker is nothing but landings and a capitulation
+// never survives long enough to be read.
+//
+// So landings are filtered by RELEVANCE, not rationed by rate:
+//
+//   * a landing the player is party to — theirs, or one coming ashore on ground
+//     they hold — gets a row;
+//   * every other power's amphibious war does not. Italy landing in Tunisia is
+//     not peripheral awareness, it is noise, and the player cannot act on it.
+//
+// A rate cap was the alternative and is worse: it drops events by arrival order
+// rather than by whether they matter, so a burst of Ottoman landings in the
+// Aegean would silence the one landing on the player's own beach.
+//
+// Measured after the filter and the merge below, rows per game by chosen power:
+// GER 10.3, ITA 10.6, OTT 7.6, AUT 8.1, GBR 33.5, RUS 36.8, FRA 39.3 — against
+// a mean game of ~2,000 sim-seconds, i.e. one landing row every one to three
+// sim-minutes even for the most amphibious power on the board. That fits in
+// five rows alongside captures without the bar growing by a pixel.
+//
+// THE TIERS. Two, and they are the point of the feature:
+//
+//   * major — somebody is coming ashore ON GROUND THE PLAYER HOLDS. This is the
+//     most actionable event the game produces: the force lands in echelons over
+//     BAL.LANDING_TICKS, so there is a real window in which reinforcing the
+//     beach still changes the outcome, and it is the only window. style.css
+//     gives 'major' an --accent rule and pins opacity at 1, so it stays legible
+//     as it ages out of the stack rather than fading to 24% while the landing
+//     is still happening.
+//   * mid — the player's OWN landing. Confirmation that a committed force is
+//     ashore, not an alarm. Same tier a capture the player is party to gets.
+//
+// No new palette token and no new stylesheet rule: both tiers already exist and
+// are already styled, and 00-vision.md §8 keeps colour for ownership only. The
+// row also carries data-kind="landing" so the CSS has a hook if it ever wants
+// one, but nothing here depends on that hook existing.
+function hudTickLanding(e) {
+  if (!e || e.kind !== 'landing') return null;
+  const m = /^(\S+) puts ([0-9.]+) ashore at (.+) against (\S+)$/.exec(String(e.text || ''));
+  if (!m) return null;
+  const n = Number(m[2]);
+  if (!isFinite(n)) return null;
+  return { pid: m[1], units: n, place: m[3], from: m[4] };
+}
+
+// Whose landing is worth a row, and how loud. Returns null for "not the
+// player's business", which is what makes 178 events a game fit in five rows.
+//
+// PLAYER unset (the empire picker, a harness) reads as "nobody's business" and
+// shows nothing, rather than as "everybody's". That is the safe direction: the
+// failure mode of the other choice is a flooded ticker, and the failure mode of
+// this one is a ticker that looks exactly like it did before this feature.
+function hudTickLandTier(l) {
+  if (!l || typeof PLAYER !== 'string') return null;
+  if (l.from === PLAYER) return 'major';        // on my beach — the alarm
+  if (l.pid === PLAYER) return 'mid';           // mine — confirmation
+  return null;
+}
+
+// One landing row, or none. Called with `i` pointing at a 'landing' entry;
+// returns the index to carry on the backwards walk from, so the caller does not
+// have to know how many entries were consumed.
+//
+// THE MERGE. §8's primary command is many sources onto one target, so an
+// amphibious volley is several waves that cross separately and begin landing
+// within a few ticks of each other — several log entries describing ONE
+// operation. Consecutive landings by the same power, at the same station,
+// against the same defender, inside HUD_TICKER_COALESCE_TICKS become one row
+// with the forces SUMMED. Measured, that is a 58% reduction: 79.7 raw
+// player-involved events a game for Britain become 33.5 rows.
+//
+// The window is 120 ticks and BAL.LANDING_TICKS is also 120, which is not a
+// coincidence worth relying on but is worth noticing: the merge window is about
+// the length of the landing it is merging.
+//
+// The sum is honest. Each logged number is the strength that BEGAN landing,
+// post sea toll, and a non-standing wave always puts all of it ashore —
+// echelons cannot be hit while at sea. So "puts 54 ashore at Lille" is the
+// count that actually walks up that beach, not a projection
+// (docs/testing/known-issues.md #18). Requiring the same station and the same
+// defender is what keeps it that way: one place, one garrison, one number.
+//
+// Landings the player is not party to are stepped over silently rather than
+// breaking the merge, because they are not on screen — a Russian landing in the
+// Baltic must not split a British volley into two rows.
+function hudTickLandRow(log, i, rows) {
+  const lead = hudTickLanding(log[i]);
+  // An unparseable landing shows NOTHING, where an unparseable capture falls
+  // through to the raw sentence. Deliberate asymmetry: the fallback for a
+  // capture is one extra row, and the fallback for a landing is 178 of them a
+  // game with no player filter left to stop them.
+  if (!lead) return i - 1;
+
+  const tier = hudTickLandTier(lead);
+  if (!tier) return i - 1;
+
+  const e = log[i];
+  let units = lead.units;
+  let n = 1;
+  let j = i - 1;
+  while (j >= 0) {
+    const p = hudTickLanding(log[j]);
+    if (!p) break;                                  // any other kind ends the run
+    if (!hudTickLandTier(p)) { j--; continue; }     // invisible: step over it
+    if (p.pid !== lead.pid || p.place !== lead.place || p.from !== lead.from) break;
+    if (Math.abs(e.tick - log[j].tick) > HUD_TICKER_COALESCE_TICKS) break;
+    units += p.units;
+    n++;
+    j--;
+  }
+
+  const text = lead.pid + ' puts ' + hudTickNum(units) + ' ashore at ' +
+    lead.place + ' against ' + lead.from;
+
+  rows.push({
+    key: 'landing@' + e.tick + '+' + n + '|' + text,
+    kind: 'landing', weight: tier,
+    tick: e.tick, tokens: hudTickTokens(text),
+  });
+  return j;
+}
+
+// One decimal below 10, whole numbers above. A MERGED row prints a SUM of the
+// logged values rather than one of them, so the ticker has to format a number
+// the sim never formatted — but it must format it by the same rule, or a merge
+// of "24" and "0.6" prints as "24.6" on one row and "25" on the next.
+//
+// So call the sim's own formatter (known-issues #9: prefer the canonical
+// implementation over a copy, even across layers — render/readout.js already
+// reaches into sim privates for exactly this reason). The inline fallback is for
+// a page that somehow loaded hud.js without movement.js; it is the same rule,
+// and if the two ever disagree the ticker is the wrong place to find out.
+function hudTickNum(n) {
+  if (typeof _moveLandNum === 'function') return _moveLandNum(n);
+  return String(n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
+}
+
+// Newest-first display rows, with capture and landing bursts coalesced. Walks
+// the log backwards and stops as soon as it has `max` rows — the other 395
+// entries are never touched.
 function hudTickRows(log, max) {
   const rows = [];
   let i = log.length - 1;
   while (i >= 0 && rows.length < max) {
     const e = log[i];
     if (!e) { i--; continue; }
+
+    if (e.kind === 'landing') { i = hudTickLandRow(log, i, rows); continue; }
 
     const cap = hudTickCapture(e);
     if (!cap) {

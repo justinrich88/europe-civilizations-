@@ -45,10 +45,21 @@ function resetLiveIndex() {
   LIVE.stat = Object.create(null);
   LIVE.terr = Object.create(null);
   LIVE.label = [];
-  // Every supply-route chevron on the board, flat. Rebuilt by mapChevIndex()
+  // Every supply-route chevron on the board, flat. Rebuilt by mapOrderIndex()
   // whenever a route is added or dropped; read by mapApplySymbolScale to hold
   // them at a constant on-screen size, exactly as LIVE.label does for captions.
   LIVE.chev = [];
+  // Every drawn supply route, flat, from the same rebuild. Their lines are
+  // arcs off the link seam, so — exactly like the links themselves — their
+  // shape depends on the symbol scale and has to be re-derived when the camera
+  // moves, not only when the player edits a supply list.
+  LIVE.ordline = [];
+  // Every link path on the board, flat. Links are geography and are NOT
+  // counter-scaled, but their two ends are trimmed to the live symbol radius
+  // and sea links are bowed around it, so both are functions of the camera —
+  // mapApplySymbolScale rewrites them from this list exactly as it rewrites
+  // the station transforms.
+  LIVE.link = [];
   LIVE.symK = null;
   LIVE.writes = 0;
 }
@@ -94,13 +105,26 @@ function mapApplySymbolScale(force) {
   for (const rec of LIVE.label) {
     setAttr(rec.node, 'transform', mapSymbolTransform(rec.x, rec.y, k));
   }
-  // Supply-route chevrons. Their POSITION is board space and never changes with
-  // the camera; only their size does, which is the same bargain every symbol on
-  // this map makes. Zero-length on a board with no supply lines, so this loop
-  // costs nothing until somebody draws one.
+  // Supply routes. Their line is an arc off the same seam the links are drawn
+  // from, and both the bow and the anchor a chevron sits on are functions of
+  // the symbol radius in board units — so they are re-derived here rather than
+  // only when the player edits a supply list. Without this pass the routes
+  // would visibly slide off their own links as the player zooms, which is worse
+  // than a straight line that at least stays put. Zero-length on a board with
+  // no supply lines, so it costs nothing until somebody draws one, and an
+  // all-land route diffs to the same `d` and writes nothing either.
+  for (const rec of (LIVE.ordline || [])) mapOrderRepath(rec);
+  // The chevrons themselves: counter-scaled about the anchor the pass above
+  // just refreshed, the same bargain every symbol on this map makes.
   for (const rec of (LIVE.chev || [])) {
     setAttr(rec.node, 'transform', mapOrientTransform(rec.x, rec.y, k, rec.deg));
   }
+  // Links. Their ENDPOINTS are geography and never move; what moves is where
+  // the node symbol stops covering them, and on a sea crossing how far the arc
+  // has to bow to get out from under it — both derived from the same symbol
+  // scale every station transform above was just written with. Diffed against
+  // the last `d`, so the links that did not change shape cost nothing.
+  for (const rec of (LIVE.link || [])) mapLinkPath(rec);
   return LIVE.writes - before;
 }
 
@@ -566,20 +590,20 @@ function mapOrientTransform(x, y, k, deg) {
          ') rotate(' + deg + ')';
 }
 
-function mapSegDeg(a, b) {
-  return Math.round(Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI * 10) / 10;
-}
-
-// Every chevron on the board, flat, so mapApplySymbolScale can hold them all at
-// a constant on-screen size in one pass — the same list-and-rewrite the
-// territory captions use. Rebuilt whenever a route is added or dropped, which
-// happens on a player edit or a capture and never per frame.
-function mapChevIndex() {
+// Every drawn supply route on the board, and every chevron on those routes,
+// flat — so mapApplySymbolScale can rewrite them all in one pass, the same
+// list-and-rewrite the territory captions use. Rebuilt whenever a route is
+// added or dropped, which happens on a player edit or a capture and never per
+// frame.
+function mapOrderIndex() {
   LIVE.chev = [];
+  LIVE.ordline = [];
   for (const sid in LIVE.stat) {
     const routes = LIVE.stat[sid].ordRoute;
     for (const to in routes) {
-      const marks = routes[to].marks;
+      const route = routes[to];
+      LIVE.ordline.push(route);
+      const marks = route.marks;
       for (let i = 0; i < marks.length; i++) LIVE.chev.push(marks[i]);
     }
   }
@@ -594,6 +618,19 @@ function mapChevIndex() {
 // deliver. So the crow-flies segment is drawn and the caller marks it blocked,
 // which is exactly what the planner reports ('unreachable'). A line that
 // vanishes when a corridor is cut looks identical to one the player never drew.
+//
+// ON THE LINKS, NOT ACROSS THEM. Every hop comes out of the route seam above,
+// so a supply line over a sea crossing follows the same bowed arc the link is
+// painted on and the same arc render/waves.js walks its markers down. That is
+// not decoration: the stream a supply line describes IS a wave, drawn by
+// waves.js on the arc, so a straight line here would have the player's own
+// convoy visibly floating off the pipe it was sent down — one geometry rule
+// with two answers, which is known-issues #9 in its most legible form.
+//
+// The unreachable case needs no branch. It hands the seam two stations with no
+// link between them, which resolves to sagitta 0 — exactly the straight
+// crow-flies segment this drew before — because it is not a sea crossing, not
+// because anything here asks whether it is a route.
 function mapOrderRoute(D, state, rec, sid, to) {
   const layer = byId('g-links');
   const dst = D.STATIONS && D.STATIONS[to];
@@ -601,15 +638,16 @@ function mapOrderRoute(D, state, rec, sid, to) {
 
   const path = (typeof routeFor === 'function')
     ? routeFor(state, state.stations[sid].owner, sid, to) : null;
-  const pts = (path && path.length >= 2)
-    ? path.map(function (h) { return D.STATIONS[h].pos; })
-    : [rec.pos, dst.pos];
+  // Station IDS, not points: the seam is keyed on ids, because the arc between
+  // two stations depends on their symbol radii and not only on where they are.
+  const hops = (path && path.length >= 2) ? path.slice() : [sid, to];
+  const geoms = linkRouteGeoms(hops);
+  if (!geoms) return null;
 
   const g = el('g', 'station-orderroute');
   const color = powerColor(D, state.stations[sid].owner) || '#ffffff';
-  const line = el('polyline', 'station-orderline', {
-    points: pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' '),
-  });
+  const d = linkRouteD(geoms);
+  const line = el('path', 'station-orderline', { d: d });
   // Written as a STYLE, not an attribute. The colour is computed by this
   // renderer from live state, and a presentation attribute sits at the bottom
   // of the cascade where any stray class rule outranks it silently —
@@ -618,38 +656,68 @@ function mapOrderRoute(D, state, rec, sid, to) {
   line.style.stroke = color;
   g.appendChild(line);
 
-  // One chevron per HOP, at its midpoint. Position in board space (so it never
-  // needs recomputing as the camera moves) and size counter-scaled (so it holds
-  // its screen size at every zoom). Spacing therefore comes from the map's own
-  // geography: a long multi-hop route gets several, a single hop gets one,
+  // One chevron per HOP, at the midpoint OF ITS ARC, size counter-scaled so it
+  // holds its screen size at every zoom. Spacing therefore comes from the map's
+  // own geography: a long multi-hop route gets several, a single hop gets one,
   // and nothing has to measure a length in pixels to decide.
+  //
+  // Its position used to be pure board space and was reached only by the scale
+  // rewrite. A bowed hop's apex is a function of the symbol radius in board
+  // units, so it MOVES with the camera now — mapOrderRepath below re-derives
+  // every anchor on a camera change, immediately before the pass that writes
+  // these transforms. A land hop lands on the numbers it already had.
   const k = mapSymbolScale();
   const marks = [];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
-    const deg = mapSegDeg(a, b);
+  for (let i = 0; i < geoms.length; i++) {
+    const m = _mapHopMark(geoms[i]);
     const node = el('path', 'station-orderchev', {
-      d: MAP_ORDER_CHEV_D, transform: mapOrientTransform(mx, my, k, deg),
+      d: MAP_ORDER_CHEV_D, transform: mapOrientTransform(m.x, m.y, k, m.deg),
     });
     node.style.fill = color;
     g.appendChild(node);
-    marks.push({ node: node, x: mx, y: my, deg: deg });
+    marks.push({ node: node, x: m.x, y: m.y, deg: m.deg, hop: i });
   }
 
   // The bar, on the middle hop, shown only while the route is blocked.
-  const mid = pts.length > 2 ? Math.floor((pts.length - 1) / 2) : 0;
-  const a0 = pts[mid], b0 = pts[mid + 1];
-  const bx = (a0[0] + b0[0]) / 2, by = (a0[1] + b0[1]) / 2;
-  const bdeg = mapSegDeg(a0, b0);
+  const mid = geoms.length > 1 ? Math.floor(geoms.length / 2) : 0;
+  const bm = _mapHopMark(geoms[mid]);
   const bar = el('path', 'station-orderbar', {
-    d: MAP_ORDER_BLOCK_D, transform: mapOrientTransform(bx, by, k, bdeg),
+    d: MAP_ORDER_BLOCK_D, transform: mapOrientTransform(bm.x, bm.y, k, bm.deg),
   });
   g.appendChild(bar);
-  marks.push({ node: bar, x: bx, y: by, deg: bdeg });
+  marks.push({ node: bar, x: bm.x, y: bm.y, deg: bm.deg, hop: mid });
 
   layer.appendChild(g);
-  return { g: g, marks: marks, epoch: state.ownerEpoch || 0 };
+  return {
+    g: g, line: line, hops: hops, d: d, marks: marks,
+    epoch: state.ownerEpoch || 0,
+  };
+}
+
+// Re-derive one drawn route for a new camera scale, diffed. Only the SHAPE is
+// camera-dependent — where the arcs bow to clear the symbols — so a route with
+// no water on it produces the identical `d` and writes nothing at all.
+function mapOrderRepath(route) {
+  if (!route || !route.line || !route.hops) return;
+  const geoms = linkRouteGeoms(route.hops);
+  if (!geoms) return;
+  const d = linkRouteD(geoms);
+  if (d !== route.d) {
+    route.d = d;
+    setAttr(route.line, 'd', d);
+  }
+  // The marks are not written here: their transforms are rewritten for the new
+  // scale by the one pass in mapApplySymbolScale that writes every counter-
+  // scaled symbol on the board. This only moves the anchor it will use.
+  for (let i = 0; i < route.marks.length; i++) {
+    const m = route.marks[i];
+    const g = geoms[m.hop];
+    if (!g) continue;
+    const p = _mapHopMark(g);
+    m.x = p.x;
+    m.y = p.y;
+    m.deg = p.deg;
+  }
 }
 
 function mapOrderDrop(rec, to) {
@@ -816,8 +884,319 @@ function drawBorders(D, layer) {
   return { inner: inner.length, coast: coast.length };
 }
 
+// ── link geometry — ONE rule, two consumers ─────────────────────────────
+//
+// This block is the single authority for "where does the line between two
+// stations actually run". `drawLinks` below paints it; `render/waves.js` walks
+// markers and trails along it. There is deliberately no second derivation:
+// known-issues #9 and #12 are both "two implementations of one geometry rule",
+// and a wave that travelled the chord while the link was drawn as an arc would
+// be that bug in its most visible form — every sea crossing on the board with
+// its army floating off its own route.
+//
+// THE PROBLEM THIS SOLVES. Links used to be drawn centre to centre. A station
+// symbol is ~12 screen px of radius, and five sea crossings on this map are
+// shorter than two symbols laid end to end — Dover to Lille is 27 board units
+// between centres against 18 + 22 of node. The line's visible length was
+// NEGATIVE: the two nodes covered all of it and then some. Those five carry
+// 42% of the sea traffic on the board, so the single most punishing move in
+// the game (§3, "sea crossings are simply slow and punishing") was invisible
+// at the exact places it mattered most. No amount of colour or dash fixes a
+// line of length zero.
+//
+// So, two changes, and they are not independent:
+//
+//   1. every link is TRIMMED to the symbol edge, so a line starts and ends
+//      where the node stops rather than under it;
+//   2. a SEA link is BOWED into an arc whose apex clears the bigger of the two
+//      symbols. That is the only geometry that can be visible between two
+//      overlapping discs — and it doubles as the "this is water" signal, which
+//      a dash never managed against a dark blue sea.
+//
+// The sagitta is DERIVED, not authored: it is whatever it takes for the apex
+// to stand `LINK_SEA_CLEAR` clear of the larger node, floored by a proportion
+// of the chord so a long crossing still reads as a curve. A short link
+// therefore bows hard and a long one bows gently, which is the correct
+// relationship — the bow exists to escape the symbols, and only a short link
+// is in trouble. It is also self-correcting under zoom: the symbols
+// counter-scale, so at 2x there is more open water and the derived term falls
+// away to the proportional floor on its own.
+//
+// The symbol radius comes from mapNodeExtents(), which is the SAME table
+// drawStations() sizes the nodes from — not a second guess at the same number
+// (known-issues #17 is three files independently authoring one screen-space
+// constant). It is multiplied by mapSymbolScale() because the station groups
+// are counter-scaled and the links are not, so the node's radius IN BOARD
+// UNITS shrinks as the camera zooms in.
+
+const LINK_TRIM_GAP = 1;          // …and clear of the fullness ring track too
+const LINK_SEA_CLEAR = 7;         // board units the arc's apex clears the node by
+const LINK_SEA_BOW_FRAC = 0.10;   // never flatter than this share of the chord
+// Below this much visible line, a LAND link is left untrimmed rather than
+// drawn as a stub: two land stations whose symbols overlap are exactly as they
+// were before this existed, which is a thing that can be checked rather than a
+// new failure mode invented to fix an old one. Sea links never reach it — the
+// bow above guarantees them clearance.
+const LINK_TRIM_MIN = 6;
+
+// sid -> { r, outer }: the node's radius and the extent of its silhouette,
+// derived once from the static capacity table. drawStations() reads the same
+// record, so the line stops exactly where the shape it was measured against
+// stops.
+let _mapExtent = null;
+
+function mapNodeExtents() {
+  if (_mapExtent) return _mapExtent;
+  const S = (typeof STATIONS !== 'undefined') ? STATIONS : null;
+  const out = Object.create(null);
+  if (!S) return out;               // not cached — the data may still be coming
+  let capMin = Infinity;
+  let capMax = -Infinity;
+  for (const sid in S) {
+    const c = Number(S[sid] && S[sid].capacity);
+    if (!isFinite(c)) continue;
+    if (c < capMin) capMin = c;
+    if (c > capMax) capMax = c;
+  }
+  for (const sid in S) {
+    const st = S[sid];
+    const r = stationRadius(st && st.capacity, capMin, capMax);
+    out[sid] = { r: r, outer: mapOuterExtent(st && st.type, r) };
+  }
+  _mapExtent = out;
+  return out;
+}
+
+// Is this crossing water? Asked of sim/movement.js's link index rather than
+// re-scanned out of LINKS here — same rule, one authority (known-issues #9).
+function _mapLinkIsSea(a, b) {
+  if (typeof linkBetween !== 'function') return false;
+  const l = linkBetween(a, b);
+  return !!(l && l.sea);
+}
+
+// The rendered path between two stations, oriented from -> to.
+//
+// `p1` (the quadratic's control point) is computed from a CANONICAL ordering of
+// the two ids, so `linkPathGeom('dov','lil')` and `linkPathGeom('lil','dov')`
+// describe the identical arc traversed in opposite directions. A wave crossing
+// the Channel southbound and the link drawn northbound must be the same curve
+// or the marker leaves the road.
+//
+// A land link gets sagitta 0, and a quadratic with its control point at the
+// midpoint IS the straight segment — exactly, not approximately. So there is
+// one code path here, not a curve case and a line case.
+function linkPathGeom(fromSid, toSid) {
+  const S = (typeof STATIONS !== 'undefined') ? STATIONS : null;
+  const sa = S && S[fromSid];
+  const sb = S && S[toSid];
+  const A = sa && sa.pos;
+  const B = sb && sb.pos;
+  if (!A || !B || A.length < 2 || B.length < 2) return null;
+
+  const dx = B[0] - A[0];
+  const dy = B[1] - A[1];
+  const len = Math.sqrt(dx * dx + dy * dy);
+  const k = mapSymbolScale();
+  const ext = mapNodeExtents();
+  const ea = ext[fromSid];
+  const eb = ext[toSid];
+  // Out to the fullness ring's track, not just to the silhouette: the track is
+  // drawn on every station whether or not it is full, so a line stopping at the
+  // shape alone still crosses a ring.
+  const r0 = ea ? (ea.outer + RING_GAP + LINK_TRIM_GAP) * k : 0;
+  const r1 = eb ? (eb.outer + RING_GAP + LINK_TRIM_GAP) * k : 0;
+
+  const sea = _mapLinkIsSea(fromSid, toSid);
+
+  let nx = 0;
+  let ny = 0;
+  let sag = 0;
+  if (len > 0) {
+    const flip = (String(fromSid) > String(toSid)) ? -1 : 1;
+    const ux = (dx / len) * flip;
+    const uy = (dy / len) * flip;
+    nx = -uy;                       // canonical outward normal
+    ny = ux;
+    if (sea) {
+      // Apex clearance: the apex sits sqrt((len/2)^2 + sag^2) from either end,
+      // so requiring that to reach `need` inverts to this exactly.
+      const need = Math.max(r0, r1) + LINK_SEA_CLEAR * k;
+      const half = len / 2;
+      const sMin = (need > half) ? Math.sqrt(need * need - half * half) : 0;
+      sag = Math.max(sMin, len * LINK_SEA_BOW_FRAC);
+    }
+  }
+  // Control point at 2x the sagitta: a quadratic passes through the midpoint of
+  // P0 and P1 and P2, i.e. half way to its control point.
+  return {
+    p0: [A[0], A[1]],
+    p1: [(A[0] + B[0]) / 2 + nx * sag * 2, (A[1] + B[1]) / 2 + ny * sag * 2],
+    p2: [B[0], B[1]],
+    len: len, sea: sea, sag: sag, r0: r0, r1: r1, nx: nx, ny: ny,
+  };
+}
+
+// The point at fraction t along a rendered path, plus the unit tangent there
+// and the arc's outward normal. `t` is the bezier parameter, which for a land
+// link is exactly the fraction of the way along and for a bowed one is close
+// enough that a marker stays on its own line — which is the only thing anything
+// here needs it for.
+function linkGeomPoint(g, t) {
+  const u = 1 - t;
+  let dx = 2 * (u * (g.p1[0] - g.p0[0]) + t * (g.p2[0] - g.p1[0]));
+  let dy = 2 * (u * (g.p1[1] - g.p0[1]) + t * (g.p2[1] - g.p1[1]));
+  const m = Math.sqrt(dx * dx + dy * dy) || 1;
+  return {
+    x: u * u * g.p0[0] + 2 * u * t * g.p1[0] + t * t * g.p2[0],
+    y: u * u * g.p0[1] + 2 * u * t * g.p1[1] + t * t * g.p2[1],
+    tx: dx / m, ty: dy / m, nx: g.nx, ny: g.ny,
+  };
+}
+
+// The sub-arc between t0 and t1 as a path `d`. Exact — the standard quadratic
+// subdivision, not a polyline approximation — so a trimmed link and a wave's
+// trail along the same crossing lie on top of each other to the pixel.
+function linkGeomD(g, t0, t1) {
+  const a = linkGeomPoint(g, t0);
+  const b = linkGeomPoint(g, t1);
+  const u0 = 1 - t0;
+  const u1 = 1 - t1;
+  const cx = u0 * u1 * g.p0[0] + (u0 * t1 + u1 * t0) * g.p1[0] + t0 * t1 * g.p2[0];
+  const cy = u0 * u1 * g.p0[1] + (u0 * t1 + u1 * t0) * g.p1[1] + t0 * t1 * g.p2[1];
+  return 'M' + a.x.toFixed(2) + ',' + a.y.toFixed(2) +
+         ' Q' + cx.toFixed(2) + ',' + cy.toFixed(2) +
+         ' ' + b.x.toFixed(2) + ',' + b.y.toFixed(2);
+}
+
+function _mapDist2(g, t, c) {
+  const p = linkGeomPoint(g, t);
+  const dx = p.x - c[0];
+  const dy = p.y - c[1];
+  return dx * dx + dy * dy;
+}
+
+// First t out from `tEnd` at which the curve leaves the disc of radius r around
+// `c`. Bisection rather than a closed form: the closed form is a quartic, and
+// eighteen halvings of a unit interval is 4e-6 of a parameter — far below a
+// pixel — for about twenty multiplies.
+function _mapTrimT(g, c, r, tEnd, tMid) {
+  if (!(r > 0)) return tEnd;
+  if (_mapDist2(g, tMid, c) < r * r) return tMid;   // symbol swallows the half
+  let lo = tEnd;                                    // inside
+  let hi = tMid;                                    // outside
+  for (let i = 0; i < 18; i++) {
+    const m = (lo + hi) / 2;
+    if (_mapDist2(g, m, c) < r * r) lo = m; else hi = m;
+  }
+  return hi;
+}
+
+// [t0, t1] — where the drawn line should start and stop.
+function linkGeomTrim(g) {
+  if (!(g.len > 0)) return [0, 1];
+  const t0 = _mapTrimT(g, g.p0, g.r0, 0, 0.5);
+  const t1 = _mapTrimT(g, g.p2, g.r1, 1, 0.5);
+  if (!(t1 > t0)) return [0, 1];
+  if (!g.sea && (t1 - t0) * g.len < LINK_TRIM_MIN * mapSymbolScale()) return [0, 1];
+  return [t0, t1];
+}
+
+// ── the same seam, for a whole ROUTE ────────────────────────────────────
+//
+// A route is a list of station ids, and every consumer that draws one wants the
+// same three things: the geometry hop by hop, one `d` that walks all of it, and
+// a polyline dense enough to walk by arc length. Both drawers of routes on this
+// board — the supply lines below and the volley preview in render/select.js —
+// call these rather than each looping over linkPathGeom themselves. A second
+// loop in another file is exactly the shape of known-issues #9/#12, which this
+// project has now logged three times.
+//
+// A pair of stations with NO LINK between them still resolves, and resolves
+// STRAIGHT: _mapLinkIsSea reports false, the sagitta is 0, and a quadratic with
+// its control point at the midpoint is exactly the segment. So the crow-flies
+// fallback drawn for an unreachable supply destination is straight because it
+// is not a sea crossing — not because anything here branches on it.
+
+// Samples per bowed hop when a route is walked by arc length. Eight chords
+// across a curve whose sagitta is at most a tenth of its span puts the walker
+// well inside a pixel of the drawn `d`, and a sag-0 hop is skipped entirely, so
+// an all-land route costs precisely what it did before this existed.
+const LINK_ARC_STEPS = 8;
+
+function linkRouteGeoms(path) {
+  if (!path || path.length < 2) return null;
+  const out = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const g = linkPathGeom(path[i], path[i + 1]);
+    if (!g) return null;
+    out.push(g);
+  }
+  return out;
+}
+
+// One continuous `d` for the whole route. Each hop contributes its own
+// quadratic; the leading moveto of every hop after the first is dropped,
+// because its point is the previous hop's endpoint EXACTLY — same station, same
+// seam — so the result is a single subpath and a bend at a transit city renders
+// as a join rather than as two capped ends butting together.
+function linkRouteD(geoms) {
+  if (!geoms || !geoms.length) return '';
+  let d = linkGeomD(geoms[0], 0, 1);
+  for (let i = 1; i < geoms.length; i++) {
+    const seg = linkGeomD(geoms[i], 0, 1);
+    const q = seg.indexOf(' Q');
+    d += (q < 0) ? (' ' + seg) : seg.slice(q);
+  }
+  return d;
+}
+
+// The route as a polyline. For anything that has to place something a fixed
+// DISTANCE along a route — an ETA label — the chord between two stations is the
+// wrong ruler on a bowed hop, and it is wrong in the one place it matters most:
+// the short Channel crossings, whose whole visible length is the bow.
+function linkRoutePoints(geoms) {
+  if (!geoms || !geoms.length) return null;
+  const out = [[geoms[0].p0[0], geoms[0].p0[1]]];
+  for (let i = 0; i < geoms.length; i++) {
+    const g = geoms[i];
+    const n = (g.sag > 0) ? LINK_ARC_STEPS : 1;
+    for (let s = 1; s <= n; s++) {
+      const P = linkGeomPoint(g, s / n);
+      out.push([P.x, P.y]);
+    }
+  }
+  return out;
+}
+
+// Where a marker sits on one hop, and which way it faces: the MIDPOINT OF THE
+// ARC and the tangent there, not the midpoint of the chord. On a land hop the
+// two are the same point to the last decimal; on a bowed crossing the chord's
+// midpoint is off the line by the full sagitta, which is the one place a
+// chevron would visibly float.
+function _mapHopMark(g) {
+  const p = linkGeomPoint(g, 0.5);
+  return {
+    x: p.x, y: p.y,
+    deg: Math.round(Math.atan2(p.ty, p.tx) * 180 / Math.PI * 10) / 10,
+  };
+}
+
+// Write one link's `d`, diffed. Called at build time and again from
+// mapApplySymbolScale on every camera change.
+function mapLinkPath(rec) {
+  const g = linkPathGeom(rec.a, rec.b);
+  if (!g) return;
+  const t = linkGeomTrim(g);
+  const d = linkGeomD(g, t[0], t[1]);
+  if (d === rec.d) return;
+  rec.d = d;
+  setAttr(rec.node, 'd', d);
+}
+
 function drawLinks(D, layer) {
   if (!D.LINKS || !D.STATIONS) return 0;
+  LIVE.link = [];
   let drawn = 0;
   for (const link of D.LINKS) {
     const a = D.STATIONS[link && link.a];
@@ -826,10 +1205,16 @@ function drawLinks(D, layer) {
       console.warn('[render/map] link references an unknown station:', link);
       continue;
     }
-    layer.appendChild(el('line', 'link' + (link.sea ? ' is-sea' : ''), {
-      x1: a.pos[0], y1: a.pos[1], x2: b.pos[0], y2: b.pos[1],
+    // A <path>, not a <line>: a straight link is the sag-0 case of the same
+    // quadratic, so there is one element type and one geometry function rather
+    // than a branch that could drift.
+    const node = el('path', 'link' + (link.sea ? ' is-sea' : ''), {
       'data-link': link.a + '-' + link.b,
-    }));
+    });
+    const rec = { node: node, a: link.a, b: link.b, d: null };
+    LIVE.link.push(rec);
+    mapLinkPath(rec);
+    layer.appendChild(node);
     drawn++;
   }
   return drawn;
@@ -837,15 +1222,11 @@ function drawLinks(D, layer) {
 
 function drawStations(D, layer, state) {
   const ids = Object.keys(D.STATIONS).sort();
-
-  let capMin = Infinity;
-  let capMax = -Infinity;
-  for (const sid of ids) {
-    const c = Number(D.STATIONS[sid] && D.STATIONS[sid].capacity);
-    if (!isFinite(c)) continue;
-    if (c < capMin) capMin = c;
-    if (c > capMax) capMax = c;
-  }
+  // One table, shared with the link geometry above. It used to be a capMin /
+  // capMax sweep right here and a stationRadius() call per node; links now need
+  // the same two numbers to know where a node stops, and two sweeps agreeing
+  // today is exactly the shape of known-issues #9.
+  const ext = mapNodeExtents();
 
   let drawn = 0;
   for (const sid of ids) {
@@ -854,7 +1235,8 @@ function drawStations(D, layer, state) {
       console.warn('[render/map] station "' + sid + '" has no usable pos; skipped');
       continue;
     }
-    const r = stationRadius(st.capacity, capMin, capMax);
+    const e = ext[sid];
+    const r = e ? e.r : (NODE_R_MIN + NODE_R_MAX) / 2;
 
     // translate(pos) scale(1/cameraScale): everything inside the group —
     // circles, garrison number, fullness ring, cut marks, name and ×N label —
@@ -867,7 +1249,7 @@ function drawStations(D, layer, state) {
       'data-owner': 'neutral',
     });
 
-    const outer = mapOuterExtent(st.type, r);
+    const outer = e ? e.outer : mapOuterExtent(st.type, r);
 
     // Battle ring, created once and revealed by class. A fight is the most
     // time-critical thing on the board (§5) so it gets an animated ring rather
@@ -1347,7 +1729,7 @@ function liveStations(D, state) {
       // one line of four leaves the other three alone.
       if (supply.length || listChanged) {
         mapOrderAim(D, state, rec, sid, supply, epoch);
-        mapChevIndex();
+        mapOrderIndex();
         LIVE.writes++;
       }
     }
@@ -1531,6 +1913,29 @@ function renderBoard() {
 window.renderBoard = renderBoard;
 window.renderLive = renderLive;
 window.mapApplySymbolScale = mapApplySymbolScale;
+// The link-geometry seam. render/waves.js and render/select.js are the other
+// consumers: markers, trails, supply lines and volley previews all ride the
+// same curve this file paints, out of these functions, so "the wave is on the
+// link" and "the preview is on the link" are structural rather than a
+// coincidence between files edited on the same afternoon.
+//
+// It is deliberately "resolve the link once, then sample it" rather than one
+// `linkPathPoint(a, b, t)` call: renderWaves runs this per wave per frame and
+// the resolve is the part that costs anything (a linkBetween lookup, the
+// extents table, the symbol scale). Nothing else is exported — every wrapper
+// that had no caller is gone, because in a globals-only project an exported
+// name nobody uses is a collision waiting for its second author
+// (known-issues #12).
+window.linkPathGeom = linkPathGeom;
+window.linkGeomPoint = linkGeomPoint;
+window.linkGeomD = linkGeomD;
+window.linkGeomTrim = linkGeomTrim;
+// …and the route-level layer over it, for the two things on this board that
+// are drawn along a SEQUENCE of links: the supply lines above and the volley
+// preview in render/select.js.
+window.linkRouteGeoms = linkRouteGeoms;
+window.linkRouteD = linkRouteD;
+window.linkRoutePoints = linkRoutePoints;
 
 // Counter-scale the symbols the moment the camera moves, not on the next frame.
 // A wheel zoom with the game paused produces no frames at all, and the stations

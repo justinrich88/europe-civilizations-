@@ -62,6 +62,21 @@
 // mistake renderLive exists to avoid, at 60fps.
 const WAVES = { node: Object.create(null), writes: 0 };
 
+// ── one geometry, two files ──────────────────────────────────────────────
+//
+// Nothing in here computes where a link runs. render/map.js owns that
+// (`linkPathGeom` / `linkGeomPoint` / `linkGeomD`) and this file consumes it,
+// because sea crossings are now drawn as ARCS bowed clear of the two station
+// symbols and a marker walking the straight chord would visibly float off its
+// own route on every crossing on the board. That is known-issues #9 and #12 —
+// two implementations of one geometry rule — and it is not worth a third
+// instance to save a dot product.
+//
+// So a marching wave's position is `linkGeomPoint(g, progress)` and its trail
+// is the sub-arc `linkGeomD(g, 0, progress)`. On a land link the sagitta is
+// zero and a quadratic with its control point at the midpoint is exactly the
+// straight segment, so nothing about a land march changed.
+
 const WAVE_R = 7.5;
 
 // How far offshore the marker holds, in board units at scale 1. Multiplied by
@@ -78,13 +93,21 @@ const WAVE_LAND_STANDOFF = 46;
 // …but never past the middle of the crossing, so the marker always belongs to
 // the shore it is landing on rather than to the one it sailed from.
 //
-// This cap BINDS at 1x on this map, and that is worth stating plainly: the sea
-// links here are short next to the symbols — Mecklenburg to Norrkoping is the
-// longest at 78 board units, about three and a half node diameters, and Dover
-// to Lille is 27. At 1x there is only so much open water to stand off into, and
-// the answer to that is the same as it is for the four cities stacked on the
-// Ruhr: zoom in, which is what the camera and the symbol counter-scale exist
-// for. From about 1.2x up the fixed standoff wins and the gap is constant.
+// This cap BINDS at 1x on this map — Dover to Lille is 27 board units between
+// centres and the standoff wants 46 — and the previous version of this file
+// treated that as a squeeze the player could zoom out of. It was not a squeeze.
+// At 27 units the cap put the marker 13.6 units from Lille's centre against a
+// symbol of 17.8: the at-sea ring, the strength chip and the surf leader all
+// rendered UNDERNEATH the destination station. The most interesting event in
+// the game drew nothing at all, on the busiest crossing on the board.
+//
+// The fix is that standoff no longer competes with link length. The along-link
+// distance is still capped here — that part was always right — and then
+// `_wavLandGeom` pushes the marker PERPENDICULAR to the crossing until it
+// genuinely clears both nodes. On a short link the sea arc is already bowed
+// hard (render/map.js), so "perpendicular" is the direction the marker was
+// half way to anyway, and it lands in open water beside the strait rather than
+// on top of the beach.
 const WAVE_LAND_MAX_FRAC = 0.5;
 
 // How much water the leader leaves between its tip and the beach — enough to
@@ -108,6 +131,19 @@ const WAVE_LAND_TAIL = 26;
 // standoff above has to find on a short crossing.
 const WAVE_LAND_RING_R = 10;
 
+// Water between the ring's outer edge and the node's own clearance radius, so
+// the two marks are read as two marks. The node's radius is not guessed here:
+// linkPathGeom reports it (`r0` / `r1`) from the table drawStations sizes the
+// silhouettes with, already multiplied by the symbol scale.
+//
+// Two units of this are not gap at all: linkPathGeom trims links to the
+// FULLNESS ring (outer + RING_GAP + 1) and a beach is almost always contested,
+// so the thing actually in the way is the MOMENTUM ring two units further out
+// (render/map.js, MAP_MOM_GAP). The remaining six are the water — about 3.6
+// screen pixels, constant at every zoom because every term here is multiplied
+// by the same symbol scale.
+const WAVE_LAND_GAP = 8;
+
 // 1% steps, same "rewrite only on a visible change" rule as the station rings.
 // One echelon is 1/120 of the force, so the arc moves slightly less than one
 // bucket per tick and this costs at most one DOM write per tick.
@@ -120,14 +156,10 @@ function resetWaveLayer() {
   WAVES.writes = 0;
 }
 
-// Station position from the static table. A wave whose path references an
-// unknown station is skipped rather than drawn at NaN — one missing marker is
-// debuggable, an SVG full of NaN transforms is not.
-function stationPos(sid) {
-  if (typeof STATIONS === 'undefined' || !STATIONS) return null;
-  const st = STATIONS[sid];
-  return (st && st.pos && st.pos.length >= 2) ? st.pos : null;
-}
+// `stationPos()` used to live here and read STATIONS directly. It is gone:
+// every position this file needs now comes out of linkPathGeom(), which is the
+// only thing that knows where a link actually runs. A second reader of the
+// station table would be the first step back toward two geometries.
 
 function waveColor(ownerId) {
   const P = (typeof POWERS !== 'undefined') ? POWERS : null;
@@ -146,7 +178,11 @@ function makeWaveNode(layer, w) {
 
   // The trail lives in board coordinates and the marker is translated, so they
   // cannot be the same node. Trail first so the marker sits on top of it.
-  const trail = el('line', 'wave-trail', { x1: 0, y1: 0, x2: 0, y2: 0 });
+  // A <path>, not a <line>: on a sea crossing the trail is a sub-arc of the
+  // bowed link, and a straight streak across a curved route is precisely the
+  // "wave floating off its own link" this file exists not to draw. Same element
+  // for a land march, where the arc is straight.
+  const trail = el('path', 'wave-trail', { d: '' });
   // .style, not setAttribute. A presentation attribute loses to any stylesheet
   // rule, and a stray `.wave-trail { stroke: #ffffff }` did exactly that —
   // every trail on the board painted white while this line looked correct.
@@ -179,8 +215,20 @@ function makeWaveNode(layer, w) {
 // Beachhead marker
 // ---------------------------------------------------------------------------
 
-// Where the marker holds while its force comes ashore: back along the sea link
-// from the beach `b` toward the port `a`, a fixed distance on screen.
+// Smallest q >= 0 that puts `P + q*(nx,ny)` at least `need` away from `c`.
+// Exact — one root of |P + qn - c|^2 = need^2 — rather than a nudge-and-retry
+// loop, so the clearance is a guarantee and not a hope. Returns 0 when the
+// point is already clear.
+function _wavPushOut(P, c, nx, ny, need) {
+  const ex = P.x - c[0];
+  const ey = P.y - c[1];
+  const cc = ex * ex + ey * ey - need * need;
+  if (cc >= 0) return 0;
+  const b = ex * nx + ey * ny;
+  return -b + Math.sqrt(b * b - cc);
+}
+
+// Where the marker holds while its force comes ashore.
 //
 // Fixed, not proportional to what is left at sea. Position here means "these
 // are the ones not in the fight yet", and a position that slides inshore as the
@@ -189,6 +237,15 @@ function makeWaveNode(layer, w) {
 // Returns [markerX, markerY, leaderTailX, leaderTailY, leaderTipX, leaderTipY]
 // — the marker's standoff point, and the two ends of the lane it sits in.
 //
+// TWO AXES, NOT ONE. The standoff back along the crossing is what it always
+// was and is still capped at the midpoint. What is new is that it is then
+// pushed OUT, perpendicular to the strait, until the marker clears both
+// stations' symbols by the ring's radius and a gap. On a long crossing that
+// push is zero and nothing has changed; on Dover–Lille it is the entire reason
+// the beachhead is on screen at all. Clearance is measured against
+// linkPathGeom's own `r0` / `r1`, which are the live symbol radii the links are
+// trimmed to — one number, not a second estimate of it.
+//
 // The leader stops SHORT of the beach rather than touching it. A contested
 // station carries the attacker's count in a band directly under the node, and
 // a line run all the way in draws straight through that number — measured at
@@ -196,25 +253,41 @@ function makeWaveNode(layer, w) {
 // width out keeps it an arrow pointing at the beach instead of a scribble over
 // the readout, and loses nothing: what the line says is "that way", not "this
 // far".
-function _wavLandGeom(a, b, k) {
-  const dx = a[0] - b[0], dy = a[1] - b[1];
-  const len = Math.sqrt(dx * dx + dy * dy);
-  if (!(len > 0)) return [b[0], b[1], b[0], b[1], b[0], b[1]];
-  const cap = len * WAVE_LAND_MAX_FRAC;
+function _wavLandGeom(g, k) {
+  const A = g.p0;
+  const B = g.p2;
+  const len = g.len;
+  if (!(len > 0)) return [B[0], B[1], B[0], B[1], B[0], B[1]];
+
   let off = WAVE_LAND_STANDOFF * k;
+  const cap = len * WAVE_LAND_MAX_FRAC;
   if (off > cap) off = cap;
+
+  // On the arc first, so a marker on a gently-bowed long crossing sits on its
+  // own link rather than beside it.
+  const P = linkGeomPoint(g, 1 - off / len);
+  const pad = (WAVE_LAND_RING_R + WAVE_LAND_GAP) * k;
+  let q = _wavPushOut(P, B, g.nx, g.ny, g.r1 + pad);
+  const qa = _wavPushOut(P, A, g.nx, g.ny, g.r0 + pad);
+  if (qa > q) q = qa;
+  const x = P.x + g.nx * q;
+  const y = P.y + g.ny * q;
+
+  // The lane runs through the marker and points at the beach from wherever the
+  // marker ended up, so it stays an arrow even when the standoff went sideways.
+  const dx = B[0] - x;
+  const dy = B[1] - y;
+  const m = Math.sqrt(dx * dx + dy * dy);
+  if (!(m > 0)) return [x, y, x, y, x, y];
+  const ux = dx / m;
+  const uy = dy / m;
   let clear = WAVE_LAND_CLEAR * k;
-  if (clear > off * 0.6) clear = off * 0.6;
-  // The tail stops short of the far shore for the same reason the tip stops
-  // short of the near one: the port has a node and a number too.
-  let tail = off + WAVE_LAND_TAIL * k;
-  if (tail > len - clear) tail = len - clear;
-  if (tail < off) tail = off;
-  const ux = dx / len, uy = dy / len;
+  if (clear > m * 0.6) clear = m * 0.6;
+  const tail = WAVE_LAND_TAIL * k;
   return [
-    b[0] + ux * off, b[1] + uy * off,
-    b[0] + ux * tail, b[1] + uy * tail,
-    b[0] + ux * clear, b[1] + uy * clear,
+    x, y,
+    x - ux * tail, y - uy * tail,
+    x + ux * (m - clear), y + uy * (m - clear),
   ];
 }
 
@@ -294,9 +367,12 @@ function renderWaves(state) {
     if (!w || !Array.isArray(w.path) || w.path.length < 2) continue;
 
     const hop = Math.min(w.hop | 0, w.path.length - 2);
-    const a = stationPos(w.path[hop]);
-    const b = stationPos(w.path[hop + 1]);
-    if (!a || !b) continue;
+    // The link's own geometry, from the file that draws it. A wave whose path
+    // references an unknown station is skipped rather than drawn at NaN — one
+    // missing marker is debuggable, an SVG full of NaN transforms is not.
+    const geom = (typeof linkPathGeom === 'function')
+      ? linkPathGeom(w.path[hop], w.path[hop + 1]) : null;
+    if (!geom) continue;
 
     const key = String(w.id);
     seen[key] = true;
@@ -310,19 +386,19 @@ function renderWaves(state) {
     // hop and drags its trail behind it from the station it left. A wave coming
     // ashore stands off the beach and points its trail forward at it.
     const isLanding = !!w.landing;
-    let x, y, x1, y1, x2, y2;
+    let x, y, tl;
     if (isLanding) {
-      const p = _wavLandGeom(a, b, k);
+      const p = _wavLandGeom(geom, k);
       x = p[0];
       y = p[1];
-      x1 = p[2].toFixed(2); y1 = p[3].toFixed(2);
-      x2 = p[4].toFixed(2); y2 = p[5].toFixed(2);
+      tl = 'M' + p[2].toFixed(2) + ',' + p[3].toFixed(2) +
+           ' L' + p[4].toFixed(2) + ',' + p[5].toFixed(2);
     } else {
       const t = clamp(Number(w.progress) || 0, 0, 1);
-      x = lerp(a[0], b[0], t);
-      y = lerp(a[1], b[1], t);
-      x1 = String(a[0]); y1 = String(a[1]);
-      x2 = x.toFixed(2); y2 = y.toFixed(2);
+      const P = linkGeomPoint(geom, t);
+      x = P.x;
+      y = P.y;
+      tl = linkGeomD(geom, 0, t);
     }
 
     // Move — one transform write, no reflow of the marker's contents.
@@ -343,19 +419,17 @@ function renderWaves(state) {
       rec.g.setAttribute('transform', tf);
       WAVES.writes++;
     }
-    // Marching: anchored at the station just left, so it grows across the hop
-    // and resets at each one — an in-flight streak, not a supply line.
+    // Marching: the sub-arc of the link from the station just left to here, so
+    // it grows across the hop and resets at each one — an in-flight streak, not
+    // a supply line — and on a sea crossing it lies exactly on the bowed link
+    // rather than cutting the chord.
     // Landing: a lane THROUGH the marker aimed at the beach, stopping short of
     // it, so it reads as the direction the echelons are going rather than where
     // they came from — and so the ring does not swallow the whole line.
-    const tl = x1 + ' ' + y1 + ' ' + x2 + ' ' + y2;
     if (tl !== rec.tl) {
       rec.tl = tl;
-      rec.trail.setAttribute('x1', x1);
-      rec.trail.setAttribute('y1', y1);
-      rec.trail.setAttribute('x2', x2);
-      rec.trail.setAttribute('y2', y2);
-      WAVES.writes += 4;
+      rec.trail.setAttribute('d', tl);
+      WAVES.writes++;
     }
 
     // Units are floats in state; floored here, and only written when the

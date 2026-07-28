@@ -356,15 +356,44 @@ const BAL = {
   MOVE_BASE: 0.6,
 
   // Sea crossings are "simply slow and punishing rather than a naval system"
-  // (§3). Halving speed turns Dover (dist 55) into an 18-second commitment
-  // for infantry — long enough that Britain is safe and must plan, short
-  // enough that it can still matter.
+  // (§3).
+  //
+  // ── THIS IS NOT A 2x PENALTY. READ THE NEXT PARAGRAPH BEFORE TUNING IT. ──
+  //
+  // The speed multiplier is only HALF the toll, and it is the smaller half.
+  // tools/build-stations.js:516 writes a sea link's `dist` as
+  //
+  //     Math.round(geo * (sea ? 1.6 : 1))
+  //
+  // so every sea link carries a distance 1.6x its own on-screen length before
+  // this constant is applied at all. Audited across all 236 links: dist divided
+  // by pixel distance is 1.00 for every land link and 1.60 for every sea one
+  // (+-0.02 from the Math.round). March time is dist / speed, so the two
+  // penalties COMPOUND, and against a land link of identical on-screen length:
+  //
+  //     infantry (or armour)      1.6 / 0.5              = 3.2x
+  //     any stack with artillery  1.6 / (0.5 x 0.6)      = 5.3x   <- below
+  //
+  // plus SEA_ARTILLERY_LOSS off the guns. Measured on the live graph: dov~lil
+  // is 27 on-screen pixels and dist 44, and infantry cross it in 147 ticks
+  // (14.7 sim-seconds), a mixed stack with guns in 408 (41 sim-seconds) — long
+  // enough that Britain is safe and must plan, short enough that it can still
+  // matter, but that is 3.2x and 5.3x doing the work, not 2x.
+  //
+  // The previous version of this comment read "halving speed turns Dover (dist
+  // 55) into an 18-second commitment", which understated the real penalty by
+  // 1.6x and quoted a dist no link on the current map has. Anyone balancing sea
+  // power off 0.5 alone is tuning against a number that is 3.2x wrong.
   SEA_SPEED_MUL: 0.5,
 
   // ...and punishing for artillery specifically (01-data-schema.md LINKS).
   // A further speed penalty plus a flat loss of guns per crossing. 10% is
   // enough to make shipping artillery a deliberate cost, not a rounding
   // error, without needing a transport system to model it.
+  //
+  // Compounds with SEA_SPEED_MUL *and* with the 1.6x sea `dist` inflation, so
+  // the real march-time penalty on a gun-carrying stack is 5.3x a land link of
+  // the same on-screen length — see the block above.
   SEA_ARTILLERY_SPEED_MUL: 0.6,
   SEA_ARTILLERY_LOSS: 0.10,
 

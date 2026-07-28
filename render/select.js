@@ -483,6 +483,38 @@ function _selPathPoints(path) {
   return pts;
 }
 
+// ── the preview follows the LINK, not the chord ─────────────────────────
+//
+// Sea links are drawn BOWED. Five crossings on this map — Dover to Lille among
+// them — are shorter between centres than the two station symbols are wide, so
+// the arc is the only geometry with any visible length at all, and it is the
+// curve render/waves.js walks the wave down once the volley is committed.
+//
+// A preview drawn as a straight chord therefore promised a march across open
+// water the units would not take, next to an ETA computed for the route they
+// would — a readout answering a different question from the one on screen,
+// which is known-issues #18. §8's whole case for the preview is that "a volley
+// is legible BEFORE you commit it"; a line that is not the route is not legible,
+// it is wrong.
+//
+// So the shape comes out of render/map.js's route seam and NOTHING here derives
+// it. That file paints the links, waves.js rides them, and this draws the
+// preview along them, out of one function — known-issues #9/#12 is "two
+// implementations of one geometry rule" and this project has paid for it three
+// times. On a land hop the seam's sagitta is 0, where the quadratic IS the
+// straight segment, so no land preview moved by so much as a rounding error.
+//
+// The fallback below is the old straight chain, and it is for ONE case: a load
+// order where render/map.js is not there yet. This file may draw a worse line
+// than the seam would; it may not answer the same question a second way.
+function _selRouteD(row) {
+  if (row.geoms && typeof linkRouteD === 'function') return linkRouteD(row.geoms);
+  const pts = row.points;
+  let d = 'M' + pts[0][0] + ',' + pts[0][1];
+  for (let i = 1; i < pts.length; i++) d += ' L' + pts[i][0] + ',' + pts[i][1];
+  return d;
+}
+
 // §8: "the number is the interface." A preview annotation that lands on a
 // garrison number costs more than it gains, and the payload label doubled the
 // height of every annotation, so what used to graze now covers.
@@ -591,12 +623,6 @@ function _selDirAlong(pts, d) {
   return [1, 0];
 }
 
-function _selPolyPoints(pts) {
-  const out = [];
-  for (let i = 0; i < pts.length; i++) out.push(pts[i][0] + ',' + pts[i][1]);
-  return out.join(' ');
-}
-
 // Point at arc-length `d` from the start of the polyline, so an ETA label sits
 // ON the route it annotates rather than on the straight line between the
 // endpoints — which, on a bent route, is somewhere the wave never goes.
@@ -641,6 +667,14 @@ function selPreviewRows(target) {
 
     const path = _selRoutePath(sid, target);
     const pts = _selPathPoints(path);
+    // The route's SHAPE, hop by hop, off render/map.js's link seam — see
+    // _selRouteD. `trace` is the same curve as a polyline, because the ETA
+    // label is placed a fixed DISTANCE along the route and a chord is the wrong
+    // ruler on exactly the crossings where the bow is the whole visible line.
+    const geoms = (pts && typeof linkRouteGeoms === 'function')
+      ? linkRouteGeoms(path) : null;
+    const trace = (geoms && typeof linkRoutePoints === 'function')
+      ? (linkRoutePoints(geoms) || pts) : pts;
     let eta = null;
     if (pts && etaFn) {
       const t = etaFn(path, units || { infantry: 1, artillery: 0, armour: 0 });
@@ -663,7 +697,7 @@ function selPreviewRows(target) {
 
     rows.push({
       source: sid, from: from, to: to,
-      path: path, points: pts, eta: eta,
+      path: path, points: pts, geoms: geoms, trace: trace, eta: eta,
       // The exact bundle the commit will subtract from this source. Exposed on
       // the row so the label and any check can read the same numbers the ETA
       // and the refusal test were computed from.
@@ -724,14 +758,19 @@ function selDrawPreview(target) {
       continue;
     }
 
-    // ONE SEGMENT PER HOP. The wave walks the link graph, so the preview walks
-    // it too — if the only legal way from Berlin to Paris is through Cologne,
-    // the line bends at Cologne and the player can see the transit before
-    // committing to it. This is the whole of task 2.
+    // ONE SEGMENT PER HOP, and each segment is the link's own arc. The wave
+    // walks the link graph, so the preview walks it too — if the only legal way
+    // from Berlin to Paris is through Cologne, the line bends at Cologne and the
+    // player can see the transit before committing to it; and if a hop is a sea
+    // crossing, the line bows exactly where the wave will (see _selRouteD).
+    //
+    // A <path>, not a <polyline>: a land hop is the sagitta-0 case of the same
+    // quadratic, so there is one element type and one geometry rule rather than
+    // a straight branch and a curved branch that could drift apart.
     let cls = 'sel-path is-' + intent;
     if (r.eta === slowest && spread > 0) cls += ' is-slowest';
-    const poly = el('polyline', cls, {
-      points: _selPolyPoints(r.points),
+    const poly = el('path', cls, {
+      d: _selRouteD(r),
       'data-preview': r.source,
       'data-hops': r.points.length,
     });
@@ -791,8 +830,13 @@ function selDrawPreview(target) {
     // interface, and this file may not sit on one).
     let base, dir;
     if (r.routable) {
-      base = _selPointAlong(r.points, off);
-      dir = _selDirAlong(r.points, off);
+      // Walked along `trace` — the route's arcs sampled as a polyline — rather
+      // than along the hop corners, so a label 26 units out from a source on the
+      // French coast sits on the Channel arc it annotates instead of in the
+      // water beside it. Falls back to the corners when the seam is absent.
+      const walk = r.trace || r.points;
+      base = _selPointAlong(walk, off);
+      dir = _selDirAlong(walk, off);
     } else {
       const len = Math.max(1, dist(r.from, r.to));
       const t = clamp(off / len, 0.08, 0.62);
