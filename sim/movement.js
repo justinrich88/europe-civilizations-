@@ -627,122 +627,65 @@ function movementTick(state) {
 // STANDING ORDERS — phase 2 of the tick, between growth and movement.
 // (00-vision.md §8 as amended; data/tuning.js §11; 01-data-schema.md.)
 //
-// Three orders, one pipe with two ends and an off switch:
+// ONE MECHANIC AND NO VERB. A city carries `supplyTo`: a sorted list of the
+// cities it streams surplus to. An empty list is the default and the off
+// switch, which is why a board nobody has touched is byte-identical to one
+// built before this section existed.
 //
-//   hold   default, and the off switch. Accumulate; never auto-send. Exactly
-//          the behaviour the game had before this file grew this section, which
-//          is why a board nobody has touched is byte-identical to today's.
-//   rally  a SINK. Feed stations stream into the nearest one.
-//   feed   a SOURCE. Ships a small share of its surplus, on a throttle, to the
-//          nearest rally its owner can legally reach — or, if the player has set
-//          no rally at all, to the nearest owned station ON THE FRONT.
+// Every sweep, a source works out what it may spare (SEND_FRACTION of its
+// surplus above the keep floor), SPLITS THAT EVENLY across the destinations
+// that still have room, and ships one stream to each.
 //
-// LOGISTICS CAN BE AUTOMATED; COMMITMENT CANNOT. Every target chosen here is a
+// THE DESIGN ARRIVED HERE BY DELETING THINGS, and the deletions are the point.
+//
+//   v1  hold / rally / feed. The player labelled the two ENDS and the sim
+//       matched them up by nearest-seed search, with a fallback to "the nearest
+//       owned station on the front" when no rally was set. A feeder aimed at the
+//       wrong rally looked exactly like one aimed at the right rally.
+//   v2  hold / reinforce / defend, each naming its destination. The naming was
+//       right and survives. `defend` did not: it fired only when the sim judged
+//       the target "threatened", off a rule that was nowhere on the board — the
+//       same invisible guess in a new place. It was also redundant against the
+//       capacity ceiling below, which already makes a quiet front stop pulling.
+//   v3  this. A list of edges. Nothing left to guess, and one city can supply
+//       several, which one-target-per-source made impossible.
+//
+// LOGISTICS CAN BE AUTOMATED; COMMITMENT CANNOT. Every destination here is a
 // station the sending power already holds, every route is one routeFor() will
 // walk over that power's own ground, and applyCommand refuses a standing send at
 // anything else. The board still never plays itself: it only carries things.
 //
-// WHY IT LIVES IN sim/movement.js. It is one phase, ~150 lines, and every
-// primitive it needs — the ownership-aware search, the link index, the wave — is
-// already here. A separate sim/orders.js would also need a <script> tag in
-// index.html, which is owned by the render workstream; a phase that silently
-// does not load in the browser while passing every headless test is precisely
-// the failure mode docs/testing/known-issues.md #9 and #16 are about.
+// WHY IT LIVES IN sim/movement.js. It is one phase and every primitive it needs
+// — the ownership-aware search, the link index, the wave — is already here. A
+// separate sim/orders.js would also need a <script> tag in index.html, which is
+// owned by the render workstream; a phase that silently does not load in the
+// browser while passing every headless test is precisely the failure mode
+// docs/testing/known-issues.md #9 and #16 are about.
 //
 // Helpers are prefixed _ord (by FILE and by feature, per known-issues #12).
 // ---------------------------------------------------------------------------
 
-// Owned stations that touch ground their owner does not hold.
+// What fraction of its garrison a source may ship in TOTAL this sweep, across
+// all of its destinations together.
 //
-// "The front" needs defining because with the capital-only opening most of the
-// board is NEUTRAL, not enemy: 101 of 108 stations at turn zero. Defining the
-// front as "adjacent to an ENEMY station" would leave it empty for most of a
-// game and the no-rally fallback would never fire — the mechanic would exist and
-// do nothing, which is known-issues #11's mistake in a new place.
-//
-// So the front is where your ground stops: adjacent to any station its owner
-// does not hold, neutral or hostile alike. That is also the honest reading of
-// the design — expansion against neutrals IS the early war (§6), a neutral
-// border is exactly where you want mass, and it is the same test _moveCanTraverse
-// uses to decide where a wave may walk, so "the front" and "the edge of the
-// board you own" are one concept rather than two that can drift apart.
-function _ordFront(state, pid, own) {
-  var adj = stationAdjacency();
-  var out = [];
-  for (var i = 0; i < own.length; i++) {
-    var nb = adj[own[i]] || [];
-    for (var j = 0; j < nb.length; j++) {
-      var st = state.stations[nb[j]];
-      if (st && st.owner !== pid) { out.push(own[i]); break; }
-    }
-  }
-  return out;                                  // sorted: `own` is sorted
-}
-
-// Multi-source Dijkstra from every seed at once, over ground `pid` holds.
-// Returns { stationId: nearestSeedId } for every station the power can reach.
-//
-// One search per power per sweep, not one per feeding city: the seeds are the
-// destinations, and shortest paths are symmetric here because passability is
-// (both endpoints are owned by pid, and every intermediate must be). Choosing
-// the destination is therefore O(n^2) once, and the per-source route each wave
-// actually walks is computed by applyCommand -> routeFor as usual, so there is
-// exactly one authority on the path.
-//
-// Ties break on the lower station id, twice over — the settle scan walks
-// STATION_IDS in sorted order, and equal-distance seeds are compared by id — so
-// two runs of one seed pick the same rally.
-function _ordNearestSeed(state, pid, seeds) {
-  var adj = stationAdjacency();
-  var idx = linkIndex();
-  var dist = {}, best = {}, done = {};
-  var i, sid;
-
-  for (i = 0; i < STATION_IDS.length; i++) dist[STATION_IDS[i]] = Infinity;
-  for (i = 0; i < seeds.length; i++) { dist[seeds[i]] = 0; best[seeds[i]] = seeds[i]; }
-
-  for (var n = 0; n < STATION_IDS.length; n++) {
-    var cur = null;
-    for (i = 0; i < STATION_IDS.length; i++) {
-      sid = STATION_IDS[i];
-      if (done[sid]) continue;
-      if (cur === null || dist[sid] < dist[cur]) cur = sid;
-    }
-    if (cur === null || dist[cur] === Infinity) break;
-    done[cur] = true;
-    // Ground this power does not hold is never expanded from. Unlike
-    // _moveSearch there is no "final station is exempt" case to preserve: both
-    // ends of a standing send are stations the power holds, by construction.
-    if (state.stations[cur].owner !== pid) continue;
-    var nb = adj[cur] || [];
-    for (i = 0; i < nb.length; i++) {
-      var to = nb[i];
-      if (done[to]) continue;
-      var l = idx[_linkKey(cur, to)];
-      var d = dist[cur] + (l ? l.dist : 1);
-      if (d < dist[to] || (d === dist[to] && best[cur] < best[to])) {
-        dist[to] = d;
-        best[to] = best[cur];
-      }
-    }
-  }
-  return best;
-}
-
-// What fraction of its garrison a feeding station may ship right now.
-//
-// THE GARRISON FLOOR. A feed station never sends below KEEP_FLOOR x capacity,
-// so it can still defend itself and the rear never empties. Applied to the
-// SURPLUS rather than as a gate on the whole garrison, for the same reason
-// ai/ai.js applies HOME_GARRISON_FLOOR that way: growth stops at
-// GROWTH_CAP_EPSILON so a station is never quite full, and a literal "can this
-// source afford the full fraction?" test would reject every station forever.
+// THE GARRISON FLOOR. A source never sends below KEEP_FLOOR x capacity, so it
+// can still defend itself and the rear never empties. Applied to the SURPLUS
+// rather than as a gate on the whole garrison, for the same reason ai/ai.js
+// applies HOME_GARRISON_FLOOR that way: growth tapers rather than stopping, so a
+// station is never quite full, and a literal "can this source afford the full
+// fraction?" test would reject every station forever.
 //
 //     amount   = SEND_FRACTION x (units - KEEP_FLOOR x capacity)
 //     fraction = amount / units
 //
 // so the floor is an asymptote the stream approaches and never crosses, and a
 // station at or below it ships nothing at all.
+//
+// PER SOURCE, NOT PER EDGE. A city with four supply lines ships the same total
+// as one with a single line, divided four ways — adding a destination spreads
+// the stream, it does not multiply it. The alternative (this fraction per edge)
+// would make the keep floor meaningless the moment a player drew a second line
+// out of a city, which is the shape of bug the floor exists to prevent.
 function _ordAllowedFraction(state, sid) {
   var st = state.stations[sid];
   if (!st) return 0;
@@ -755,51 +698,55 @@ function _ordAllowedFraction(state, sid) {
 }
 
 // ---------------------------------------------------------------------------
-// HEADROOM — a rally is a mustering point, not a warehouse.
+// HEADROOM — a destination is a mustering point, not a warehouse.
 //
 // Capacity is a real ceiling everywhere else in this game. growthTick bleeds
 // any station over it at OVERSTACK_DECAY, and 00-vision.md §2 is explicit that
 // a full station has stopped paying dividends and should be spent. AUTOMATION
 // MUST OBEY THE SAME CEILING THE PLAYER DOES.
 //
-// Shipped without this rule, and measured on a live board: 7 feed cities into
-// one 28-capacity rally reached 208 units after 400 ticks and was still
+// Shipped without this rule, and measured on a live board: 7 source cities into
+// one 28-capacity destination reached 208 units after 400 ticks and was still
 // climbing. The equilibrium is where inflow meets the bleed —
 //
 //     SEND_FRACTION x surplus / INTERVAL  =  (units - capacity) x OVERSTACK_DECAY
 //
 // which for ~6.6 units per 25-tick sweep settles at u ~= 556 units in a
-// 28-capacity city: a rally holding twenty times its capacity and DESTROYING
-// 100% OF EVERYTHING FED TO IT, FOREVER. The mechanic was a net loss for the
-// player, and it hid inside a rising empire total — the feeders drop off the
-// logistic ceiling and regrow, so the books looked good while the units were
+// 28-capacity city: a destination holding twenty times its capacity and
+// DESTROYING 100% OF EVERYTHING FED TO IT, FOREVER. The mechanic was a net loss
+// for the player, and it hid inside a rising empire total — the sources drop off
+// the logistic ceiling and regrow, so the books looked good while the units were
 // being deleted on arrival. An automation convenience that loses you units is
 // worse than no automation.
 //
-// Three rules, and they are the same rule from three angles:
+// It is also the reason there is no `defend` order. A front that is quiet is
+// full, so it takes nothing and its sources bank their surplus at home by
+// themselves; a front that is losing units has headroom and pulls. The ceiling
+// already IS the trigger, expressed as a fact about the board rather than as a
+// judgement the sim makes off screen.
 //
-//   1. A seed with no headroom is NOT A VALID DESTINATION this sweep, so a
-//      further rally with room beats a nearer one without.
-//   2. No seed has room -> the feed city is a no-op and keeps its units. Same
-//      reasoning as the unreachable case: better in a growing city than in a
-//      bleeding one.
-//   3. A send is CLAMPED to the destination's remaining headroom, so a stream
+// Two rules, and they are the same rule from two angles:
+//
+//   1. A destination with no room is SKIPPED for this sweep and its share is
+//      redistributed across the source's other destinations. Better in a
+//      growing city, or in a sibling that can use it, than in a bleeding one.
+//   2. A send is CLAMPED to the destination's remaining headroom, so a stream
 //      never overshoots the ceiling it was just checked against.
 //
-// Rule 3 has to count what is already in the air or the last few sweeps all
+// Rule 2 has to count what is already in the air or the last few sweeps all
 // overshoot together, each correctly sized against a headroom the others are
 // about to consume. In-flight waves are counted per DESTINATION, and the sweep
-// carries its own running total so several feeders in ONE sweep cannot
-// collectively bust the ceiling either.
+// carries its own running total so several sources in ONE sweep — or several
+// edges out of one source — cannot collectively bust the ceiling either.
 // ---------------------------------------------------------------------------
 
 // Units of `pid` already on their way to each station, keyed by destination.
 //
 // Counts EVERY wave the power has in the air, not only standing ones. A manual
-// volley merging into a rally fills exactly the same capacity, and headroom is
-// a fact about the destination rather than about who is sending — a stream that
-// ignored the player's own reinforcements would overshoot for a reason the
-// player could see coming and the automation could not.
+// volley merging into the destination fills exactly the same capacity, and
+// headroom is a fact about the far end rather than about who is sending — a
+// stream that ignored the player's own reinforcements would overshoot for a
+// reason the player could see coming and the automation could not.
 //
 // Read from w.to rather than the end of w.path: interception rewrites both, but
 // a STANDING wave stands down instead of being intercepted, so for the waves
@@ -814,234 +761,362 @@ function _ordInbound(state, pid) {
   return out;
 }
 
+// THE CEILING AUTOMATION OBEYS: the level growth itself stops at, and above
+// which OVERSTACK_DECAY starts bleeding. A destination filled by streams then
+// sits exactly where a station that filled itself sits, rather than somewhere
+// decay nibbles forever.
+//
+// NOT `capacity` FLAT, and not a constant this file picks. It is whatever
+// sim/growth.js currently treats as full, and that has now moved once: it used
+// to be capacity x GROWTH_CAP_EPSILON, and since the over-capacity rework
+// (data/tuning.js §2, 2026-07 — "rather than making production stop when a city
+// is full, just slow the production speed by 50%") it is capacity x
+// GROWTH_OVERFLOW_CEIL. Reading the wrong one is not a rounding error: with the
+// old constant, every destination that grew past 99.5% of capacity — which is
+// now normal rather than the asymptote — would report negative headroom and
+// silently refuse every stream aimed at it, forever.
+//
+// So it is read by INTENT with a fallback, rather than by naming one constant.
+// The fallback is what lets this file run against a tuning.js from before the
+// rework; the ordering is what makes it track the rework after it.
+function _ordCeilingMul() {
+  if (typeof BAL === 'undefined') return 1;
+  if (isFinite(BAL.GROWTH_OVERFLOW_CEIL) && BAL.GROWTH_OVERFLOW_CEIL > 0) {
+    return BAL.GROWTH_OVERFLOW_CEIL;
+  }
+  return isFinite(BAL.GROWTH_CAP_EPSILON) ? BAL.GROWTH_CAP_EPSILON : 1;
+}
+
 // Room left at `sid` once everything already inbound has landed. Negative for a
 // station that is already over its ceiling and bleeding.
 //
-// The ceiling is capacity x GROWTH_CAP_EPSILON — the level growth itself stops
-// at (data/tuning.js §2) — not capacity flat. A rally filled by streams then
-// sits exactly where a station that filled itself sits, rather than a fraction
-// of a percent above it where OVERSTACK_DECAY nibbles forever. Half a percent
-// of capacity, and it costs nothing.
-//
 // RESIDUAL, stated because it is real and small: a stream sized against today's
 // headroom lands after a march, and the destination GROWS while it is in the
-// air, so a rally can finish a few percent over. Measured on the front fixture:
-// peak 1.04x capacity, decaying back under OVERSTACK_DECAY. That is growth's
-// doing, not the send's — the SIZING invariant (units + inbound <= ceiling at
-// every sweep) is exact and is asserted as such. Reserving for projected growth
-// would mean a second copy of growthTick's logistic here, and two
-// implementations of one formula is the drift known-issues #9 is about.
+// air, so it can finish a few percent over. Measured on the front fixture: peak
+// 1.04x capacity, decaying back under OVERSTACK_DECAY. That is growth's doing,
+// not the send's — the SIZING invariant (units + inbound <= ceiling at every
+// sweep) is exact and is asserted as such. Reserving for projected growth would
+// mean a second copy of growthTick's logistic here, and two implementations of
+// one formula is the drift known-issues #9 is about.
 function _ordHeadroom(state, sid, inbound) {
   var st = state.stations[sid];
   if (!st) return 0;
   var cap = (typeof STATIONS !== 'undefined' && STATIONS[sid]) ? STATIONS[sid].capacity : 0;
-  return cap * BAL.GROWTH_CAP_EPSILON - totalUnits(st.units) - (inbound[sid] || 0);
+  return cap * _ordCeilingMul() - totalUnits(st.units) - (inbound[sid] || 0);
 }
 
-// A destination is only worth routing to if it can take a stream worth sending.
-// Gated on MIN_SEND rather than on "> 0" so rules 1 and 3 agree: a rally with
-// 0.3 units of room would otherwise be chosen as nearest and then produce
-// nothing, while a rally with real room sat further away unused.
-function _ordHasRoom(state, sid, inbound) {
-  return _ordHeadroom(state, sid, inbound) >= BAL.ORDERS.MIN_SEND;
-}
-
-// Units that would leave `sid` on the next sweep, ignoring whether it has
-// anywhere to PUT them. Pure.
+// Units that would leave `sid` on the next sweep, ignoring whether anywhere it
+// supplies can take them. Pure.
 //
 // THIS IS THE SOURCE'S WILLINGNESS AND NOTHING MORE, and a readout that shows
 // it is advertising a promise the sim may not keep. Measured on a live board:
-// Berlin on `feed` reported "5.6 units next sweep" every frame for the whole
-// game while its only rally sat at 28.5 / 28 and the headroom rule shipped
-// exactly nothing, forever. A number that never happens, with nothing on screen
-// saying why, is worse than no number at all.
+// Berlin reported "5.6 units next sweep" every frame for the whole game while
+// its destination sat at 28.5 / 28 and the headroom rule shipped exactly
+// nothing, forever. A number that never happens, with nothing on screen saying
+// why, is worse than no number at all.
 //
-// So this is kept — the willingness is a real quantity and the readout still
-// quotes the FRACTION off it — but standingOrderNext() below is what a panel
-// must show. See the block comment there.
+// So this is kept — the willingness is a real quantity, it is what "held back
+// per sweep" means, and the readout still quotes the FRACTION off it — but
+// standingOrderNext() below is what a panel must show. See the block comment
+// there, and known-issues #18.
 function standingOrderSend(state, sid) {
   var st = state.stations[sid];
-  if (!st || st.order !== 'feed') return 0;
+  if (!st || !st.supplyTo || !st.supplyTo.length) return 0;
   var amount = totalUnits(st.units) * _ordAllowedFraction(state, sid);
   return amount >= BAL.ORDERS.MIN_SEND ? amount : 0;
 }
 
 // ---------------------------------------------------------------------------
+// A LOST DESTINATION DROPS THAT EDGE — and only that edge.
+//
+// A supply line pointing at a city its owner no longer holds is not a weaker
+// line; it is an ATTACK ORDER the player scheduled and forgot, and it must never
+// become one. Three separate things stop it, and only the third is bookkeeping:
+//
+//   * _ordPlanPower refuses to plan a send at a destination this power does not
+//     hold ('target-lost'), so nothing is ever issued.
+//   * applyCommand refuses a standing send at unheld ground outright
+//     ('standing-target-not-owned'), so nothing could be issued even if it were.
+//   * ...and then this drops the edge, so the board stops drawing a pipe that
+//     has no far end.
+//
+// PER EDGE, NOT PER STATION. A city supplying three others that loses one of
+// them keeps the other two. Clearing the whole list would silently cancel work
+// the player did, on news they may not even have seen yet.
+//
+// WHY THE SWEEP AND NOT setStationOwner. Doing it at the moment of capture would
+// make "a supply line never points at foreign ground" a hard state invariant,
+// which is genuinely attractive — but it costs a scan of every station on every
+// capture, in the middle of combat, to catch a case that has no safety
+// consequence (the two refusals above already have it covered). It would also
+// make 'target-lost' an unreachable state, and therefore a blocked reason no
+// fixture could construct — which this suite deletes rather than keeps, so the
+// player would lose the one sentence that explains a line disappearing.
+//
+// The gap is bounded by one sweep (BAL.ORDERS.INTERVAL, 25 ticks = 2.5
+// sim-seconds) and it is not a silent gap: for its whole length the planner
+// reports the edge as target-lost and the map draws that pipe as closed.
+// Cleared BEFORE the plan is taken, so the sweep that drops an edge is also the
+// first sweep that does not act on it.
+// ---------------------------------------------------------------------------
+function _ordClearLost(state, pid) {
+  for (var i = 0; i < STATION_IDS.length; i++) {
+    var sid = STATION_IDS[i];
+    var st = state.stations[sid];
+    if (!st || st.owner !== pid) continue;
+    var list = st.supplyTo;
+    if (!list || !list.length) continue;
+
+    var keep = null;
+    for (var j = 0; j < list.length; j++) {
+      var to = state.stations[list[j]];
+      var live = !!(to && to.owner === pid);
+      // Allocated only when something is actually dropped, so the common case —
+      // nothing lost, which is every sweep of a quiet board — allocates nothing
+      // and writes nothing.
+      if (!live && !keep) keep = list.slice(0, j);
+      else if (keep && live) keep.push(list[j]);
+    }
+    if (!keep) continue;
+
+    // Through core's setter, never by writing the field here: it is the one
+    // place the list is validated, deduped and sorted.
+    if (typeof setStationSupply === 'function') setStationSupply(state, sid, keep);
+    else st.supplyTo = keep;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ONE PLANNER, TWO CALLERS — the sweep and the readout.
 //
-// _ordPlanPower decides, for every feed station one power holds, what leaves on
-// the next sweep and — when nothing does — WHY. It takes no decisions of its
-// own: it is the body the sweep used to have, lifted out whole, and the sweep
-// below is now nothing but "issue what the plan says".
+// _ordPlanPower decides, for every supplying station one power holds, what
+// leaves on the next sweep, DOWN WHICH LINE, and — when nothing does — WHY. It
+// takes no decisions of its own beyond that: the sweep below is nothing but
+// "issue what the plan says".
 //
 // WHY IT IS ONE FUNCTION AND NOT TWO. The obvious alternative is a second copy
 // of this arithmetic living in the renderer, and that is precisely the failure
-// docs/testing/known-issues.md #9 is about: two implementations of one rule
-// drift the first time the sim is tuned, and then the panel is confidently
-// wrong. It is not enough for the readout to be *initially* correct; it has to
-// be UNABLE to disagree. Sharing the planner makes agreement structural rather
+// docs/testing/known-issues.md #18 is about: the rail advertised "6.4 units next
+// sweep" every frame of a game in which orderStats.sends stayed at 0 forever,
+// because the panel and the sweep were answering slightly different questions.
+// It is not enough for the readout to be *initially* correct; it has to be
+// UNABLE to disagree. Sharing the planner makes agreement structural rather
 // than a property of two files being edited together, and the exactness test in
 // test/runner.js ("standingOrderNext predicts every sweep exactly") is what says
 // so out loud.
 //
 // PURE. Nothing here mutates state — `inbound` is the planner's own scratch
-// object, exactly as it was when it lived in the sweep. Safe to call every
-// frame; the whole thing is one O(n^2) multi-source search plus a walk of the
-// power's feed stations.
+// object. Safe to call every frame.
 //
-// ORDER MATTERS AND IS PRESERVED. `feeds` is built in STATION_IDS order and the
-// running headroom total is spent down that list, so the third feeder in a
-// sweep sees the room the first two just took. A planner that answered for one
-// station in isolation would be right about the first feeder and wrong about
-// every one after it, which is the same class of lie in a new place.
+// ORDER MATTERS AND IS PRESERVED, twice over. `sources` is built in STATION_IDS
+// order and each source's `supplyTo` is already sorted, so the running headroom
+// total is spent down one fixed sequence: the third source aimed at a city sees
+// the room the first two just took, and the second edge out of one source sees
+// what the first edge spent. A planner that answered for one station in
+// isolation would be right about the first and wrong about every one after it.
+//
+// THE EVEN SPLIT, and why it is even. A source's allowed outflow is divided
+// equally between the destinations that currently have room; a destination with
+// no room is skipped and its share goes to the others. "Neediest first" was the
+// obvious alternative and it is the whole trap this design keeps walking into —
+// it is another rule the sim applies off screen, where a wrong ranking looks
+// identical to a right one. An even split is a thing the player can state and
+// check. Skipping a full destination is not a judgement; it is the ceiling.
+//
+// NOT REDISTRIBUTED: the remainder when a share is CLAMPED to a destination
+// that has some room but less than its share. One pass, no iteration to a fixed
+// point. It is a real underspend, it is bounded by one sweep, and the next sweep
+// 25 ticks later re-divides against the new numbers — buying exactness here
+// would cost a loop whose termination is a thing somebody would have to reason
+// about every time this file is touched.
 //
 // BLOCKED REASONS. Machine-readable, and every one of them is reachable —
 // test/runner.js constructs a fixture per reason:
 //
-//   no-order          not a feed station (hold, or a rally, which is a sink)
-//   no-seed           no rally set AND no front to fall back to
-//   destination-full  every seed is at its ceiling, or the one this city is
-//                     aimed at has less room left than MIN_SEND after the
-//                     feeders ahead of it in this sweep took theirs
-//   unreachable       no route to any open seed over ground this power holds
-//   already-there     this city IS the nearest seed (the no-rally fallback,
-//                     where a front-line city is already where units are wanted)
-//   at-keep-floor     at or below KEEP_FLOOR x capacity — never ships itself
-//                     defenceless
-//   below-min-send    surplus is real but under MIN_SEND; it ships once grown
+//   no-order          this city supplies nowhere. `supplyTo` is empty
+//   target-lost       this destination is no longer held by this power. The
+//                     edge is dropped by the next sweep; see _ordClearLost
+//   unreachable       no route to it over ground this power holds
+//   at-keep-floor     the SOURCE is at or below KEEP_FLOOR x capacity, so it
+//                     ships nothing anywhere — never itself defenceless
+//   destination-full  this destination has less room than the share aimed at
+//                     it, possibly because earlier edges took it this sweep
+//   below-min-send    the share is real but under MIN_SEND. A source splitting
+//                     its surplus four ways reaches this long before a source
+//                     with one line does, which is the cost of a wide network
+//                     and is worth saying out loud
 //
 // The reasons are checked in the sweep's own control-flow order, so the one
-// reported is the one that actually stopped the send. That means a city both at
-// its floor AND aimed at a full rally reports the rally: rule 2 returns before
-// the floor is ever looked at. Matching the sweep beats picking the "nicer"
-// message — the whole point is that this cannot say something the sweep does
-// not do.
+// reported is the one that actually stopped the send.
 // ---------------------------------------------------------------------------
 
 function _ordBlocked(target, why) {
-  return { units: 0, target: target || null, blocked: why, fraction: 0 };
+  return { target: target, units: 0, fraction: 0, blocked: why };
+}
+
+// A source's whole answer: `{ units, edges, blocked, target }`.
+//
+//   units    total leaving this city on the next sweep, summed over its edges
+//   edges    one record per destination, in sorted destination order, each
+//            { target, units, fraction, blocked }
+//   blocked  null when units > 0; otherwise the reason the FIRST edge gives, or
+//            'no-order' when there are no edges at all
+//   target   the destination `blocked` is about, so a panel with room for one
+//            line can still name a city. null when there are no edges
+//
+// `blocked`/`target` are the summary a small readout needs; `edges` is the
+// truth. They cannot disagree, because the summary is derived from the edges
+// here rather than computed alongside them.
+function _ordSummarise(edges) {
+  var units = 0;
+  for (var i = 0; i < edges.length; i++) units += edges[i].units;
+  if (!edges.length) return { units: 0, edges: edges, blocked: 'no-order', target: null };
+  if (units > 0) return { units: units, edges: edges, blocked: null, target: null };
+  return { units: 0, edges: edges, blocked: edges[0].blocked, target: edges[0].target };
 }
 
 function _ordPlanPower(state, pid) {
-  var own = [], feeds = [], rallies = [], i, sid, st;
-  var out = { feeds: feeds, by: {} };
+  var sources = [], i, j, sid, st;
+  var out = { sources: sources, by: {} };
 
   for (i = 0; i < STATION_IDS.length; i++) {
     sid = STATION_IDS[i];
     st = state.stations[sid];
     if (!st || st.owner !== pid) continue;
-    own.push(sid);
-    if (st.order === 'feed') feeds.push(sid);
-    else if (st.order === 'rally') rallies.push(sid);
+    if (st.supplyTo && st.supplyTo.length) sources.push(sid);
   }
-  if (!feeds.length) return out;
+  if (!sources.length) return out;
 
-  // No rally set by the player: fall back to the front. Still their own ground.
-  var seeds = rallies.length ? rallies : _ordFront(state, pid, own);
-  if (!seeds.length) {
-    for (i = 0; i < feeds.length; i++) out.by[feeds[i]] = _ordBlocked(null, 'no-seed');
-    return out;
-  }
-
-  // RULE 1. A seed with no headroom is not a destination this sweep. Filtered
-  // BEFORE the search, so the nearest-seed answer is the nearest seed that can
-  // actually take the units — a further rally with room beats a nearer one
-  // without, which is the whole point and cannot be done by rejecting after.
   var inbound = _ordInbound(state, pid);
-  var open = [];
-  for (i = 0; i < seeds.length; i++) {
-    if (_ordHasRoom(state, seeds[i], inbound)) open.push(seeds[i]);
-  }
 
-  // RULE 2. Nowhere with room: every feed city is a no-op and keeps growing.
-  //
-  // The second search here is FOR THE READOUT ONLY and runs on the blocked path
-  // exclusively, so the sweep pays for it only on sweeps that ship nothing. It
-  // answers the question the player actually has — "which city is full?" — which
-  // the shipping path cannot, because it has already discarded every seed
-  // without room. "Nothing ships, Leipzig Works is full" tells you to spend that
-  // stack or set another rally; "nothing ships" alone tells you nothing.
-  if (!open.length) {
-    var stuck = _ordNearestSeed(state, pid, seeds);
-    for (i = 0; i < feeds.length; i++) {
-      out.by[feeds[i]] = _ordBlocked(stuck[feeds[i]] || null, 'destination-full');
+  for (i = 0; i < sources.length; i++) {
+    var from = sources[i];
+    st = state.stations[from];
+    var list = st.supplyTo;
+    var edges = [];
+
+    // Pass 1 — which edges are live, and how many of them can take units. Every
+    // edge gets a record either way: a blocked destination is information the
+    // player needs, and dropping it here would leave the map unable to draw the
+    // difference between a closed pipe and no pipe.
+    var live = [], open = 0;
+    for (j = 0; j < list.length; j++) {
+      var to = list[j];
+      var dst = state.stations[to];
+      if (!dst || dst.owner !== pid) { edges.push(_ordBlocked(to, 'target-lost')); live.push(null); continue; }
+      // UNREACHABLE IS A NO-OP, NOT AN ERROR. Routing is ownership-aware and a
+      // corridor can be cut by a capture between one sweep and the next.
+      // routeFor is the same function applyCommand will use to build the wave,
+      // and it is cached against state.ownerEpoch, so asking it here costs
+      // nothing the send was not going to pay anyway — and there is exactly one
+      // authority on whether a path exists rather than a cheaper approximation
+      // that can disagree with it.
+      if (!routeFor(state, pid, from, to)) { edges.push(_ordBlocked(to, 'unreachable')); live.push(null); continue; }
+      edges.push(null);
+      live.push(to);
+      if (_ordHeadroom(state, to, inbound) >= BAL.ORDERS.MIN_SEND) open++;
     }
-    return out;
-  }
 
-  var nearest = _ordNearestSeed(state, pid, open);
-
-  for (i = 0; i < feeds.length; i++) {
-    var from = feeds[i];
-    var to = nearest[from];
-    // UNREACHABLE IS A NO-OP, NOT AN ERROR. Routing is ownership-aware and a
-    // rally can be cut off by a capture between one sweep and the next; a feed
-    // city with nowhere legal to ship simply keeps its units and grows.
-    // `to === from` is the no-rally case where this station is itself on the
-    // front — it is already where the units are wanted.
-    if (!to) { out.by[from] = _ordBlocked(null, 'unreachable'); continue; }
-    if (to === from) { out.by[from] = _ordBlocked(from, 'already-there'); continue; }
-
+    // The source-wide gate. Checked after pass 1 rather than before it so the
+    // edge-level reasons above are still computed and drawn: a city sitting at
+    // its keep floor still wants to show which of its lines are cut.
     var fraction = _ordAllowedFraction(state, from);
-    if (fraction <= 0) { out.by[from] = _ordBlocked(to, 'at-keep-floor'); continue; }
+    var have = totalUnits(st.units);
+    var share = (open > 0 && fraction > 0) ? (have * fraction) / open : 0;
 
-    // RULE 3. Clamp to what the destination can still hold. `inbound` is
-    // updated after every planned send below, so three feeders that each fit
-    // on their own cannot collectively bust the ceiling inside one sweep.
-    var have = totalUnits(state.stations[from].units);
-    var room = _ordHeadroom(state, to, inbound);
-    var want = have * fraction;
-    var amount = want > room ? room : want;
-    if (amount < BAL.ORDERS.MIN_SEND) {
-      // Which of the two ends came up short is the whole message. If the
-      // destination's remaining room is what cut the stream under the minimum
-      // it is the rally that needs attention; otherwise the source is simply
-      // not big enough yet and will ship as it grows.
-      out.by[from] = _ordBlocked(to, room < want ? 'destination-full' : 'below-min-send');
-      continue;
+    // `factor` is the fraction of the ORIGINAL garrison still standing here as
+    // each successive edge is issued. Two edges out of one city are two separate
+    // applyCommand calls in the same sweep, and the second one is sized against
+    // what the first one left behind — so the plan has to model that shrinkage
+    // or it over-promises on every edge after the first. splitUnits scales all
+    // three unit types by one factor, so a single scalar is exact here.
+    var factor = 1;
+
+    for (j = 0; j < list.length; j++) {
+      if (edges[j]) continue;                       // already blocked in pass 1
+      var t = live[j];
+      if (fraction <= 0) { edges[j] = _ordBlocked(t, 'at-keep-floor'); continue; }
+
+      var room = _ordHeadroom(state, t, inbound);
+      if (room < BAL.ORDERS.MIN_SEND) { edges[j] = _ordBlocked(t, 'destination-full'); continue; }
+
+      var cur = splitUnits(st.units, factor);
+      var curTotal = totalUnits(cur);
+      if (!(curTotal > 0)) { edges[j] = _ordBlocked(t, 'at-keep-floor'); continue; }
+
+      var want = share > room ? room : share;
+      var f = want / curTotal;
+      if (f > 1) f = 1;
+
+      // WHAT APPLYCOMMAND WILL ACTUALLY HAND OVER for that fraction, not what
+      // the arithmetic above asked for. sendPayload holds BAL.SEND_KEEP_UNITS
+      // back off the top of every send so a city can never be emptied to exactly
+      // zero (logistic growth is proportional to `units`, so a zeroed city is
+      // dead ground forever). The keep floor is normally the binding constraint
+      // and this changes nothing — but "normally" is how known-issues #18
+      // happened: two expressions that agreed until one of them was tuned.
+      // Asking the command layer's own function makes agreement structural.
+      var amount = (typeof sendPayload === 'function')
+        ? totalUnits(sendPayload(cur, f))
+        : curTotal * f;
+
+      if (amount < BAL.ORDERS.MIN_SEND) {
+        // Which end came up short is the whole message. If the destination's
+        // remaining room is what cut the stream under the minimum it is the
+        // destination that needs attention; otherwise the source is simply not
+        // big enough yet — for this many lines — and will ship as it grows.
+        edges[j] = _ordBlocked(t, room < share ? 'destination-full' : 'below-min-send');
+        continue;
+      }
+
+      edges[j] = { target: t, units: amount, fraction: f, blocked: null };
+      // Booked immediately, against both ends: the next edge must see the room
+      // this one just spent AND the units it just took out of this city.
+      inbound[t] = (inbound[t] || 0) + amount;
+      factor *= (1 - amount / curTotal);
     }
 
-    out.by[from] = { units: amount, target: to, blocked: null, fraction: amount / have };
-    // Booked against the destination immediately: the next feeder in THIS sweep
-    // must see the room this one just spent.
-    inbound[to] = (inbound[to] || 0) + amount;
+    out.by[from] = _ordSummarise(edges);
   }
   return out;
 }
 
-// WHAT ACTUALLY LEAVES `sid` ON THE NEXT SWEEP, and why it does not.
+// WHAT ACTUALLY LEAVES `sid` ON THE NEXT SWEEP, down which line, and why it does
+// not.
 //
-//   { units, target, blocked }
+//   { units, target, blocked, edges }
 //
-//   units    what would really be shipped, 0 whenever anything blocks it.
-//   target   the station this city is AIMED at — kept even when blocked, so a
-//            panel can name the rally that is full. null when there is none.
-//   blocked  null when units > 0, otherwise one of the reasons listed above
-//            _ordPlanPower.
+//   units    what would really be shipped in total, 0 whenever everything is
+//            blocked. NOT what the source is willing to part with.
+//   edges    [{ target, units, blocked }], in sorted destination order — the
+//            per-line answer, which is what a map marker with one arrow per
+//            destination draws from.
+//   blocked  null when units > 0; otherwise the first edge's reason, or
+//            'no-order' when this city supplies nowhere.
+//   target   the city `blocked` is about. null when there are no edges.
 //
 // This, not standingOrderSend(), is the number a readout must show. The two
-// differ exactly when the destination cannot take the stream, which is the case
-// the player most needs told: a feed city pointed at a full rally is willing to
-// ship 5.6 units and actually ships zero, and only this function knows that.
+// differ exactly when a destination cannot take the stream, which is the case
+// the player most needs told: a city with a supply line into a full destination
+// is willing to ship 5.6 units and actually ships zero, and only this function
+// knows that. See known-issues #18.
 //
 // PURE: no mutation of state, no command issued, no cache. Deliberately
 // uncached — the plan depends on every garrison on the board, and a memo keyed
 // on anything cheaper than that would go stale inside a tick, which is a subtler
 // wrong answer than the one this function exists to fix.
 //
-// COST, MEASURED, because it decides how renderers may call it: ~80 microseconds
-// on the live 108-station board (Chrome, warmed, mean of three 1000-call runs:
-// 88.1 / 76.8 / 76.7us). standingOrderSend by comparison is 0.2us — the whole
-// difference is _ordNearestSeed's O(n^2) search, and it is the price of the
-// answer being the destination's as well as the source's.
-//
-// 80us is 0.5% of a 16.6ms frame, so ONE call per frame is free and a
-// per-station loop is not — which is what standingOrderPlan() below exists for.
+// COST. It plans the WHOLE POWER to answer about one station, so it is fine once
+// per frame and is not fine in a loop over stations — use standingOrderPlan()
+// for that. The work is a walk of the power's supplying stations and one
+// routeFor() per edge; those searches are cached per (state, ownerEpoch, power,
+// source) in this file, so the steady-state cost is the walk and the worst case
+// is one cached search per edge on the first plan after a capture.
 function standingOrderNext(state, sid) {
-  var none = { units: 0, target: null, blocked: 'no-order' };
+  var none = { units: 0, target: null, blocked: 'no-order', edges: [] };
   if (!state || !state.stations || typeof BAL === 'undefined' || !BAL.ORDERS) return none;
   var st = state.stations[sid];
-  if (!st || st.order !== 'feed') return none;
+  if (!st || !st.supplyTo || !st.supplyTo.length) return none;
   // Neutral is never an actor and a dead power takes no sweeps — the same two
   // gates ordersTick applies, so this cannot describe a sweep that will not run.
   var pid = st.owner;
@@ -1051,24 +1126,23 @@ function standingOrderNext(state, sid) {
 
   var p = _ordPlanPower(state, pid).by[sid];
   if (!p) return none;
-  return { units: p.units, target: p.target, blocked: p.blocked };
+  return { units: p.units, target: p.target, blocked: p.blocked, edges: p.edges };
 }
 
-// THE SAME ANSWER FOR EVERY FEED CITY ONE POWER HOLDS, in one call:
-// `{ sid: { units, target, blocked } }`, empty when the power feeds nowhere.
+// THE SAME ANSWER FOR EVERY SUPPLYING CITY ONE POWER HOLDS, in one call:
+// `{ sid: { units, target, blocked, edges } }`, empty when the power supplies
+// nowhere.
 //
 // Not a convenience. standingOrderNext() plans the whole power's sweep to answer
-// about one station, so asking it about seven stations does the same 80us search
-// seven times — 560us, which is 3% of a frame spent recomputing an identical
-// answer, and it scales with how many cities the player has put on `feed`. Two
-// renderers need the whole set at once (the empire header sums it; the map marks
-// every blocked feeder), and this is what they call. Measured at the same ~80us
-// as one standingOrderNext, for any number of feeders.
+// about one station, so asking it about seven stations repeats the entire plan
+// seven times, and it scales with how many cities the player has automated. Two
+// renderers need the whole set at once (the map marks every pipe on every
+// ordered node; a header sums them), and this is what they call.
 //
 // It is the SAME planner, so there is still exactly one implementation and
 // nothing here can disagree with the sweep. Fresh objects are returned rather
-// than the planner's own records, so a caller cannot reach in and edit the
-// plan the sweep would have used — the `fraction` field is the sweep's business.
+// than the planner's own records, so a caller cannot reach in and edit the plan
+// the sweep would have used — the `fraction` field is the sweep's business.
 function standingOrderPlan(state, pid) {
   var out = {};
   if (!state || !state.stations || typeof BAL === 'undefined' || !BAL.ORDERS) return out;
@@ -1077,50 +1151,70 @@ function standingOrderPlan(state, pid) {
   if (!pow || pow.alive === false) return out;
 
   var plan = _ordPlanPower(state, pid);
-  for (var i = 0; i < plan.feeds.length; i++) {
-    var sid = plan.feeds[i], p = plan.by[sid];
+  for (var i = 0; i < plan.sources.length; i++) {
+    var sid = plan.sources[i], p = plan.by[sid];
     if (!p) continue;
-    out[sid] = { units: p.units, target: p.target, blocked: p.blocked };
+    var edges = [];
+    for (var j = 0; j < p.edges.length; j++) {
+      var e = p.edges[j];
+      edges.push({ target: e.target, units: e.units, blocked: e.blocked });
+    }
+    out[sid] = { units: p.units, target: p.target, blocked: p.blocked, edges: edges };
   }
   return out;
 }
 
-// One power's sweep: issue what the plan says, and nothing else. Every decision
-// above this line lives in _ordPlanPower, which is also what the readout reads.
-// Returns the number of streams launched.
+// One power's sweep: drop what is dead, issue what the plan says, and nothing
+// else. Every decision above this line lives in _ordPlanPower, which is also
+// what the readout reads. Returns the number of streams launched.
 function _ordSweepPower(state, pid) {
+  // BEFORE the plan, so an edge whose destination has been lost is dropped on
+  // the same sweep the plan refuses to act on it. See the LOST DESTINATION
+  // block above; this is the only mutation in the phase that is not a command.
+  _ordClearLost(state, pid);
+
   var plan = _ordPlanPower(state, pid);
   var sent = 0;
 
-  for (var i = 0; i < plan.feeds.length; i++) {
-    var from = plan.feeds[i];
+  for (var i = 0; i < plan.sources.length; i++) {
+    var from = plan.sources[i];
     var p = plan.by[from];
-    if (!p || p.blocked || !(p.units > 0)) continue;
+    if (!p) continue;
 
-    // Through applyCommand, exactly as the player and the AI do. Nothing here
-    // builds a wave: if a volley would be illegal for them it is illegal here,
-    // and `rejected` is this phase's feedback channel just as it is the AI's.
-    //
-    // The plan is sized so that none of applyCommand's rejections can fire:
-    // the target is ground `pid` holds (every seed is), MIN_SEND (2.0) is above
-    // MIN_SEND_UNITS (0.5), the route exists because _ordNearestSeed only walks
-    // ground this power holds, and 0 < fraction <= 1 by construction. The guard
-    // stays anyway — a plan that is silently not executed must not be counted.
-    var res = applyCommand(state, {
-      type: 'send',
-      owner: pid,
-      sources: [from],
-      target: p.target,
-      fraction: p.fraction,
-      standing: true,
-    });
+    // Edges in the plan's own order, which is the sorted destination order the
+    // plan sized them in. Issuing them in any other order would ship different
+    // amounts, because each send is sized against what the previous one left.
+    for (var j = 0; j < p.edges.length; j++) {
+      var e = p.edges[j];
+      if (e.blocked || !(e.units > 0)) continue;
 
-    if (res && res.ok) {
-      sent += res.waves.length;
-      for (var k = 0; k < res.waves.length; k++) {
-        if (state.orderStats) state.orderStats.unitsSent += totalUnits(res.waves[k].units);
+      // Through applyCommand, exactly as the player and the AI do. Nothing here
+      // builds a wave: if a volley would be illegal for them it is illegal here,
+      // and `rejected` is this phase's feedback channel just as it is the AI's.
+      //
+      // The plan is sized so that none of applyCommand's rejections can fire:
+      // the target is ground `pid` holds (checked in the plan), MIN_SEND (2.0)
+      // is above MIN_SEND_UNITS (0.5), the route exists because the plan asked
+      // routeFor for it, source and target differ because core/state.js will not
+      // store an edge otherwise, and 0 < fraction <= 1 by construction. The
+      // guard stays anyway — a plan that is silently not executed must not be
+      // counted.
+      var res = applyCommand(state, {
+        type: 'send',
+        owner: pid,
+        sources: [from],
+        target: e.target,
+        fraction: e.fraction,
+        standing: true,
+      });
+
+      if (res && res.ok) {
+        sent += res.waves.length;
+        for (var k = 0; k < res.waves.length; k++) {
+          if (state.orderStats) state.orderStats.unitsSent += totalUnits(res.waves[k].units);
+        }
+        if (state.orderStats) state.orderStats.sends += res.waves.length;
       }
-      if (state.orderStats) state.orderStats.sends += res.waves.length;
     }
   }
   return sent;
@@ -1131,9 +1225,9 @@ function _ordSweepPower(state, pid) {
 // than sitting still for one.
 //
 // THROTTLED, for the reason CAPITULATE_CHECK_INTERVAL is: this is a whole-board
-// scan plus a search per power, nothing about it is time-critical, and running
-// it every tick would be pure waste. See BAL.ORDERS.INTERVAL for how 25 was
-// chosen against the other clocks.
+// scan plus a route lookup per supply line, nothing about it is time-critical,
+// and running it every tick would be pure waste. See BAL.ORDERS.INTERVAL for
+// how 25 was chosen against the other clocks.
 function ordersTick(state) {
   if (!state || state.winner) return;
   if (typeof BAL === 'undefined' || !BAL.ORDERS) return;

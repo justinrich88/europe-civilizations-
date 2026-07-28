@@ -274,6 +274,45 @@ function _aiActDefenderPower(state, sid) {
   return stationPower(state, sid, 'defender');
 }
 
+// The defender power `sid` will have once its garrison has finished growing —
+// used ONLY when sizing a staging march, never when deciding to attack. See
+// the block above the deficit in _aiActPlanStage for why the two questions
+// need different numbers.
+//
+// A garrison below BAL.GROWTH_OVERFLOW_CEIL x capacity is still growing, and
+// since the over-capacity rework (data/tuning.js) that ceiling is 1.5, not 1.
+// So this scales the stack up to the ceiling and re-runs the CANONICAL
+// formula — power is linear in the body but the fort block saturates
+// (sim/combat.js _fortBonus scales in over DEFENSE_BONUS_FULL_AT defenders),
+// so multiplying `def` by the unit ratio would over-count a fort that is
+// already full. Same proxy-state trick as _aiActStackPower, and for the same
+// reason: reuse stationPower rather than re-derive it (known-issues.md #9).
+//
+// Two stations project to themselves: one that is cut off (it is decaying,
+// not growing — sim/growth.js DISCONNECT_GROWTH = 0) and one already at or
+// past the ceiling (growth there is zero by construction).
+function _aiActGrownDefenderPower(state, sid, def) {
+  var d = (typeof STATIONS !== 'undefined') ? STATIONS[sid] : null;
+  var real = state.stations ? state.stations[sid] : null;
+  var ceil = BAL.GROWTH_OVERFLOW_CEIL;
+  if (!d || !real || !(d.capacity > 0) || !(ceil > 1)) return def;
+  if (real.connected === false) return def;
+  var now = totalUnits(real.units);
+  var full = d.capacity * ceil;
+  if (!(now > BAL.ANNIHILATION_EPSILON) || now >= full) return def;
+
+  var ratio = full / now;
+  if (typeof stationPower !== 'function') return def * ratio;
+  var proxy = { stations: {} };
+  proxy.stations[sid] = {
+    owner: real.owner,
+    units: splitUnits(real.units, ratio),
+    attackers: real.attackers,
+  };
+  var grown = stationPower(proxy, sid, 'defender');
+  return grown > def ? grown : def;
+}
+
 // ---------------------------------------------------------------------------
 // Source selection — the competence step
 //
@@ -618,7 +657,31 @@ function _aiActPlanStage(state, pid, target, plan, minOdds) {
     ? plan.power / stackUnits : 0;
   if (!(perUnit > 0)) return { reason: 'stage-no-feeders' };
 
-  var deficit = minOdds * plan.def - plan.power;
+  // THE DEFENDER THE MASS WILL MEET, not the one standing there now. A staging
+  // march is hundreds to thousands of ticks long, and since the over-capacity
+  // rework a garrison below its hard ceiling grows for the whole of that march
+  // — deterministically, and by up to (GROWTH_OVERFLOW_CEIL - 1) x capacity.
+  // Sizing the deficit against the defender's power RIGHT NOW therefore
+  // under-orders every march by exactly the amount the target will grow in
+  // transit; the AI then reads its own in-flight units as covering the gap,
+  // reports 'stage-massed', and holds. That is the 65%-draw frozen board
+  // coming back through a different door — on the last-stand fixture the odds
+  // plateaued at 1.69 against a floor of 1.89 and the board never moved in
+  // 100,000 ticks, where before the rework it fell at tick 1,941.
+  //
+  // A FORECAST, not pessimism: below the ceiling growth is monotonic and the
+  // ceiling is exactly where it reaches zero, so cap x CEIL is where that
+  // garrison is going, not merely where it could go.
+  //
+  // Only the defender is projected. The attacker's own interior also grows,
+  // but that is slack STAGE_OVERSHOOT already carries, and projecting both
+  // would cancel the asymmetry this exists to correct: the defender's extra
+  // units are free, ours have to be marched, and the marching is what takes
+  // the time the defender grows in. The ATTACK gate in _aiActWalk is
+  // deliberately left reading the present — an attack launched now meets a
+  // defender only one volley-ETA older, and projecting there would make the
+  // AI refuse fights it can win.
+  var deficit = minOdds * _aiActGrownDefenderPower(state, target, plan.def) - plan.power;
   if (!(deficit > 0)) return { reason: 'stage-massed' };
 
   var frac = (plan.fraction > 0) ? plan.fraction : BAL.AI.COMMIT_FRACTION;

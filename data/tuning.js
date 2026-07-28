@@ -41,7 +41,17 @@ const BAL = {
 
   // Speeds offered by the HUD. Pause is a separate flag, not a 0 here, so
   // that unpausing restores the previous speed.
-  SPEEDS: [1, 2, 4],
+  //
+  // 1x IS GONE, on the player's instruction, and 2x is now the default. Real
+  // time here is a fixed 10 ticks/sec (TICKS_PER_SEC) and a march across a
+  // border is tens of seconds of it — at 1x the board simply does not move
+  // fast enough to reward watching it, and every session spent its whole
+  // length at 2x or 4x anyway. Removing it costs nothing: the loop multiplies
+  // time CONSUMED, never the timestep, so the physics at 2x is identical to
+  // the physics at 1x and no balance constant is expressed in wall-clock.
+  // Pause is still the way to stop and read the board.
+  SPEEDS: [2, 4],
+  SPEED_DEFAULT: 2,
 
 
   // ===================================================================
@@ -74,12 +84,50 @@ const BAL = {
   // Growth is disabled entirely above this fraction of capacity. Pure
   // logistic asymptotes and leaves a station wobbling at 99.7% forever,
   // which makes the HUD's growth readout look broken. Snap it shut.
+  //
+  // No longer read by sim/growth.js — GROWTH_OVERFLOW_RATE below replaced the
+  // dead band it used to open. Kept because test/runner.js still names it and
+  // because it documents the asymptote problem the floor now solves properly.
   GROWTH_CAP_EPSILON: 0.995,
 
-  // A station over capacity (reinforced past its ceiling) bleeds back down at
+  // ── over capacity ──────────────────────────────────────────────────────
+  //
+  // Added 2026-07 on the player's instruction: "rather than making production
+  // stop when a city is full, just slow the production speed by 50% until the
+  // city has capacity again."
+  //
+  // Pure logistic growth is `rate * units * (1 - units/capacity)`, which is
+  // exactly zero at capacity. That made a full city dead ground that could only
+  // be turned back into an asset by spending it — true to §2's "full stations
+  // should be spent", but it meant the single best thing you own contributes
+  // nothing until you gamble it, and a defensive power could hold a full board
+  // and watch its economy stop.
+  //
+  // So growth no longer falls to zero. The room factor stops descending at
+  // GROWTH_OVERFLOW_RATE of the station's PEAK growth and holds there through
+  // capacity, then tapers to nothing at GROWTH_OVERFLOW_CEIL x capacity. The
+  // peak of `units * (1 - units/cap)` is `cap/4` at half full, so the floor is
+  // `0.25 * RATE` in room terms — that 0.25 is derived, not tuned, and lives in
+  // sim/growth.js next to the formula it comes from.
+  //
+  // Consequences, deliberately accepted: capacity becomes "where it gets slow"
+  // rather than "where it stops", the biggest stack on the board can now get
+  // bigger, and square-law combat already rewards mass — so this wants a
+  // balance pass, not just a green test suite.
+  //
+  // BOTH CONSTANTS ARE ALSO THE OFF SWITCH. RATE 0 with CEIL 1 reproduces the
+  // pre-2026-07 sim exactly, which is how the change was proved not to have
+  // perturbed anything else.
+  GROWTH_OVERFLOW_RATE: 0.5,
+  GROWTH_OVERFLOW_CEIL: 1.5,
+
+  // A station over the HARD CEILING (reinforced past it) bleeds back down at
   // this fraction of the excess per tick. Half-life ~14 sim-seconds — long
   // enough to stage an assault out of an overstuffed border city, short
-  // enough that hoarding is not a strategy.
+  // enough that hoarding is not a strategy. The floor it bleeds toward is
+  // GROWTH_OVERFLOW_CEIL x capacity, not capacity: growth is legal up to the
+  // ceiling now, and a decay that fought it would be two rules pulling on the
+  // same number in opposite directions.
   OVERSTACK_DECAY: 0.0005,
 
 
@@ -375,11 +423,42 @@ const BAL = {
   LANDING_TICKS: 120,
 
   // Persistent send proportion, per §8: "a persistent 25/50/75/All setting
-  // applies to the whole volley; default 75%". 0.75 is the value that makes
-  // the core tension bite — you keep enough to regrow, but a serious attack
-  // visibly guts the source.
-  SEND_FRACTION_DEFAULT: 0.75,
+  // applies to the whole volley".
+  //
+  // The default is 25%, not §8's original 75%, and the setting is now ONE-SHOT
+  // — it reverts here after every volley (render/select.js). The player's
+  // reasoning, and it is right: the amount is the part of a volley you get
+  // wrong under time pressure, and a *sticky* 75% means one absent-minded
+  // click empties a city you meant to hold. A one-shot setting that always
+  // relaxes to the timid value makes the expensive choice the deliberate one
+  // — you must press 4 every single time you mean to commit everything.
+  //
+  // SEND_FRACTIONS is the ladder, and its index+1 is the digit that selects it:
+  // 1=25 2=50 3=75 4=All. Keep the two in step — render/select.js derives the
+  // key bindings from this array rather than repeating the numbers.
+  SEND_FRACTION_DEFAULT: 0.25,
   SEND_FRACTIONS: [0.25, 0.5, 0.75, 1.0],
+
+  // What a source ALWAYS keeps back, in units, however large the fraction.
+  //
+  // "if you 'send all' 1 troop stays so population increases" — the player, and
+  // this is a real hole rather than a nicety. Growth is logistic (§2):
+  //     growth = rate x units x (1 - units/capacity)
+  // which is proportional to `units`, so a station emptied to exactly zero has
+  // a growth rate of exactly zero and is dead ground forever — it can never
+  // recover on its own, no matter how long you hold it. Before this, "All"
+  // permanently destroyed the city that sent it.
+  //
+  // Applied to EVERY fraction, not just 1.0, because "your own order can never
+  // kill a city" is one rule a player can hold in their head, where "except
+  // below 1.3 units at 75%" is not. A station at or under this floor simply
+  // has nothing spare and is rejected as 'too-few-units', the same refusal it
+  // already gets today.
+  //
+  // 1.0 rather than a fraction of capacity: it is a SEED, not a garrison. It
+  // does not defend the place and is not meant to — a city held by one unit
+  // still falls to anything, which keeps "I emptied my rear" a real risk.
+  SEND_KEEP_UNITS: 1.0,
 
   // Terrain scopes to the whole territory (§3).
   //   move     multiplier on march speed for links ENTERING this territory
@@ -806,11 +885,35 @@ const BAL = {
 
     // Smallest stream worth sending. MIN_SEND_UNITS (0.5) is the floor for a
     // deliberate click; a standing order fires unattended every 25 ticks
-    // forever, so its floor is higher — 2.0 keeps a nearly-drained feed city
+    // forever, so its floor is higher — it keeps a nearly-drained feed city
     // from spawning an endless dribble of 0.6-unit waves that clutter the map,
     // cost a route search each, and can never matter. Below it the sweep is a
     // no-op for that station and it simply keeps growing until it can pay.
-    MIN_SEND: 2.0,
+    //
+    // 2.0 -> 1.0, 2026-07. This gate is PER EDGE and it also gates the source,
+    // so a city needs `N * MIN_SEND / SEND_FRACTION / (1 - KEEP_FLOOR)` units
+    // before N supply lines will run at all. At 2.0 that made the player's own
+    // stated goal — "it's difficult to reinforce more than one city from a
+    // single city" — arithmetically impossible for most of the board:
+    //
+    //     destinations      1      2      3      4
+    //     min capacity   22.2   44.4   66.7   88.9
+    //     cities able    94     18      4      0     (of 108, at capacity)
+    //
+    // Four lines could never run anywhere: the largest city on the map has
+    // capacity 74. Berlin supplying three cities fired ONCE and then reported
+    // `below-min-send` forever, which reads as the feature being broken.
+    //
+    // At 1.0, and with growth now running to GROWTH_OVERFLOW_CEIL so a full
+    // city holds 1.5x capacity, it is 108/107/99/76 of 108 — the gesture the
+    // player asked for works on essentially the whole board.
+    //
+    // SEND_FRACTION was the other candidate and was deliberately left alone.
+    // Raising it to 0.18 would have reached the same table by making every
+    // standing order ship 50% faster, which is a balance change stacked on top
+    // of the growth change landing in the same session. One constant, one
+    // effect, one thing to blame if the sweep moves.
+    MIN_SEND: 1.0,
   },
 
 

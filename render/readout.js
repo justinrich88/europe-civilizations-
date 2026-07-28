@@ -3,13 +3,13 @@
 //
 // ── THE RAIL ─────────────────────────────────────────────────────────────
 //
-// This file also owns `#rail`, the persistent column down the right-hand side
-// of the screen. It used to draw a small panel that followed the cursor. That
-// panel was click-transparent so it never ate a commit, but it appeared beside
-// the station the player was about to click — i.e. exactly where their
-// attention and their cursor already were — and covered the board at the one
-// moment the board mattered most. The answer to that is not a cleverer anchor.
-// It is a place on screen that is always the same place.
+// This file owns `#rail`, the persistent column down the right-hand side of the
+// screen. It used to draw a small panel that followed the cursor. That panel was
+// click-transparent so it never ate a commit, but it appeared beside the station
+// the player was about to click — i.e. exactly where their attention and their
+// cursor already were — and covered the board at the one moment the board
+// mattered most. The answer to that is not a cleverer anchor. It is a place on
+// screen that is always the same place.
 //
 // The rail is a flex SIBLING of .board-wrap, never an overlay (index.html,
 // `.stage`). That is a safety property, not a layout preference: anything
@@ -19,11 +19,117 @@
 // it simply rescales, and render/camera.js's ResizeObserver rebuilds its fit
 // rect so marquee selection stays aligned with what is drawn.
 //
+// ── WHAT THIS COLUMN IS FOR, AFTER THE CUT ───────────────────────────────
+//
+// It used to be ~30 rows of labelled text in a 284px column: five sections,
+// four section titles, a growth breakdown of five rows, four farm rows, an
+// eight-row STRENGTH block and a six-row MARCH block. Every number in it was
+// true. Most of them did not change a decision.
+//
+// The test applied to every row that survived: **does this number change what
+// the player is about to do?** A player looking at this column is choosing one
+// of four things — where to attack, what to attack with, what to reinforce, and
+// what to spend before it stops growing. A row that does not move one of those
+// four is gone, however correct it was.
+//
+// So, deleted and why:
+//
+//   base rate ×1.00 city    the type badge already says "city", and the rate is
+//                           a constant of the station. It never moves.
+//   logistic ×0.10 90% full the capacity bar IS the logistic term, drawn. Two
+//                           renderings of one fact in one column.
+//   farm rows, four of them the coverage overlay puts farm reach ON THE MAP
+//                           (§8), which is where it belongs; the rail keeps the
+//                           product and names the strongest one.
+//   garrison / fortification the split is kept, but as one power row and one
+//   / matchup / attacking    conditional additive row, not five rows and six
+//   out, six source lines    source lines.
+//   quickest+slowest exits,  a range on one row. The per-route ETA a player
+//   four source lines        actually commits on is on the preview line (§8),
+//                           computed for the route they chose.
+//   territory full-vs-       the map already draws the three tiers differently
+//   majority split           (solid / wash / hatched, §3). Reading it off a
+//                           number was the second copy.
+//   the idle body            the empire section is always on screen now, so the
+//                           rail can never be an empty gutter without it.
+//
+// Kept, and why, because these are the ones that decide a fight:
+//
+//   garrison / capacity      full means "stopped paying dividends" (§2) and is
+//                           the whole spend-it signal.
+//   composition by type      the soft triangle (§4) is composition. A total
+//                           hides the decision.
+//   defence vs attack power  the two numbers an assault is decided by, side by
+//                           side, in the same unit.
+//   fortification, ADDITIVE  see the rule below. It is the single most
+//                           important number in a fight.
+//   cut off                  invisible on the board, fatal on the clock.
+//   march range              distance is how defeat in detail happens (§8).
+//
+// ── ICONS ────────────────────────────────────────────────────────────────
+//
+// Four, and they replace the four section-title rows that used to be pure
+// chrome (STRENGTH / MARCH / SUPPLY / ORDERS). They mark the things a player
+// scans FOR — "how hard is this to take", "how long is the march", "is
+// something wrong" — and nothing else. An icon per row would be a differently
+// shaped wall.
+//
+// None of them replaces an ambiguous word. `power` still says power, `d` still
+// says days, `+3.6 power` still carries its plus sign. Every icon additionally
+// carries `title` + `aria-label` on the element that holds it, because an icon
+// that has to be learned is worse than the word it replaced.
+//
+// ── TWO RULES THIS FILE IS BUILT AROUND ──────────────────────────────────
+//
+// 1. **Never reimplement a sim fact.** Every number below comes out of
+//    sim/ or core/state.js by calling it:
+//
+//      growth this tick      _applyGrowth() run against a THROWAWAY station
+//      the multiplier total  state.stations[sid].growthMul (what growth USED)
+//      which farms reach     multiplierStationIds() + territoryHops()
+//      defending power       stationPower(state, sid, 'defender')
+//      the fort block        the REMAINDER of stationPower over _bodyPower, so
+//                            the two cannot fail to add up even if
+//                            sim/combat.js gains another term
+//      fort scale-in + strip _fortBonus() run twice, once with no attackers
+//      march speed           waveSpeed() on a THROWAWAY wave
+//      supply lines          stationSupply / stationSuppliedBy (core/state.js)
+//      what actually ships   standingOrderNext / standingOrderPlan
+//
+//    Only tuning CONSTANTS are read directly, and they are read from BAL, never
+//    copied as literals. A formula copied into a renderer silently drifts the
+//    first time the sim is tuned, and then the panel is confidently wrong —
+//    worse than absent. The one thing mirrored here is growthTick()'s *branch
+//    order* (contested → cut off → over capacity → at cap → growing), which is
+//    control flow, not arithmetic; it is labelled at the branch.
+//
+// 2. **ADDITIVE IS NEVER DRAWN AS A MULTIPLIER.** Station defense is a rating
+//    whose excess over 1.0 becomes FLAT POWER (BAL.DEFENSE_BONUS_POWER = 6.0).
+//    This panel once wrote `DEF ×3.2` for it, which was not a rounding error —
+//    it misstated the one number an assault is decided by, in the direction
+//    that makes a fortress look unassailable. It is written `+3.6 power` with a
+//    plus sign in the garrison colour, and its working is quoted in `lvl`, the
+//    same vocabulary sim/combat.js uses. If a `×` ever appears in that row the
+//    renderer is lying.
+//
+//    The corollary, and it is why several rows here keep a word next to their
+//    icon: **if a number's units are not obvious, it needs the word.** An icon
+//    is not a unit.
+//
+// 3. **A readout must never answer a different question from the one on
+//    screen** (docs/testing/known-issues.md #18). The supply row prints
+//    `standingOrderNext()` — what the sweep's own planner will actually do —
+//    never `standingOrderSend()`, which is what the source is *willing* to part
+//    with. Those two stopped being the same number the day destinations gained
+//    a veto, and the panel went on printing the first one for a whole
+//    milestone. Willingness is a fine thing to compute and a terrible thing to
+//    print.
+//
 // ── THE SEAM: railAddSection(spec) ───────────────────────────────────────
 //
-// The rail is a STACK of sections, not one panel. Station detail is merely the
-// first one. To add another later, call railAddSection() from your own file —
-// do not append to `#rail` by hand and do not invent a second convention:
+// The rail is a STACK of sections, not one panel. Station detail is merely one
+// of them. To add another later, call railAddSection() from your own file — do
+// not append to `#rail` by hand and do not invent a second convention:
 //
 //   railAddSection({
 //     id:     'supply',            // unique; a second call with the same id
@@ -58,38 +164,11 @@
 // rail re-sorts when the registry changes. Load order in index.html therefore
 // does not matter, only that render/readout.js is present.
 //
-// No speculative empty sections exist. There is one section, it is real, and
-// the next one is a ~15-line call.
-//
-// 00-vision.md §8: "Click a station for a small readout: type, garrison by unit
-// type, capacity, growth rate and what's modifying it."
-//
-// The last clause is the feature. Growth on this board is a product of four
-// separate things — where the station sits on its logistic curve, how many farms
-// reach it, the control tier of the countries those farms are in, and whether it
-// is cut off — and a bare number tells you none of that. The panel is built
-// around the breakdown; the headline number is the footnote.
-//
-// TWO RULES THIS FILE IS BUILT AROUND
-//
-// 1. **Never reimplement a growth fact.** Every number below comes out of
-//    sim/growth.js or core/state.js by calling it:
-//
-//      - the multiplier total          growthMultiplier(state, sid)
-//      - which farms reach this one    multiplierStationIds() + territoryHops()
-//      - a farm's control weight       controlWeight(territoryControl(...).tier)
-//      - is a farm/station contested   stationAttackers(state, sid)
-//      - growth this tick              _applyGrowth() run against a THROWAWAY
-//                                      station object (see _rdoGrowthPerTick)
-//
-//    A formula copied into a renderer silently drifts the first time the sim is
-//    tuned, and then the panel is confidently wrong — worse than absent. The one
-//    thing mirrored here is growthTick()'s *branch order* (contested → cut off →
-//    over capacity → at cap → growing), which is control flow, not arithmetic;
-//    it is labelled at the branch so it can be re-checked against the sim.
-//
-// 2. **Read only.** Nothing here mutates state — the growth probe runs against
-//    a scratch object, not against state.stations[sid].
+// Sections after this rewrite no longer carry `title` strings. That is a
+// decision about THIS rail's content, not a change to the seam: four uppercase
+// header rows in a 200px column were four rows that said nothing a labelled row
+// underneath them did not already say. `title` still works for anyone who wants
+// it.
 //
 // Driven from outside: render/select.js owns pointer handling on #board, so this
 // file attaches NO board listener (01-data-schema.md, "Hover is shared"). Focus
@@ -98,14 +177,11 @@
 // not a second pointer handler.
 //
 // renderReadout runs every frame and writes only the fields whose text actually
-// changed; a quiet frame touches the DOM zero times.
-//
-// The station section is NEVER blank. With no focus it shows the player's own
-// empire at a glance, because a fixed-width column that empties out reads as a
-// broken layout rather than as "nothing selected". The idle body deliberately
-// does not repeat the top HUD (territories / forces / day) — it shows what the
-// HUD cannot fit: composition by unit type, stations held, full-vs-majority
-// control, and how much capacity headroom is left to grow into.
+// changed; a quiet frame touches the DOM zero times. That is not an
+// optimisation, it is a bug class: a pre-existing pair of functions writing the
+// same cache key cost 2.007 DOM writes per frame on a PAUSED game. Every write
+// in this file goes through _rdoSet / _rdoStyle / _rdoClass / _rdoShow, and
+// every key has exactly ONE author.
 
 'use strict';
 
@@ -115,9 +191,12 @@
 // "Day 42" up there are the same unit of time.
 var RDO_TICKS_PER_DAY = 10;
 
-// Farm rows shown before collapsing into "+n more". Four is already a very
-// crowded corner of the map.
-var RDO_MAX_FARMS = 4;
+// Farms NAMED on the growth line before it collapses to a count. Two, because
+// the line is one line: the map's coverage overlay is where the full picture
+// lives (00-vision.md §8, "hold a farm and see the territories it's boosting
+// light up") and duplicating it as four rows of text was the rail's single
+// largest block of words.
+var RDO_MAX_FARMS = 2;
 
 // A neutral station's fill clock is only interesting once it is actually
 // filling up; below this it reads as noise.
@@ -128,27 +207,111 @@ var RDO_NEUTRAL_WARN = 0.75;
 // so a tuning change that stalls growth cannot hang the renderer.
 var RDO_ETA_MAX_TICKS = 20000;
 
-// Frames between fill-clock recomputes. Everything else on the panel is O(1);
-// this one walks a few thousand growth steps, so it runs at ~2Hz.
+// Frames between fill-clock recomputes. Everything else on the panel is O(1) or
+// O(board) on a tick throttle; this one walks a few thousand growth steps, so
+// it runs at ~2Hz.
 var RDO_ETA_EVERY = 30;
 
 // Retired. The empire summary used to recompute on a FRAME throttle of its own;
-// it is now the empire header's tick-throttled aggregate (RDO_HEADER_EVERY_TICKS
+// it is now the empire section's tick-throttled aggregate (RDO_HEADER_EVERY_TICKS
 // and _rdoHeaderStats), because two caches of the same fact drift apart and get
 // printed side by side. Kept as a named constant only so a console habit or an
 // old bookmark does not throw.
 var RDO_EMPIRE_EVERY = 6;
 
-// Order slot for the station-detail section. Sections sort ascending, and the
-// gaps are the point: detail is the thing the player asked for by hovering, so
-// it stays at the top, and a later section can land above (< 10) or below
-// (> 10) without renumbering anything.
+// Order slots. Ascending, and the gaps are the point: a later section can land
+// between any two of these without renumbering anything.
+//
+//   5   empire    always on screen, nothing selected
+//   10  station   what you asked for by hovering
+//   11  supply    an alarm, and it invalidates half of the station block
+//   12  fight     what decides an assault, both directions
+//   13  orders    standing supply lines
+var RDO_HEADER_ORDER = 5;
 var RDO_SECTION_ORDER = 10;
+var RDO_SUPPLY_ORDER = 11;
+var RDO_FIGHT_ORDER = 12;
+var RDO_ORDERS_ORDER = 13;
 
 // Consecutive throws before a section is retired, matching RENDER_FAIL_LIMIT in
 // app/loop.js. A section that cannot survive three frames is broken, not
 // unlucky, and the rest of the rail should outlive it.
 var RDO_SECTION_FAIL_LIMIT = 3;
+
+// Sim ticks between recomputes of the empire aggregate. 10 ticks is one day
+// (BAL.TICKS_PER_SEC), which is the unit the growth figure is quoted in, so the
+// number cannot visibly lag the thing it describes. Tick-throttled rather than
+// frame-throttled so a PAUSED empire recomputes never and writes nothing.
+var RDO_HEADER_EVERY_TICKS = 10;
+
+// Growth is quoted per MINUTE for the empire and per DAY for one station. A
+// single station makes fractions of a unit a day and reads as noise; a whole
+// empire makes tens of units a minute, which is a number a player can hold in
+// their head and compare against the cost of an attack.
+var RDO_HEADER_PER_MIN = 60;
+
+// Source lines shown under one row. Two is the worst real case now that each
+// block collapses its working into a single sentence.
+var RDO_MAX_SOURCES = 2;
+
+// A value equal to 1.0 within this is the baseline, and the baseline is not a
+// modifier. Floating-point slack rather than a design number.
+var RDO_MOD_EPS = 0.005;
+
+// ── icons ───────────────────────────────────────────────────────────────
+//
+// Lucide (https://lucide.dev), **ISC licence**, path data taken from
+// lucide-static v1.27.0: `icons/shield.svg`, `icons/swords.svg`,
+// `icons/timer.svg`, `icons/triangle-alert.svg`.
+//
+// Inlined rather than fetched because this project has no npm, no bundler, no
+// CDN and no webfonts (README, "Rules of the codebase"), and four glyphs are
+// not worth breaking that for. Four `d` strings is less code than the
+// `<link>` tag that would have replaced them.
+//
+// TRANSCRIPTION, NOT REDRAW. `shield` ships as a single `<path>` and is copied
+// character for character. `swords`, `timer` and `triangle-alert` ship as a mix
+// of `<polyline>`, `<line>` and `<circle>`; each is written here as the
+// equivalent `d` (a polyline is `M` then implicit linetos, a line is `M…L`, the
+// circle `cx=12 cy=14 r=8` is two half arcs). The geometry is unchanged.
+//
+// `fill: none` and `stroke: currentColor` live in the STYLESHEET, not as
+// presentation attributes on these elements. That is known-issues #15 answered
+// before it can happen: a presentation attribute sits at the bottom of the
+// cascade and any stray class rule silently outranks it. Nothing here is
+// computed per frame anyway — these nodes are built once and never touched
+// again — so the stylesheet is simply where static paint belongs.
+var RDO_SVG_NS = 'http://www.w3.org/2000/svg';
+
+var RDO_ICONS = {
+  // lucide `shield` — the power a garrison holds this station with.
+  shield: 'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z',
+
+  // lucide `swords` — the same troops' worth on the offensive.
+  swords: 'M14.5 17.5L3 6L3 3L6 3L17.5 14.5 M13 19L19 13 M16 16L20 20 M19 21L21 19 ' +
+          'M14.5 6.5L18 3L21 3L21 6L17.5 9.5 M5 14L9 18 M7 17L4 20 M3 19L5 21',
+
+  // lucide `timer` — march time out of here, in days.
+  timer: 'M10 2L14 2 M12 14L15 11 M20 14A8 8 0 1 1 4 14A8 8 0 1 1 20 14',
+
+  // lucide `triangle-alert` — the one icon that means "something is wrong
+  // here". Spent on cut-off pockets, sieges and stalled supply, and on nothing
+  // else, because a column that warns about everything warns about nothing.
+  alert: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3 M12 9v4 M12 17h.01',
+};
+
+// Built once per row, never per frame. aria-hidden because the icon is
+// decoration on a row whose label element carries the real aria-label — a
+// screen reader should hear "defending power, 81.6", not "image, image".
+function _rdoIcon(name) {
+  var svg = el('svg', 'rdo-ico rdo-ico-' + name, {
+    viewBox: '0 0 24 24',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  });
+  svg.appendChild(el('path', null, { d: RDO_ICONS[name] || '' }));
+  return svg;
+}
 
 // ── module state ────────────────────────────────────────────────────────
 //
@@ -156,11 +319,17 @@ var RDO_SECTION_FAIL_LIMIT = 3;
 // render/hud.js and core/state.js.
 
 var _rdoFocus = null;        // sid the panel is pinned to, or null
-var _rdoNodes = null;        // built-once DOM, see _rdoBuild()
-var _rdoLast = null;         // key -> last string written, so we can skip
 var _rdoFrame = 0;
 var _rdoEta = { sid: null, text: '' };
-var _rdoEmpire = { frame: -1, pid: null, data: null };
+
+// key -> last string/flag written, so we can skip. Created ONCE, at load, and
+// never replaced: it used to be reset wholesale inside the station section's
+// build(), which meant the empire section (order 5, built first) had its cache
+// wiped underneath it. That was harmless only because every build happens
+// before every update in the same sync pass — i.e. it was correct by accident.
+// Each build now forgets its OWN prefix instead, so section order is no longer
+// load-bearing.
+var _rdoLast = Object.create(null);
 
 // Rail registry. `_rdoSections` is the authored list; `_rdoOrder` is it sorted
 // and is rebuilt only when `_rdoDirty` says the list changed, so the per-frame
@@ -211,6 +380,43 @@ function _rdoPctFine(v) {
   return Math.round(p) + '%';
 }
 
+// Additive power, signed. The sign is the message: this is troops added to the
+// defence, not a factor applied to it. See rule 2 in the file header.
+function _rdoPlus(v) {
+  if (!isFinite(v)) return '-';
+  return (v >= 0 ? '+' : '−') + _rdoNum(Math.abs(v));
+}
+
+// A signed LEVEL, the unit sim/combat.js measures fortification in. Kept
+// distinct from _rdoPlus so the working and the result cannot be confused for
+// each other: one is levels, one is the power those levels buy.
+function _rdoLvl(v) {
+  if (!isFinite(v)) return '-';
+  return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + ' lvl';
+}
+
+// Short unit tags, from BAL.UNIT_ORDER so a fourth unit type would appear here
+// without an edit.
+function _rdoUnitTag(t) { return String(t).slice(0, 3); }
+
+// "40 inf · 12 art" — the SAME grammar the map's volley preview uses for a
+// payload (00-vision.md §8), deliberately, so a stack reads identically wherever
+// it appears. Zero-count types are omitted rather than printed as "0": three
+// cells of which two are always zero was a row of noise on 78 of 108 stations.
+function _rdoComp(units) {
+  var out = [];
+  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
+    var t = BAL.UNIT_ORDER[i];
+    // Gated on what will actually PRINT, not on what exists. The sim's
+    // annihilation epsilon is far below one decimal place, so a trace of 0.03
+    // artillery used to render as the tag "0.0 art" — a unit type announced on
+    // the strength of a rounding error.
+    if (Math.round(units[t] * 10) / 10 <= 0) continue;
+    out.push(_rdoNum(units[t]) + ' ' + _rdoUnitTag(t));
+  }
+  return out.join(' · ');
+}
+
 function _rdoTypeLabel(d) {
   var t = d && d.type;
   if (t === 'multiplier') return 'farmland';
@@ -246,17 +452,72 @@ function _rdoTerritoryName(tid) {
   return String(tid);
 }
 
-// Tier wording. `contested` deliberately does not say "nobody owns it" — it
-// means no power holds a strict majority, which is a different and more useful
-// statement (core/state.js, three tiers).
+// Tier as a VALUE, not a sentence. The territory's name is the row's label, so
+// "Germany … 8/9" reads as stations-held-here without the word "majority"
+// having to be printed 108 times. `contested` keeps its word because it is not
+// a count and because it means something specific: nobody holds a strict
+// majority, which is not the same as "unowned" (core/state.js, three tiers).
+// The row carries the long form as a title.
 function _rdoTierLabel(ctl) {
   if (!ctl) return '';
-  if (ctl.tier === 'full') return 'full control';
-  if (ctl.tier === 'majority') return 'majority ' + ctl.held + '/' + ctl.total;
+  if (ctl.tier === 'full') return 'all ' + ctl.total;
+  if (ctl.tier === 'majority') return ctl.held + '/' + ctl.total;
   return 'contested';
 }
 
+function _rdoTerrainKey(sid) {
+  var d = STATIONS[sid];
+  var t = (typeof TERRITORIES !== 'undefined' && d) ? TERRITORIES[d.territory] : null;
+  return (t && t.terrain) ? t.terrain : 'plains';
+}
+
+// The heaviest type in a resolved mix, for naming who a matchup is against.
+function _rdoTopType(mix) {
+  if (!mix) return '';
+  var best = '', bv = -1;
+  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
+    var t = BAL.UNIT_ORDER[i];
+    if (mix[t] > bv) { bv = mix[t]; best = t; }
+  }
+  return best;
+}
+
 // ── sim reads ───────────────────────────────────────────────────────────
+
+// Where growth actually STOPS, as a multiple of capacity. Since the
+// over-capacity rework (data/tuning.js, 2026-07 — "rather than making
+// production stop when a city is full, just slow the production speed by 50%")
+// capacity is where growth gets slow and GROWTH_OVERFLOW_CEIL x capacity is
+// where it reaches zero and OVERSTACK_DECAY takes over.
+//
+// Read by INTENT with a fallback, the same way sim/movement.js _ordCeilingMul
+// does, because this constant has already moved once. Every branch in this
+// file that used to compare against `capacity` was reporting "over capacity —
+// bleeding off" and a NEGATIVE growth number for the entire band the player
+// asked for, where the station is in fact growing at half rate and bleeding
+// nothing at all.
+function _rdoOverflowCeil() {
+  if (typeof BAL === 'undefined') return 1;
+  if (isFinite(BAL.GROWTH_OVERFLOW_CEIL) && BAL.GROWTH_OVERFLOW_CEIL > 0) {
+    return BAL.GROWTH_OVERFLOW_CEIL;
+  }
+  return 1;
+}
+
+// The fraction of capacity at which a city counts as FULL — the "is-full" bar,
+// the "1 full" tally, and the last point an ETA can honestly aim at.
+//
+// With the overflow on this is capacity exactly: growth is a real rate right up
+// to the line and crosses it in finite time. With GROWTH_OVERFLOW_RATE at 0 —
+// the documented off switch — growth is the bare logistic again, which
+// ASYMPTOTES at capacity and never arrives, so "full" has to mean
+// GROWTH_CAP_EPSILON of it or none of these three ever fire again. Deriving it
+// rather than typing 1 is what keeps the off switch an exact revert.
+function _rdoFullAt() {
+  if (typeof BAL === 'undefined') return 1;
+  if (BAL.GROWTH_OVERFLOW_RATE > 0) return 1;
+  return isFinite(BAL.GROWTH_CAP_EPSILON) ? BAL.GROWTH_CAP_EPSILON : 1;
+}
 
 // Growth this tick, computed by running the SIM's own _applyGrowth against a
 // throwaway station object. Nothing in state is touched: the probe carries only
@@ -318,7 +579,7 @@ function _rdoTicksToFill(state, sid, frac) {
 // reach test (real-power owner + territory hop distance <= MULTIPLIER_REACH).
 // Returns the INPUTS to each contribution — raw multiplier, hops, control tier,
 // contested flag — never a recomputed contribution, which would be the formula
-// copied. The product itself comes from growthMultiplier().
+// copied. The product itself comes from state.stations[sid].growthMul.
 function _rdoFarms(state, sid) {
   var out = [];
   if (typeof multiplierStationIds !== 'function' || typeof territoryHops !== 'function') return out;
@@ -358,9 +619,9 @@ function _rdoFarms(state, sid) {
 
 // ── DOM ─────────────────────────────────────────────────────────────────
 //
-// Built once. renderReadout only ever rewrites text and toggles classes on
-// these nodes — the panel is never torn down and rebuilt, because it is on
-// screen at 60fps and rebuilding kills text selection and thrashes layout.
+// Built once. Every update() only ever rewrites text and toggles classes on
+// these nodes — nothing here is torn down and rebuilt, because it is on screen
+// at 60fps and rebuilding kills text selection and thrashes layout.
 
 function _rdoRow(parent, cls, labelText) {
   var row = el('div', 'rdo-row ' + cls);
@@ -372,122 +633,31 @@ function _rdoRow(parent, cls, labelText) {
   return { row: row, k: lab, v: val };
 }
 
-// The section's build(). `host` is the .rail-body handed over by _rdoRailSync;
-// it carries the id and class the old floating panel had so console habits,
-// `byId('station-readout')` and every .rdo-* rule in style.css keep working.
-//
-// Two sibling bodies, exactly one of them displayed: `detail` when a station is
-// focused, `idle` when none is. Both are built here, once, so switching between
-// them is one style write and never a rebuild.
-function _rdoBuild(host) {
-  while (host.firstChild) host.removeChild(host.firstChild);
-  host.id = 'station-readout';
-  host.classList.add('station-readout');
-
-  var n = { host: host };
-  n.detail = el('div', 'rdo-detail');
-  n.idle = el('div', 'rdo-idle');
-  host.appendChild(n.detail);
-  host.appendChild(n.idle);
-
-  var d = n.detail;
-
-  var head = el('div', 'rdo-head');
-  n.name = el('span', 'rdo-name');
-  n.type = el('span', 'rdo-type');
-  head.appendChild(n.name);
-  head.appendChild(n.type);
-  d.appendChild(head);
-
-  var sub = el('div', 'rdo-sub');
-  n.swatch = el('span', 'rdo-swatch');
-  n.owner = el('span', 'rdo-owner');
-  sub.appendChild(n.swatch);
-  sub.appendChild(n.owner);
-  d.appendChild(sub);
-
-  // Territory + control tier. Invisible everywhere else on screen, and a
-  // partly-held country pays reduced benefits (00-vision.md §3).
-  n.terr = _rdoRow(d, 'rdo-terr', 'Territory');
-  n.tier = el('span', 'rdo-tier');
-  n.terr.row.appendChild(n.tier);
-
-  d.appendChild(el('div', 'rdo-sep'));
-
-  // Garrison BY UNIT TYPE. Never collapsed to a total: the soft triangle in
-  // 00-vision.md §4 is entirely about composition, so a panel that hides it is
-  // hiding the decision.
-  n.garr = _rdoRow(d, 'rdo-garr', 'Garrison');
-  n.bar = el('div', 'rdo-bar');
-  n.barFill = el('div', 'rdo-bar-fill');
-  n.bar.appendChild(n.barFill);
-  d.appendChild(n.bar);
-
-  var units = el('div', 'rdo-units');
-  n.inf = _rdoRow(units, 'rdo-unit', 'infantry');
-  n.art = _rdoRow(units, 'rdo-unit', 'artillery');
-  n.arm = _rdoRow(units, 'rdo-unit', 'armour');
-  d.appendChild(units);
-
-  d.appendChild(el('div', 'rdo-sep'));
-
-  n.growth = _rdoRow(d, 'rdo-growth', 'Growth');
-  n.status = el('div', 'rdo-status');
-  d.appendChild(n.status);
-
-  // The breakdown. Fixed slots, hidden when they do not apply, so no frame ever
-  // creates or destroys a node here.
-  var mods = el('div', 'rdo-mods');
-  n.modBase = _rdoRow(mods, 'rdo-mod', 'base rate');
-  n.modLog = _rdoRow(mods, 'rdo-mod', 'logistic');
-  n.modMul = _rdoRow(mods, 'rdo-mod', 'farm reach');
-  n.farms = el('div', 'rdo-farms');
-  mods.appendChild(n.farms);
-  n.modCap = _rdoRow(mods, 'rdo-mod', 'recaptured');
-  n.modCut = _rdoRow(mods, 'rdo-mod', 'cut off');
-  d.appendChild(mods);
-
-  n.farmRows = [];
-  n.note = el('div', 'rdo-note');
-  d.appendChild(n.note);
-
-  _rdoBuildIdle(n);
-
-  _rdoLast = Object.create(null);
-  _rdoNodes = n;
-  return n;
+// A row whose label LEADS with an icon. `labelText` is still passed for
+// everything whose units or direction an icon cannot carry — "out" on the march
+// row is the difference between leaving and arriving, and no clock face says
+// which. `title` lands on the label element and doubles as its aria-label, so
+// the icon is never the only explanation of the row.
+function _rdoIcoRow(parent, cls, icon, labelText, title) {
+  var rec = _rdoRow(parent, cls, '');
+  rec.k.appendChild(_rdoIcon(icon));
+  if (labelText) rec.k.appendChild(document.createTextNode(labelText));
+  if (title) {
+    rec.k.setAttribute('title', title);
+    rec.k.setAttribute('aria-label', title);
+  }
+  return rec;
 }
 
-// The idle body — what is left to say once the empire header above has said the
-// rest. It used to carry the power's name, its station count and its force
-// composition; the header now owns all three, and printing them twice in one
-// 284px column six inches apart is worse than not printing them at all.
-//
-// So this is now exactly the two facts the header deliberately does not carry:
-//
-//   HEADROOM  — force against total capacity. The header's growth figure says
-//               how fast you are growing; this says how much room is left to
-//               grow INTO, which is the other half of the logistic and the
-//               reason a full empire's growth number collapses.
-//   CONTROL   — outright vs majority. The HUD's single territory count is
-//               majority-or-better, so the split between the two is the thing
-//               neither the HUD nor the header can show, and it is what says
-//               whether an empire is consolidated or over-extended (§3).
-function _rdoBuildIdle(n) {
-  var b = n.idle;
-
-  n.iGarr = _rdoRow(b, 'rdo-garr', 'Headroom');
-  var bar = el('div', 'rdo-bar');
-  n.iBarFill = el('div', 'rdo-bar-fill');
-  bar.appendChild(n.iBarFill);
-  b.appendChild(bar);
-
-  n.iCtlRow = _rdoRow(b, 'rdo-mod', 'control');
-
-  n.iHint = el('div', 'rdo-hint', {
-    text: 'Hover a station for its garrison and growth breakdown.',
-  });
-  b.appendChild(n.iHint);
+// An icon + number pair INSIDE a value cell, for the one row that carries two
+// numbers in the same unit. Returns the node the number is written to.
+function _rdoIcoVal(parent, icon, title) {
+  var wrap = el('span', 'rdo-pair', { title: title, 'aria-label': title });
+  wrap.appendChild(_rdoIcon(icon));
+  var v = el('span', 'rdo-pair-v');
+  wrap.appendChild(v);
+  parent.appendChild(wrap);
+  return v;
 }
 
 // Single write point: compare against what was last written and touch the DOM
@@ -521,6 +691,48 @@ function _rdoClass(node, key, cls, on) {
   if (_rdoLast[k] === on) return;
   _rdoLast[k] = on;
   node.classList.toggle(cls, !!on);
+}
+
+// Drop every remembered write whose key starts with `prefix`. Needed because
+// _rdoLast outlives the nodes it remembers: a rebuilt node is blank, while the
+// cache still holds the identical text from last time and skips the write as a
+// no-op. Every build() calls this with its own prefix as its first statement.
+function _rdoForget(prefix) {
+  var keys = Object.keys(_rdoLast);
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i].indexOf(prefix) === 0) delete _rdoLast[keys[i]];
+  }
+}
+
+// A group of source lines hanging off one row. Pool discipline: it GROWS, never
+// shrinks, and surplus rows are hidden rather than removed — see _rdoForget for
+// why destroying a cached node is a bug rather than a tidy-up.
+//
+// Hiding a ROW must also hide the lines hanging off it, and that is easy to
+// forget because the two live in different nodes. It was forgotten once and the
+// symptom was the worst kind: Bordeaux, which has no fortification at all,
+// showed "urban · Germany → +0.60 lvl" underneath a hidden fortification row —
+// a stale source line attached to nothing, indistinguishable from a real
+// reading. So every caller passes a list, and a hidden row passes an empty one.
+function _rdoSrcGroup(parent) {
+  var host = el('div', 'rdo-srcs');
+  parent.appendChild(host);
+  return { host: host, pool: [] };
+}
+
+function _rdoSources(g, key, lines) {
+  if (!lines) lines = [];
+  var want = lines.length < RDO_MAX_SOURCES ? lines.length : RDO_MAX_SOURCES;
+  while (g.pool.length < want) {
+    var r = el('div', 'rdo-src');
+    g.host.appendChild(r);
+    g.pool.push(r);
+  }
+  for (var i = 0; i < g.pool.length; i++) {
+    var on = i < want;
+    _rdoStyle(g.pool[i], key + '@' + i, 'display', on ? '' : 'none');
+    if (on) _rdoSet(g.pool[i], key + '~' + i, lines[i]);
+  }
 }
 
 // ── the rail ────────────────────────────────────────────────────────────
@@ -609,6 +821,7 @@ function _rdoRailPump(state) {
   if (!rail) return false;
   if (_rdoDirty) _rdoRailSync(rail);
 
+  _rdoFrame++;
   for (var i = 0; i < _rdoOrder.length; i++) {
     var s = _rdoOrder[i];
     if (s.fails >= RDO_SECTION_FAIL_LIMIT) continue;
@@ -635,9 +848,8 @@ function _rdoRailPump(state) {
 
 // ── focus ───────────────────────────────────────────────────────────────
 
-// The pinned entry point. `null` drops back to the idle body — it no longer
-// hides anything, because the rail is always on screen. Unknown ids are ignored
-// rather than throwing — this is called from a pointer handler in another file.
+// The pinned entry point. Unknown ids are ignored rather than throwing — this is
+// called from a pointer handler in another file.
 function setReadoutFocus(sid) {
   if (sid && (typeof STATIONS === 'undefined' || !STATIONS[sid])) sid = null;
   if (sid === _rdoFocus) return _rdoFocus;
@@ -655,315 +867,69 @@ function _rdoResolve() {
   return (sel && sel.length === 1) ? sel[0] : null;
 }
 
-// ── the breakdown ───────────────────────────────────────────────────────
-
-function _rdoFillFarms(state, sid, farms) {
-  var n = _rdoNodes;
-  var show = Math.min(farms.length, RDO_MAX_FARMS);
-
-  // The pool only ever GROWS, and surplus rows are hidden rather than removed.
-  //
-  // The first version destroyed them, and that was a real bug: focus a station
-  // with no farms, focus the previous one again, and its farm row came back
-  // EMPTY — the node had been recreated but _rdoLast still held the identical
-  // text from last time, so the write was skipped as a no-op. Any "write only
-  // what changed" cache is only sound while the node it remembers survives.
-  while (n.farmRows.length < show) {
-    var row = el('div', 'rdo-farm');
-    n.farms.appendChild(row);
-    n.farmRows.push(row);
-  }
-  for (var j = show; j < n.farmRows.length; j++) {
-    _rdoStyle(n.farmRows[j], 'farmvis' + j, 'display', 'none');
-  }
-
-  for (var i = 0; i < show; i++) {
-    _rdoStyle(n.farmRows[i], 'farmvis' + i, 'display', '');
-    var f = farms[i];
-    // Distance in territories, which is the unit MULTIPLIER_REACH is measured
-    // in — "adjacent" is the whole mechanic (00-vision.md §2).
-    var where = f.hops === 0 ? 'here' : (f.hops === 1 ? 'adjacent' : f.hops + ' away');
-    var txt = f.name + ' ×' + f.mult + ' · ' + where + ' · ' + f.tier;
-    if (f.weight > 0 && f.weight < 1) txt += ' (' + _rdoMul(f.weight) + ')';
-    if (f.siege) txt += ' · under attack';
-    if (f.dead) txt += ' — feeding nobody';
-    _rdoSet(n.farmRows[i], 'farm' + i, txt);
-    _rdoClass(n.farmRows[i], 'farm' + i, 'is-dead', f.dead || f.siege);
-  }
-
-  var extra = farms.length - show;
-  // RETURNED, not written. `n.note` has two would-be authors — this and the
-  // neutral fill clock at the bottom of _rdoFillDetail — and while both wrote to
-  // it directly they fought over the same _rdoLast key every single frame: this
-  // one set '', the clock set its text, the cache saw a change both times, and a
-  // PAUSED game hovering a neutral station cost 2 DOM writes per frame forever.
-  // Measured at exactly 2.007/frame before this change and 0 after.
-  //
-  // The diff gate is only sound with ONE author per key. Anything that can write
-  // a node must be the only thing that writes it.
-  return extra > 0 ? '+' + extra + ' more farm' + (extra > 1 ? 's' : '') + ' in reach' : '';
-}
-
-// ── the idle body ───────────────────────────────────────────────────────
-
-// Walks the player's stations once. Cached for RDO_EMPIRE_EVERY frames because
-// nothing on it moves faster than that matters, and because this is the one
-// O(stations) read in the file. Read-only: it never touches a station object.
-// ONE walk, shared. This used to be a second pass over the same stations on its
-// own frame-based throttle, and the moment the empire header landed the two
-// disagreed on screen: the header said 158 infantry and the idle body said 159,
-// six inches apart, because they had sampled different ticks. Two independent
-// caches of the same fact will always eventually print different numbers.
-//
-// So the idle body now reads the header's aggregate verbatim. It is also half
-// the work — there was never a reason to walk the empire twice.
-function _rdoEmpireStats(state, pid) {
-  return _rdoHeaderStats(state, pid);
-}
-
-function _rdoFillIdle(state) {
-  var n = _rdoNodes;
-  var pid = window.PLAYER || null;
-  if (!pid) return;
-  var e = _rdoEmpireStats(state, pid);
-
-  var fill = e.cap > 0 ? e.held / e.cap : 0;
-  _rdoSet(n.iGarr.v, 'igarr', _rdoNum(e.held) + ' / ' + Math.round(e.cap) + '  ·  ' + _rdoPct(fill));
-  _rdoStyle(n.iBarFill, 'ibar', 'width', _rdoPct(Math.min(1, fill)));
-  // Same meaning as on a single station: full means growth has stopped paying.
-  _rdoClass(n.iBarFill, 'ibar', 'is-full', fill >= BAL.GROWTH_CAP_EPSILON);
-
-  var part = Math.max(0, e.maj - e.full);
-  _rdoSet(n.iCtlRow.v, 'ictl',
-    e.full + ' outright' + (part ? '  ·  ' + part + ' by majority' : ''));
-}
-
-// ── entry point ─────────────────────────────────────────────────────────
-
-// The station section's update(). Always returns true: the section is never
-// hidden, because a fixed column that empties out reads as a broken layout.
-function _rdoSectionUpdate(state, nodes) {
-  _rdoNodes = nodes;
-  if (!state) return true;
-  _rdoFrame++;
-
+// The four station sections all begin the same way and all hide themselves the
+// same way. One helper, so "is there a station to talk about" cannot be answered
+// four subtly different ways.
+function _rdoFocusOn(state) {
   var sid = _rdoResolve();
-  if (sid && (!state.stations || !state.stations[sid] || !STATIONS[sid])) sid = null;
-
-  // One style write per mode change, not per frame — _rdoStyle skips a repeat.
-  _rdoStyle(nodes.detail, 'mode', 'display', sid ? '' : 'none');
-  _rdoStyle(nodes.idle, 'imode', 'display', sid ? 'none' : '');
-
-  if (!sid) {
-    _rdoFillIdle(state);
-    return true;
-  }
-  _rdoFillDetail(state, sid);
-  return true;
-}
-
-function _rdoFillDetail(state, sid) {
-  var n = _rdoNodes;
-  var d = STATIONS[sid];
-  var st = state.stations[sid];
-  var units = st.units;
-  var total = totalUnits(units);
-  var cap = d.capacity;
-  var fill = cap > 0 ? total / cap : 0;
-
-  // ── identity ──
-  _rdoSet(n.name, 'name', d.name);
-  var typeText = _rdoTypeLabel(d);
-  if (d.type === 'producer' && d.produces) typeText += ' · ' + d.produces;
-  // Written as a LEVEL, not a multiplier. `defense` is a rating whose excess
-  // over 1.0 becomes flat power (DEFENSE_BONUS_POWER), so "×3.2" here would
-  // contradict the additive fort block below and misstate the single number
-  // that decides an assault. Same vocabulary as that block's "→ +2.20 lvl".
-  if (d.defense && d.defense !== 1) typeText += ' · def +' + (d.defense - 1).toFixed(1) + ' lvl';
-  _rdoSet(n.type, 'type', typeText);
-
-  var owner = st.owner;
-  _rdoSet(n.owner, 'owner', _rdoPowerName(owner));
-  var col = _rdoPowerColor(owner);
-  _rdoStyle(n.swatch, 'swatch', 'background', col || 'var(--neutral-node)');
-
-  var ctl = territoryControl(state, d.territory);
-  _rdoSet(n.terr.v, 'terr', _rdoTerritoryName(d.territory));
-  _rdoSet(n.tier, 'tier', _rdoTierLabel(ctl));
-  _rdoClass(n.tier, 'tier', 'is-contested', ctl.tier === 'contested');
-  _rdoClass(n.tier, 'tier', 'is-partial', ctl.tier === 'majority');
-
-  // ── garrison ──
-  _rdoSet(n.garr.v, 'garr', _rdoNum(total) + ' / ' + cap + '  ·  ' + _rdoPct(fill));
-  _rdoStyle(n.barFill, 'bar', 'width', _rdoPct(Math.min(1, fill)));
-  _rdoClass(n.barFill, 'bar', 'is-full', fill >= BAL.GROWTH_CAP_EPSILON);
-  _rdoSet(n.inf.v, 'inf', _rdoNum(units.infantry));
-  _rdoSet(n.art.v, 'art', _rdoNum(units.artillery));
-  _rdoSet(n.arm.v, 'arm', _rdoNum(units.armour));
-
-  // ── which growth branch the sim will take ──
-  //
-  // Mirrors growthTick()'s branch order exactly: contested → cut off → over
-  // capacity → at cap → growing. Control flow only; every NUMBER below still
-  // comes from the sim.
-  var contested = (typeof stationAttackers === 'function') && stationAttackers(state, sid).length > 0;
-  var cut = st.connected === false;
-  var over = total > cap;
-  var atCap = !over && total >= cap * BAL.GROWTH_CAP_EPSILON;
-
-  var perDay = 0;
-  var status = '';
-  var statusBad = true;
-
-  if (contested) {
-    status = 'under attack — not recruiting';
-  } else if (cut) {
-    var since = (st.discSince === undefined || st.discSince < 0) ? state.tick : st.discSince;
-    var decaying = (state.tick - since) >= BAL.DISCONNECT_GRACE;
-    status = decaying
-      ? 'cut off — losing ' + _rdoPctFine(BAL.DISCONNECT_DECAY) + ' per tick'
-      : 'cut off — decay in ' + (BAL.DISCONNECT_GRACE - (state.tick - since)) + ' ticks';
-    var gCut = _rdoGrowthPerTick(state, sid, units, BAL.DISCONNECT_GROWTH);
-    perDay = (gCut || 0) * _rdoTicksPerDay();
-    // Attrition, so the headline is not a flat "0 / day" while the pocket dies.
-    // Mirrors growthTick()'s `_scaleUnits(units, 1 - DISCONNECT_DECAY)` — one
-    // multiplication against a BAL constant, not the growth formula.
-    if (decaying) perDay -= total * BAL.DISCONNECT_DECAY * _rdoTicksPerDay();
-  } else if (over) {
-    // Same deal: growthTick() bleeds `excess * OVERSTACK_DECAY` per tick. There
-    // is no growth term to probe up here — growth is off above the ceiling.
-    perDay = -(total - cap) * BAL.OVERSTACK_DECAY * _rdoTicksPerDay();
-    status = 'over capacity — bleeding off';
-  } else if (atCap) {
-    status = 'at capacity — stopped paying dividends';
-  } else {
-    var g = _rdoGrowthPerTick(state, sid, units, 1);
-    perDay = (g === null ? 0 : g) * _rdoTicksPerDay();
-    statusBad = false;
-    status = 'into ' + (typeof growthType === 'function' ? growthType(sid) : 'infantry');
-  }
-
-  var sign = perDay > 0 ? '+' : '';
-  _rdoSet(n.growth.v, 'growth', sign + _rdoNum(perDay) + ' / day');
-  _rdoClass(n.growth.row, 'growthrow', 'is-stalled', perDay <= 0);
-  _rdoSet(n.status, 'status', status);
-  _rdoClass(n.status, 'status', 'is-bad', statusBad);
-
-  // ── what's modifying it ──
-  //
-  // The three standing factors of _applyGrowth's product, each labelled with
-  // where it comes from, plus the two situational ones.
-  _rdoSet(n.modBase.v, 'modbase', _rdoMul(d.rate) + '  ' + _rdoTypeLabel(d));
-  _rdoSet(n.modLog.v, 'modlog', _rdoMul(Math.max(0, 1 - fill)) + '  ' + _rdoPct(fill) + ' full');
-
-  // Multiplier total straight from the sim. state.stations[sid].growthMul is
-  // the value growth actually USED (one tick of latency, by design — see the
-  // header of sim/growth.js); growthMultiplier() is what it will be next tick.
-  // The published one is the honest thing to show.
-  var mul = (typeof st.growthMul === 'number' && isFinite(st.growthMul)) ? st.growthMul : 1;
-  var farms = _rdoFarms(state, sid);
-  var capped = mul >= BAL.GROWTH_MUL_CAP;
-  _rdoSet(n.modMul.v, 'modmul', _rdoMul(mul) + (capped ? '  capped' : ''));
-  _rdoClass(n.modMul.row, 'modmulrow', 'is-off', mul <= 1);
-  var farmNote = _rdoFillFarms(state, sid, farms);
-  _rdoShow(n.modMul, 'modmul', true);
-
-  // Capture penalty ships at 1.0 (OFF). Show the row only when it is both
-  // active and actually doing something, so turning the constant on lights it
-  // up with no further work here.
-  var capPen = (typeof st.capturedTick === 'number') &&
-    (state.tick - st.capturedTick) < BAL.CAPTURE_PENALTY_TICKS &&
-    BAL.CAPTURE_GROWTH_PENALTY !== 1;
-  _rdoShow(n.modCap, 'modcap', capPen);
-  if (capPen) {
-    _rdoSet(n.modCap.v, 'modcapv', _rdoMul(BAL.CAPTURE_GROWTH_PENALTY) + '  ' +
-      (BAL.CAPTURE_PENALTY_TICKS - (state.tick - st.capturedTick)) + ' ticks left');
-  }
-
-  _rdoShow(n.modCut, 'modcut', cut);
-  if (cut) _rdoSet(n.modCut.v, 'modcutv', _rdoMul(BAL.DISCONNECT_GROWTH) + '  no path to capital');
-
-  // ── the neutral clock ──
-  //
-  // A two-station country falls to one volley early and is a wall of full
-  // garrisons later, and nothing else on screen says so. Recomputed at ~2Hz
-  // because it steps the sim forward a few thousand ticks.
-  var neutralNote = '';
-  if (!isRealPower(owner) && !contested) {
-    if (fill >= BAL.GROWTH_CAP_EPSILON) {
-      neutralNote = 'neutral and full — as expensive as it will ever be';
-    } else if (fill >= RDO_NEUTRAL_WARN || _rdoEta.sid === sid) {
-      if (_rdoEta.sid !== sid || _rdoFrame % RDO_ETA_EVERY === 0) {
-        var t = _rdoTicksToFill(state, sid, BAL.GROWTH_CAP_EPSILON);
-        _rdoEta = {
-          sid: sid,
-          text: t < 0 ? '' : 'neutral — full in ~' + Math.max(1, Math.round(t / _rdoTicksPerDay())) + ' days',
-        };
-      }
-      neutralNote = _rdoEta.text;
-    }
-  }
-  // The single write to n.note. The neutral clock still wins over the farm
-  // overflow when both have something to say — same precedence as before.
-  _rdoSet(n.note, 'note', neutralNote || farmNote);
+  if (!sid || !state || !state.stations || !state.stations[sid] || !STATIONS[sid]) return null;
+  return sid;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// THE EMPIRE HEADER — always on screen, nothing selected
+// EMPIRE — always on screen, nothing selected
 // ════════════════════════════════════════════════════════════════════════
 //
-// Everything else in the rail answers a question you asked by pointing at a
+// Every other section answers a question the player asked by pointing at a
 // station. A player running several attacks at once is not pointing at anything
-// — they are watching the board — and until now that player could learn nothing
-// without giving up their place. So this section sorts ABOVE the station detail
-// (RDO_HEADER_ORDER < RDO_SECTION_ORDER) and is never hidden.
+// — they are watching the board — so this one sorts first and is never hidden.
+// It is also what stops the rail being an empty gutter, which is why the old
+// station section's "idle body" is gone: two blocks were competing to be the
+// thing on screen when nothing was hovered, and they printed the same numbers
+// six inches apart.
 //
-// THREE LINES, AND THE SHAPE OF EACH IS AN ARGUMENT
+// FOUR ROWS, and the shape of each is an argument.
 //
-// 1. GROWTH — one number, because growth genuinely sums. Units per minute is
+// 1. IDENTITY — swatch and name. The swatch is the colour key for the whole
+//    board; it costs one row and it is the only place the player's colour is
+//    stated rather than implied.
+//
+// 2. GROWTH — one number, because growth genuinely sums. Units per minute is
 //    the sim's own _applyGrowth run on scratch paper for every station held,
 //    branch-for-branch with growthTick(): contested recruits nothing, a cut-off
-//    station grows at DISCONNECT_GROWTH, a full one has stopped paying. Its
-//    sub-line names the largest farm feeding the empire and, when it applies,
-//    how many stations are cut off — a pocket contributes exactly zero and
-//    there is nothing anywhere else on screen that says so.
+//    station grows at DISCONNECT_GROWTH, a full one has stopped paying.
 //
-// 2. FORCE — THREE numbers, never one. It is tempting to blend them into a
-//    single "strength", and it would be wrong in both directions at once:
-//    BAL.UNITS gives infantry 1.0/1.2, artillery 1.8/0.6 and armour 1.5/0.9, so
-//    the same stack is a different size attacking than defending; the matchup
-//    triangle then makes it a different size again depending on who it meets,
-//    and the additive fortress block (DEFENSE_BONUS_POWER) makes it a different
-//    size again depending on where. Three counts keep the triangle visible and
-//    still read at a glance.
+// 3. FORCE — held against total capacity, with the bar. The bar is the headroom
+//    and headroom is the other half of the logistic: it is why a large empire's
+//    growth number collapses, and there is nothing else on screen that says so.
 //
-// 3. TERRITORY — stations and territories against the board total. It is the
-//    victory currency and it costs nothing to show.
+// 4. COMPOSITION — infantry / artillery / armour, zero types omitted. It is
+//    tempting to blend them into a single "strength" and it would be wrong in
+//    both directions at once: BAL.UNITS gives infantry 1.0/1.2, artillery
+//    1.8/0.6 and armour 1.5/0.9, so the same stack is a different size
+//    attacking than defending; the matchup triangle makes it a different size
+//    again depending on who it meets, and the additive fortress block makes it
+//    a different size again depending on where.
 //
-// DELIBERATELY ABSENT: any empire-wide march or speed number. Speed is a
-// property of a ROUTE, not of an empire — artillery 0.6 against armour 1.8, a
-// wave moving at its slowest type, terrain on the territory entered and
-// SEA_SPEED_MUL on top. An average would be a lie, and worse, it would hide the
-// spread in arrival times that makes defeat in detail readable. March stays
-// per-route, on the preview line and in the March section above.
+// Two more rows appear only when they have something to say: an ALERT line for
+// pockets and sieges, and a SUPPLY line while any city is streaming.
+//
+// DELIBERATELY ABSENT.
+//
+//   territory count        the HUD counts it, four inches up and larger.
+//   full vs majority       the MAP draws the three tiers differently (§3):
+//                          solid tint, lighter wash, hatched. A number was the
+//                          second copy of a thing already rendered.
+//   farms in reach         the coverage overlay is the farm display (§8).
+//   any march or speed     speed is a property of a ROUTE, not of an empire —
+//                          artillery 0.6 against armour 1.8, a wave moving at
+//                          its slowest type, terrain on the territory entered
+//                          and SEA_SPEED_MUL on top. An average would be a lie,
+//                          and worse, it would hide the spread in arrival times
+//                          that makes defeat in detail readable.
 //
 // COST: the aggregate walks every station held, so it is throttled on SIM TICKS
 // rather than on frames — a paused empire recomputes never and writes nothing.
-
-// Sorts first. Left well below RDO_SECTION_ORDER (10) so something can still be
-// inserted between the header and the station detail.
-var RDO_HEADER_ORDER = 5;
-
-// Sim ticks between recomputes of the empire aggregate. 10 ticks is one day
-// (BAL.TICKS_PER_SEC), which is the unit the growth figure is already quoted
-// in, so the number cannot visibly lag the thing it describes.
-var RDO_HEADER_EVERY_TICKS = 10;
-
-// Growth is quoted per MINUTE here, not per day. A single station makes
-// fractions of a unit a day and reads as noise; a whole empire makes tens of
-// units a minute, which is a number a player can hold in their head and compare
-// against the cost of an attack.
-var RDO_HEADER_PER_MIN = 60;
 
 var _rdoHead = { tick: -1e9, pid: null, data: null };
 
@@ -984,31 +950,25 @@ function _rdoHeaderStats(state, pid) {
   var e = {
     n: ids.length, inf: 0, art: 0, arm: 0, transit: 0, cap: 0,
     perTick: 0, cut: 0, contested: 0, atCap: 0,
-    topFarm: null, topMul: 0, farms: 0,
-    // Standing orders. Counted on THIS walk rather than on one of their own:
+    // Standing supply. Counted on THIS walk rather than on one of their own:
     // the aggregate already visits every station this power holds, on a tick
     // throttle, and a second per-frame sweep for three integers would be the
-    // exact mistake the idle body made before it started reading this function
-    // (two caches of one fact, printed side by side, disagreeing).
+    // exact mistake the old idle body made (two caches of one fact, printed
+    // side by side, disagreeing).
     //
-    // feedSend is what LEAVES, not what the feeders are willing to part with —
-    // the same correction the station panel got, and for the same reason: this
-    // line said "20.1 units leave on the next sweep" while a full rally was
-    // taking none of them. feedWant keeps the willingness so the two can be
-    // compared, and feedBlocked/feedWhy/feedWhyAt carry the explanation the
-    // number on its own cannot.
-    rally: 0, feed: 0, feedSend: 0, feedWant: 0, feedBlocked: 0,
-    feedWhy: null, feedWhyAt: null,
+    // supSend is what LEAVES, not what the sources are willing to part with —
+    // known-issues #18. supBlocked/supWhy/supWhyAt carry the explanation the
+    // number on its own cannot: a zero with no reason is the same failure in a
+    // smaller font.
+    supN: 0, supSend: 0, supBlocked: 0, supWhy: null, supWhyAt: null,
   };
 
-  // ONE plan for the whole power, not one per feed city. standingOrderNext()
+  // ONE plan for the whole power, not one per supplying city. standingOrderNext()
   // plans the entire sweep to answer about a single station, so a per-station
-  // loop would repeat an 80us search once per feeder — 560us in a single frame
-  // on a seven-city fixture, and worse the more the player automates.
-  // standingOrderPlan is the same planner, asked once.
+  // loop would repeat an ~80us search once per source — and worse the more the
+  // player automates. standingOrderPlan is the same planner, asked once.
   var oplan = (typeof standingOrderPlan === 'function') ? standingOrderPlan(state, pid) : {};
 
-  var mine = {};
   for (var i = 0; i < ids.length; i++) {
     var sid = ids[i];
     var st = state.stations[sid];
@@ -1016,33 +976,22 @@ function _rdoHeaderStats(state, pid) {
     var u = st.units;
     e.inf += u.infantry; e.art += u.artillery; e.arm += u.armour;
     e.cap += d.capacity || 0;
-    mine[d.territory] = true;
 
     // Counted BEFORE the growth branches below, every one of which `continue`s.
-    // A contested or cut-off station still carries its order — that is the
-    // point of the order surviving everything but a capture — so counting it
-    // after the branches would undercount exactly the stations whose logistics
+    // A contested or cut-off station still carries its supply lines — that is
+    // the point of a line surviving everything but a capture — so counting it
+    // after the branches would undercount exactly the cities whose logistics
     // the player most needs to know about.
-    var ord = (typeof stationOrder === 'function') ? stationOrder(state, sid) : (st.order || 'hold');
-    if (ord === 'rally') {
-      e.rally++;
-    } else if (ord === 'feed') {
-      e.feed++;
-      // The sim's own arithmetic, never a copy of it (01-data-schema.md:
-      // "so a panel never reimplements the arithmetic and drifts from it") —
-      // and the arithmetic that knows about the far end of the pipe. Read off
-      // the single plan taken above; this loop does no searching of its own.
-      var nx = oplan[sid];
-      if (nx) {
-        e.feedSend += nx.units;
-        if (nx.units <= 0) {
-          e.feedBlocked++;
-          // The FIRST blocked feeder in sorted station order, so the summary
-          // line is deterministic rather than "whichever the walk saw last".
-          if (!e.feedWhy) { e.feedWhy = nx.blocked; e.feedWhyAt = nx.target; }
-        }
+    var nx = oplan[sid];
+    if (nx) {
+      e.supN++;
+      e.supSend += nx.units;
+      if (nx.units <= 0) {
+        e.supBlocked++;
+        // The FIRST blocked source in sorted station order, so the summary line
+        // is deterministic rather than "whichever the walk saw last".
+        if (!e.supWhy) { e.supWhy = nx.blocked; e.supWhyAt = nx.target; }
       }
-      if (typeof standingOrderSend === 'function') e.feedWant += standingOrderSend(state, sid);
     }
 
     var total = u.infantry + u.artillery + u.armour;
@@ -1056,33 +1005,19 @@ function _rdoHeaderStats(state, pid) {
       e.perTick += _rdoGrowthPerTick(state, sid, u, BAL.DISCONNECT_GROWTH) || 0;
       continue;
     }
-    if (total > d.capacity) continue;                       // bleeding off, not growing
-    if (total >= d.capacity * BAL.GROWTH_CAP_EPSILON) { e.atCap++; continue; }
+    // Past the HARD ceiling: bleeding off, not growing. `capacity` was the
+    // line here until the over-capacity rework, which meant every full city —
+    // the ones the change exists to keep productive — was dropped out of the
+    // empire's growth sum entirely and the header under-reported the very
+    // number the change was supposed to raise.
+    if (total > d.capacity * _rdoOverflowCeil()) continue;
+    // Still growing, at somewhere between full rate and GROWTH_OVERFLOW_RATE of
+    // this station's own peak. `atCap` is now a COUNT for the composition line
+    // ("3 full"), not a reason to skip the station: _rdoGrowthPerTick runs the
+    // sim's own _applyGrowth, and _growthRoom already knows what a full city
+    // produces.
+    if (total >= d.capacity * _rdoFullAt()) e.atCap++;
     e.perTick += _rdoGrowthPerTick(state, sid, u, 1) || 0;
-  }
-
-  // Which farms are actually feeding this empire, using sim/growth.js's own
-  // reach test. A farm feeds whoever is in range regardless of who holds it
-  // (growthMultiplier does not check), so this counts by REACH, not by owner.
-  if (typeof multiplierStationIds === 'function' && typeof territoryHops === 'function') {
-    var mids = multiplierStationIds();
-    for (var f = 0; f < mids.length; f++) {
-      var mid = mids[f];
-      if (typeof isRealPower === 'function' && !isRealPower(state.stations[mid].owner)) continue;
-      var mTerr = STATIONS[mid].territory;
-      if (controlWeight(territoryControl(state, mTerr).tier) <= 0) continue;
-      var hops = territoryHops(mTerr);
-      var reaches = false;
-      for (var t in mine) {
-        if (hops[t] !== undefined && hops[t] <= BAL.MULTIPLIER_REACH) { reaches = true; break; }
-      }
-      if (!reaches) continue;
-      e.farms++;
-      if (STATIONS[mid].multiplier > e.topMul) {
-        e.topMul = STATIONS[mid].multiplier;
-        e.topFarm = STATIONS[mid].name;
-      }
-    }
   }
 
   var waves = state.waves || [];
@@ -1091,12 +1026,6 @@ function _rdoHeaderStats(state, pid) {
   }
 
   e.held = e.inf + e.art + e.arm;
-  e.terr = (typeof countTerritories === 'function') ? countTerritories(state, pid) : 0;
-  // Full vs majority: the difference is whether an empire is consolidated or
-  // over-extended. `maj` is an alias so the idle body reads the same field the
-  // HUD's number means.
-  e.maj = e.terr;
-  e.full = (typeof countFullTerritories === 'function') ? countFullTerritories(state, pid) : 0;
   _rdoHead = { tick: state.tick, pid: pid, data: e };
   return e;
 }
@@ -1105,7 +1034,7 @@ function _rdoHeaderBuild(host) {
   _rdoForget('hdr');
   var n = {};
 
-  // Swatch-then-name, the .rdo-sub grammar the station body already uses for
+  // Swatch-then-name, the .rdo-sub grammar the station body also uses for
   // ownership, so the player's colour means the same thing everywhere.
   var head = el('div', 'rdo-sub rdo-empire-head');
   n.swatch = el('span', 'rdo-swatch');
@@ -1114,30 +1043,30 @@ function _rdoHeaderBuild(host) {
   head.appendChild(n.name);
   host.appendChild(head);
 
-  n.growth = _rdoRow(host, 'rdo-mod is-head', 'growth');
-  n.growthSrc = _rdoSrcGroup(host);
+  n.growth = _rdoRow(host, 'rdo-mod', 'growth');
+  n.force = _rdoRow(host, 'rdo-mod', 'force');
+  var bar = el('div', 'rdo-bar');
+  n.barFill = el('div', 'rdo-bar-fill');
+  bar.appendChild(n.barFill);
+  host.appendChild(bar);
+  n.comp = el('div', 'rdo-src rdo-comp');
+  host.appendChild(n.comp);
 
-  // FORCE as three cells, sharing the .rdo-units grammar the station block uses
-  // for exactly the same reason: composition is the decision.
-  n.forceRow = _rdoRow(host, 'rdo-mod', 'force');
-  var units = el('div', 'rdo-units');
-  n.inf = _rdoRow(units, 'rdo-unit', 'infantry');
-  n.art = _rdoRow(units, 'rdo-unit', 'artillery');
-  n.arm = _rdoRow(units, 'rdo-unit', 'armour');
-  host.appendChild(units);
+  // Both conditional rows sit at the BOTTOM, and that is deliberate: a line
+  // that appears and disappears at the end of a section costs nothing to read
+  // past, while one inserted in the middle shifts everything under it every
+  // time the player's last pocket is relieved.
+  n.alert = _rdoIcoRow(host, 'rdo-mod is-cut', 'alert', '',
+    'stations that are not growing and need you');
+  n.supply = _rdoRow(host, 'rdo-mod', 'supply');
+  n.supplySrc = _rdoSrcGroup(host);
 
-  n.terr = _rdoRow(host, 'rdo-mod', 'territory');
-  n.terrSrc = _rdoSrcGroup(host);
-
-  // LOGISTICS. Last, and hidden outright while every city is on `hold`, so the
-  // three rows above it never move: a line that appears and disappears at the
-  // BOTTOM of a section costs nothing to read past, while one inserted in the
-  // middle shifts everything under it every time the player's last feed city is
-  // captured. Suppressed rather than shown as "0 · 0" for the same reason the
-  // whole `supply` section is hidden while a station is connected — the default
-  // is not news, and this is a section the player is reading at a glance.
-  n.logi = _rdoRow(host, 'rdo-mod', 'logistics');
-  n.logiSrc = _rdoSrcGroup(host);
+  // The only instructional text in the whole interface, and it earns that by
+  // being the answer to the question an otherwise-idle column raises. Shown at
+  // EVERY width: an earlier change hid a hint below 1000px and the player, whose
+  // window is 800px, therefore never saw it once.
+  n.hint = el('div', 'rdo-hint', { text: 'Hover a city for its garrison, defence and march.' });
+  host.appendChild(n.hint);
   return n;
 }
 
@@ -1155,268 +1084,391 @@ function _rdoHeaderUpdate(state, n) {
   _rdoSet(n.growth.v, 'hdrgrowth', (perMin > 0 ? '+' : '') + _rdoNum(perMin) + ' / min');
   _rdoClass(n.growth.row, 'hdrgrowthrow', 'is-stalled', perMin <= 0);
 
-  var g = [];
-  if (e.farms > 0 && e.topFarm) {
-    g.push('×' + e.topMul + ' ' + e.topFarm + ' · ' + e.farms + ' farm' +
-      (e.farms > 1 ? 's' : '') + ' in reach of your ground');
-  }
-  if (e.cut > 0) {
-    g.push(e.cut + ' station' + (e.cut > 1 ? 's' : '') + ' cut off — growing nothing' +
-      (BAL.DISCONNECT_GROWTH > 0 ? '' : ' at all'));
-  }
-  if (e.contested > 0) {
-    g.push(e.contested + ' under attack — not recruiting');
-  }
-  if (e.atCap > 0) {
-    g.push(e.atCap + ' at capacity — stopped paying dividends');
-  }
-  _rdoSources(n.growthSrc, 'hdrgrowthsrc', g);
+  var fill = e.cap > 0 ? e.held / e.cap : 0;
+  _rdoSet(n.force.v, 'hdrforce', _rdoNum(e.held) + ' / ' + Math.round(e.cap));
+  // The clamp is what keeps a 1.4x empire inside its track rather than drawing
+  // a 140%-wide fill over the rail; the text beside it still reads the true
+  // "312 / 224", which is where the overflow is legible.
+  _rdoStyle(n.barFill, 'hdrbar', 'width', _rdoPct(Math.min(1, fill)));
+  // Same meaning as on a single station: full means growth has HALVED (§2). Not
+  // GROWTH_CAP_EPSILON — sim/growth.js stopped reading that constant in the
+  // over-capacity rework, and a readout keyed to a threshold nothing enforces
+  // is the drift known-issues #9 is about.
+  _rdoClass(n.barFill, 'hdrbar', 'is-full', fill >= _rdoFullAt());
 
-  // Three counts, never a blend — see the header comment.
-  _rdoSet(n.forceRow.v, 'hdrforce', _rdoNum(e.inf + e.art + e.arm) +
-    (e.transit > 0 ? '  ·  ' + _rdoNum(e.transit) + ' moving' : ''));
-  _rdoSet(n.inf.v, 'hdrinf', _rdoNum(e.inf));
-  _rdoSet(n.art.v, 'hdrart', _rdoNum(e.art));
-  _rdoSet(n.arm.v, 'hdrarm', _rdoNum(e.arm));
+  var comp = _rdoComp({ infantry: e.inf, artillery: e.art, armour: e.arm });
+  if (e.transit > 0) comp += (comp ? '  ·  ' : '') + _rdoNum(e.transit) + ' moving';
+  if (e.atCap > 0) comp += (comp ? '  ·  ' : '') + e.atCap + ' full';
+  _rdoSet(n.comp, 'hdrcomp', comp);
 
-  var tTotal = (typeof TERRITORY_IDS !== 'undefined' && TERRITORY_IDS.length)
-    ? TERRITORY_IDS.length
-    : (typeof TERRITORIES !== 'undefined' ? Object.keys(TERRITORIES).length : 0);
-  var sTotal = (typeof STATION_IDS !== 'undefined') ? STATION_IDS.length : 0;
-  _rdoSet(n.terr.v, 'hdrterr', e.terr + ' / ' + tTotal);
-  _rdoSources(n.terrSrc, 'hdrterrsrc', [
-    e.n + ' of ' + sTotal + ' stations · a territory counts at majority',
-  ]);
+  // The alert row is spent on the two states nothing else on screen reports and
+  // that stop growth dead. "At capacity" is deliberately NOT here — it is an
+  // opportunity, not an emergency, and it rides on the composition line above.
+  var bad = [];
+  if (e.cut > 0) bad.push(e.cut + ' cut off');
+  if (e.contested > 0) bad.push(e.contested + ' under attack');
+  _rdoShow(n.alert, 'hdralert', bad.length > 0);
+  if (bad.length) _rdoSet(n.alert.v, 'hdralertv', bad.join('  ·  '));
 
-  // One line, on the aggregate's existing tick throttle — no second walk.
-  var anyOrder = (e.rally > 0 || e.feed > 0);
-  _rdoShow(n.logi, 'hdrlogi', anyOrder);
-  if (anyOrder) {
-    var parts = [];
-    if (e.rally > 0) parts.push(e.rally + ' rallying');
-    if (e.feed > 0) parts.push(e.feed + ' feeding');
-    _rdoSet(n.logi.v, 'hdrlogiv', parts.join('  ·  '));
+  // ONE line, on the aggregate's existing tick throttle — no second walk.
+  // `supSend` is what actually leaves; see known-issues #18 and the note in
+  // _rdoHeaderStats.
+  var anySupply = e.supN > 0;
+  _rdoShow(n.supply, 'hdrsupply', anySupply);
+  var src = [];
+  if (anySupply) {
+    var ships = e.supSend > 0;
+    _rdoSet(n.supply.v, 'hdrsupplyv',
+      ships ? _rdoNum(e.supSend) + ' / sweep' : 'nothing leaves');
+    _rdoClass(n.supply.row, 'hdrsupplyrow', 'is-stalled',
+      !ships && _rdoOrdersActionable(e.supWhy));
+    src.push(e.supN + ' cit' + (e.supN > 1 ? 'ies' : 'y') + ' supplying, one sweep every ' +
+      BAL.ORDERS.INTERVAL + ' ticks');
+    if (e.supBlocked > 0) {
+      src.push(e.supBlocked + ' of them send nothing — ' +
+        _rdoOrdersWhyShort(e.supWhy, e.supWhyAt));
+    }
   }
-  // The row and its source lines are hidden together, always. Forgetting that
+  // The row and its source lines are hidden together, ALWAYS. Forgetting that
   // once left a stale source line hanging under a hidden row, indistinguishable
   // from a live reading — see the comment on _rdoSources.
-  var logiSrc = [];
-  if (anyOrder && e.feed > 0) {
-    // THE SAME CORRECTION THE STATION PANEL GOT. `feedSend` is what actually
-    // leaves; it used to be the sum of what the feeders were WILLING to ship,
-    // which stayed at "20.1 units leave on the next sweep" while a full rally
-    // shipped none of them for the rest of the game.
-    //
-    // Every feeder blocked prints the reason instead of a bare 0 — a zero with
-    // no explanation is the same failure in a smaller font.
-    if (e.feedSend > 0) {
-      logiSrc.push(_rdoNum(e.feedSend) + ' units leave on the next sweep, one every ' +
-        BAL.ORDERS.INTERVAL + ' ticks' +
-        (e.rally === 0 ? ' — no rally set, so they go to the front' : ''));
-      if (e.feedBlocked > 0) {
-        logiSrc.push(e.feedBlocked + ' of ' + e.feed + ' feed ' +
-          (e.feedBlocked > 1 ? 'cities ship' : 'city ships') + ' nothing — ' +
-          _rdoOrdersWhyShort(e.feedWhy, e.feedWhyAt));
-      }
-    } else {
-      logiSrc.push('nothing leaves on the next sweep — ' +
-        _rdoOrdersWhyShort(e.feedWhy, e.feedWhyAt));
-      // What the blockage is COSTING, which is the number that makes a player
-      // act. This is the one place `standingOrderSend`'s willingness belongs on
-      // screen: not as a forecast of what will happen, but as the size of what
-      // is not happening.
-      if (e.feedWant > 0) {
-        logiSrc.push(_rdoNum(e.feedWant) + ' units held back per sweep');
-      }
-    }
-  } else if (anyOrder) {
-    logiSrc.push('nothing is feeding them yet — a rally is a sink, not a source');
-  }
-  _rdoSources(n.logiSrc, 'hdrlogisrc', logiSrc);
+  _rdoSources(n.supplySrc, 'hdrsupplysrc', src);
+
+  // The hint answers "what is this column for", so it is only up while the
+  // column is not busy answering something else.
+  _rdoStyle(n.hint, 'hdrhint', 'display', _rdoResolve() ? 'none' : '');
   return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// THE OTHER MODIFIERS — supply, strength, march
+// STATION — what you asked for by hovering
 // ════════════════════════════════════════════════════════════════════════
 //
-// The growth block above answers "why does this city grow at this rate". It was
-// the only question the rail could answer. A player deciding where to attack is
-// asking two more — "why are those defenders hard" and "why is a march out of
-// here slow" — and neither number existed on screen.
+// 00-vision.md §8: "Click a station for a small readout: type, garrison by unit
+// type, capacity, growth rate and what's modifying it."
 //
-// Three more sections, each registered through the same public seam. They are
-// separate sections rather than more rows on the station block because they are
-// separate DECISIONS: you read Strength when choosing a target and March when
-// choosing a route, and a fortress on a mountain would otherwise push the
-// growth breakdown off the top of a 284px column.
+// The last clause is the feature, and it is also where this block used to spend
+// nine rows. Growth on this board is a product of four separate things — where
+// the station sits on its logistic curve, how many farms reach it, the control
+// tier of the countries those farms are in, and whether it is cut off — and a
+// bare number tells you none of that.
 //
-// FOUR RULES, all inherited from the growth block and all load-bearing:
+// But it does not follow that all four deserve a row. Two of them are already
+// drawn:
 //
-// 1. **Every number names its source.** "×1.8" is the thing the player asked to
-//    get away from. Each headline is a labelled row and each contribution to it
-//    is a `.rdo-farm` line naming the station, the terrain or the unit type it
-//    came from.
+//   the logistic term      IS the capacity bar. `×0.10  90% full` was that bar
+//                          spelled out in words directly underneath itself.
+//   the base rate          is the station's type, which is the badge on the
+//                          first row and the node's silhouette on the map (§8,
+//                          "node shape encodes type"). It is a constant.
 //
-// 2. **Nothing here reimplements a combat or movement fact.** Every figure is a
-//    call into the sim:
+// So the breakdown that survives is the one that MOVES: farm reach, which
+// changes when a farm is taken, when its country flips tier, and when it comes
+// under siege — and each of those is a thing the player can act on. It is one
+// row plus one sentence naming the strongest farms and flagging any that have
+// stopped feeding.
 //
-//      defending power        stationPower(state, sid, 'defender')
-//      body vs fort block     _bodyPower() / the difference from stationPower
-//      fort scale-in + strip  _fortBonus() run twice, once with no attackers
-//      armour vs forts        _strength('armour', false, fort)
-//      march speed            waveSpeed() on a THROWAWAY wave (same trick as
-//                             _rdoGrowthPerTick uses with _applyGrowth)
-//
-//    Only the tuning CONSTANTS are read directly (DEFENSE_BONUS_POWER,
-//    SEA_ARTILLERY_LOSS, DISCONNECT_*), and they are read from BAL, never
-//    copied as literals — data/tuning.js stays the single owner of every one.
-//
-// 3. **Additive is drawn additive.** The station defense block is the single
-//    most important number in a fight and it is NOT a multiplier
-//    (sim/combat.js, DEFENSE_BONUS_POWER). It is rendered "+18.0 power" with a
-//    plus sign, in its own colour, never "×". Presenting it as a multiplier
-//    would be lying about the one number the player most needs to be right.
-//
-// 4. **A row that is always the same is not shown.** A plains holding city has
-//    fortLevel 0, terrain move 1.00, no sea link and an all-infantry garrison
-//    at speed 1.00 — every one of those rows is suppressed, so the rail on an
-//    ordinary city stays as short as it is today. Verdun on hills lights up.
-//    The whole `supply` section is hidden while a station is connected, because
-//    connected is the normal state; being cut off is the news.
+// The status line is likewise conditional. Growing normally is not news; the
+// number says so with a plus sign. Under attack, cut off, at capacity and over
+// capacity are news, and each of them means growth is not what the number above
+// would otherwise imply.
 
-// Order slots. Supply sits directly under the station detail because it
-// invalidates half of it; strength and march follow in the order a player asks
-// the questions. Gaps left between them, as with RDO_SECTION_ORDER.
-var RDO_SUPPLY_ORDER = 11;
-var RDO_STRENGTH_ORDER = 12;
-var RDO_MARCH_ORDER = 14;
+function _rdoStationBuild(host) {
+  _rdoForget('sta');
+  // The id and class the old floating panel had. Nothing in JS needs them any
+  // more, but `byId('station-readout')` is a console habit and the base
+  // .station-readout rule in style.css still carries the panel's colours.
+  host.id = 'station-readout';
+  host.classList.add('station-readout');
+  var n = {};
 
-// Source lines shown under one row. Six is the worst real case (a fortress on
-// mountains, under-garrisoned, being shelled) and nothing on the map exceeds it.
-var RDO_MAX_SOURCES = 6;
+  var head = el('div', 'rdo-head');
+  n.name = el('span', 'rdo-name');
+  n.type = el('span', 'rdo-type');
+  head.appendChild(n.name);
+  head.appendChild(n.type);
+  host.appendChild(head);
 
-// A value equal to 1.0 within this is the baseline, and the baseline is not a
-// modifier. Floating-point slack rather than a design number.
-var RDO_MOD_EPS = 0.005;
+  var sub = el('div', 'rdo-sub');
+  n.swatch = el('span', 'rdo-swatch');
+  n.owner = el('span', 'rdo-owner');
+  sub.appendChild(n.swatch);
+  sub.appendChild(n.owner);
+  host.appendChild(sub);
 
-// Drop every remembered write whose key starts with `prefix`. Needed because
-// _rdoLast survives a rebuild of the nodes it remembers — the same bug the farm
-// row pool comment describes. Sections build in `order`, so the station block
-// (10) recreates _rdoLast before these (11+) build; this makes that ordering
-// non-load-bearing instead of merely true.
-function _rdoForget(prefix) {
-  if (!_rdoLast) { _rdoLast = Object.create(null); return; }
-  var keys = Object.keys(_rdoLast);
-  for (var i = 0; i < keys.length; i++) {
-    if (keys[i].indexOf(prefix) === 0) delete _rdoLast[keys[i]];
-  }
+  // Territory + control tier. Invisible everywhere else in text, and a
+  // partly-held country pays reduced benefits (00-vision.md §3). The territory
+  // NAME is the label and the tier is the value, so the row costs no words of
+  // its own.
+  n.terr = _rdoRow(host, 'rdo-terr', '');
+  n.terr.row.setAttribute('title', 'stations held here, and what that tier pays');
+
+  // Garrison. Never collapsed to a total on its own: the soft triangle in
+  // 00-vision.md §4 is entirely about composition, so a panel that hides it is
+  // hiding the decision. The composition rides under the bar as one line rather
+  // than as three fixed cells of which two are usually "0".
+  n.garr = _rdoRow(host, 'rdo-garr', 'garrison');
+  var bar = el('div', 'rdo-bar');
+  n.barFill = el('div', 'rdo-bar-fill');
+  bar.appendChild(n.barFill);
+  host.appendChild(bar);
+  n.comp = el('div', 'rdo-src rdo-comp');
+  host.appendChild(n.comp);
+
+  n.growth = _rdoRow(host, 'rdo-mod', 'growth');
+  n.status = el('div', 'rdo-status');
+  host.appendChild(n.status);
+
+  // The one modifier that moves. Hidden at ×1.00 — the baseline is not a
+  // modifier, and 101 of 108 stations sit at it for most of a game.
+  n.mul = _rdoRow(host, 'rdo-mod', 'farms');
+  n.mulSrc = _rdoSrcGroup(host);
+
+  n.note = el('div', 'rdo-note');
+  host.appendChild(n.note);
+  return n;
 }
 
-// A group of source lines hanging off one row. Same pool discipline as the farm
-// rows: grows, never shrinks, surplus hidden rather than removed.
-function _rdoSrcGroup(parent) {
-  var host = el('div', 'rdo-srcs');
-  parent.appendChild(host);
-  return { host: host, pool: [] };
+// The type badge. Everything static about the station that is not its name:
+// what it is, what it makes, and how much it multiplies. The DEFENSE rating is
+// NOT here — it moved into the fight section's fortification row, where it is
+// quoted in `lvl` alongside the terrain that adds to it and the flat power the
+// two of them together are worth. One vocabulary for one quantity, in one
+// place; see rule 2 in the file header.
+function _rdoTypeBadge(d) {
+  var t = _rdoTypeLabel(d);
+  if (d.type === 'producer' && d.produces) return t + ' · ' + _rdoUnitTag(d.produces);
+  if (d.type === 'multiplier' && d.multiplier) return t + ' ×' + d.multiplier;
+  return t;
 }
 
-// Hiding a ROW must also hide the lines hanging off it, and that is easy to
-// forget because the two live in different nodes. It was forgotten once and the
-// symptom was the worst kind: Bordeaux, which has no fortification at all,
-// showed "urban · Germany → +0.60 lvl" underneath a hidden fortification row —
-// a stale source line for a station the player was no longer looking at,
-// attached to nothing, indistinguishable from a real reading.
-//
-// So every caller passes `on`, and a hidden row passes an empty list. There is
-// no path that updates a row's visibility without updating its sources.
-function _rdoSources(g, key, lines) {
-  if (!lines) lines = [];
-  var want = lines.length < RDO_MAX_SOURCES ? lines.length : RDO_MAX_SOURCES;
-  while (g.pool.length < want) {
-    var r = el('div', 'rdo-farm');
-    g.host.appendChild(r);
-    g.pool.push(r);
-  }
-  for (var i = 0; i < g.pool.length; i++) {
-    var on = i < want;
-    _rdoStyle(g.pool[i], key + '@' + i, 'display', on ? '' : 'none');
-    if (on) _rdoSet(g.pool[i], key + '~' + i, lines[i]);
-  }
-}
+function _rdoStationUpdate(state, n) {
+  var sid = _rdoFocusOn(state);
+  // Hiding rather than swapping to an idle body: the empire section above is
+  // always on screen, so the rail is never the empty gutter this block used to
+  // exist to prevent.
+  if (!sid) return false;
 
-// Additive power, signed. The sign is the message: this is troops added to the
-// defence, not a factor applied to it.
-function _rdoPlus(v) {
-  if (!isFinite(v)) return '-';
-  return (v >= 0 ? '+' : '−') + _rdoNum(Math.abs(v));
-}
-
-// Short unit tags, from BAL.UNIT_ORDER so a fourth unit type would appear here
-// without an edit.
-function _rdoUnitTag(t) { return String(t).slice(0, 3); }
-
-// "inf ×1.2, art ×0.6" — the per-type factor each present type contributes,
-// read out of BAL.UNITS rather than restated.
-function _rdoTypeFactors(units, defending) {
-  var out = [];
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    if (!(units[t] > BAL.ANNIHILATION_EPSILON)) continue;
-    var u = BAL.UNITS[t];
-    out.push(_rdoUnitTag(t) + ' ×' + (defending ? u.def : u.atk));
-  }
-  return out.join(', ');
-}
-
-// The heaviest type in a resolved mix, for naming who the matchup is against.
-function _rdoTopType(mix) {
-  if (!mix) return '';
-  var best = '', bv = -1;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    if (mix[t] > bv) { bv = mix[t]; best = t; }
-  }
-  return best;
-}
-
-// "an artillery-heavy assault", not "a artillery-heavy assault". The unit names
-// come out of BAL.UNIT_ORDER, so this cannot be baked into a literal.
-function _rdoArticle(word) {
-  return /^[aeiou]/i.test(String(word)) ? 'an' : 'a';
-}
-
-function _rdoTerrainKey(sid) {
   var d = STATIONS[sid];
-  var t = (typeof TERRITORIES !== 'undefined' && d) ? TERRITORIES[d.territory] : null;
-  return (t && t.terrain) ? t.terrain : 'plains';
+  var st = state.stations[sid];
+  var units = st.units;
+  var total = totalUnits(units);
+  var cap = d.capacity;
+  var fill = cap > 0 ? total / cap : 0;
+
+  // ── identity ──
+  _rdoSet(n.name, 'staname', d.name);
+  _rdoSet(n.type, 'statype', _rdoTypeBadge(d));
+
+  var owner = st.owner;
+  _rdoSet(n.owner, 'staowner', _rdoPowerName(owner));
+  _rdoStyle(n.swatch, 'staswatch', 'background', _rdoPowerColor(owner) || 'var(--neutral-node)');
+
+  var ctl = territoryControl(state, d.territory);
+  _rdoSet(n.terr.k, 'staterr', _rdoTerritoryName(d.territory));
+  _rdoSet(n.terr.v, 'statier', _rdoTierLabel(ctl));
+  _rdoClass(n.terr.v, 'statier', 'is-contested', ctl.tier === 'contested');
+  _rdoClass(n.terr.v, 'statier', 'is-partial', ctl.tier === 'majority');
+
+  // ── garrison ──
+  _rdoSet(n.garr.v, 'stagarr', _rdoNum(total) + ' / ' + cap);
+  // Clamped so a garrison in the overflow band pins the fill at 100% instead of
+  // painting past the end of the track. The true ratio is right beside it in
+  // the "39.0 / 26" text, which is where a number over capacity belongs.
+  _rdoStyle(n.barFill, 'stabar', 'width', _rdoPct(Math.min(1, fill)));
+  _rdoClass(n.barFill, 'stabar', 'is-full', fill >= _rdoFullAt());
+  _rdoSet(n.comp, 'stacomp', _rdoComp(units));
+
+  // ── which growth branch the sim will take ──
+  //
+  // Mirrors growthTick()'s branch order exactly: contested → cut off → over the
+  // CEILING → growing (full or not). Control flow only; every NUMBER below
+  // still comes from the sim.
+  //
+  // `over` was `total > cap` until the over-capacity rework, and `atCap` was a
+  // dead-stop branch that reported 0/day. Both were then wrong for the whole
+  // band between capacity and the ceiling — the band the rework created — where
+  // a station grows at GROWTH_OVERFLOW_RATE of its peak and bleeds nothing.
+  var contested = (typeof stationAttackers === 'function') && stationAttackers(state, sid).length > 0;
+  var cut = st.connected === false;
+  var ceilUnits = cap * _rdoOverflowCeil();
+  var over = total > ceilUnits;
+  var full = !over && total >= cap * _rdoFullAt();
+
+  var perDay = 0;
+  var status = '';
+  var statusBad = true;
+
+  if (contested) {
+    // Not "under attack — not recruiting": the growth row directly above it
+    // already reads "0 inf / day", so the second clause was the first clause
+    // said twice.
+    status = 'under attack';
+  } else if (cut) {
+    // No status word. The supply section IMMEDIATELY below exists only in this
+    // state, leads with the alert icon and says "cut off" in the warning
+    // colour; printing it here too put the same two words twice in four rows.
+    // The growth number carries `is-stalled` and goes negative on its own.
+    var gCut = _rdoGrowthPerTick(state, sid, units, BAL.DISCONNECT_GROWTH);
+    perDay = (gCut || 0) * _rdoTicksPerDay();
+    var since = (st.discSince === undefined || st.discSince < 0) ? state.tick : st.discSince;
+    // Attrition, so the headline is not a flat "0 / day" while the pocket dies.
+    // Mirrors growthTick()'s `_scaleUnits(units, 1 - DISCONNECT_DECAY)` — one
+    // multiplication against a BAL constant, not the growth formula.
+    if ((state.tick - since) >= BAL.DISCONNECT_GRACE) {
+      perDay -= total * BAL.DISCONNECT_DECAY * _rdoTicksPerDay();
+    }
+  } else if (over) {
+    // Same deal: growthTick() bleeds `excess * OVERSTACK_DECAY` per tick, and
+    // the excess is measured against the CEILING, not capacity — growth is
+    // legal all the way up to it, so a bleed aimed at capacity would be two
+    // rules pulling on the same units in opposite directions. There is no
+    // growth term to probe up here: growth is exactly zero above the ceiling.
+    perDay = -(total - ceilUnits) * BAL.OVERSTACK_DECAY * _rdoTicksPerDay();
+    status = 'over the ceiling — bleeding off';
+  } else {
+    // Full or not, the station grows and the number comes from the sim's own
+    // _applyGrowth. Nothing is special-cased: _growthRoom already knows that a
+    // full city produces GROWTH_OVERFLOW_RATE of its peak.
+    var g = _rdoGrowthPerTick(state, sid, units, 1);
+    perDay = (g === null ? 0 : g) * _rdoTicksPerDay();
+    statusBad = false;
+
+    if (full) {
+      // Still worth a line: production has halved and the growth number above
+      // cannot say why on its own. The percentage is DERIVED from the constant
+      // rather than typed as "50%", so the word on screen and the rule in
+      // sim/growth.js cannot drift apart. "Spend it" is advice you can only
+      // take on your own city; on a neutral one the note at the bottom says the
+      // more useful thing.
+      var pct = Math.round((BAL.GROWTH_OVERFLOW_RATE || 0) * 100);
+      var head = pct > 0 ? ('full at ' + pct + '%') : 'full';   // OFF switch: the old wording, back
+      status = isRealPower(owner) ? (head + ' — spend it') : head;
+      statusBad = true;
+    }
+  }
+
+  // The unit type is folded into the VALUE rather than costing a status line of
+  // its own ("into infantry"). It matters most on a producer, where the answer
+  // is not infantry, and there it is now impossible to miss.
+  var made = (typeof growthType === 'function') ? _rdoUnitTag(growthType(sid)) : 'inf';
+  _rdoSet(n.growth.v, 'stagrowth',
+    (perDay > 0 ? '+' : '') + _rdoNum(perDay) + ' ' + made + ' / day');
+  _rdoClass(n.growth.row, 'stagrowthrow', 'is-stalled', perDay <= 0);
+  _rdoSet(n.status, 'stastatus', statusBad ? status : '');
+  _rdoClass(n.status, 'stastatus', 'is-bad', statusBad && !!status);
+
+  // ── what's modifying it ──
+  //
+  // state.stations[sid].growthMul is the value growth actually USED (one tick
+  // of latency, by design — see the header of sim/growth.js). The published one
+  // is the honest thing to show.
+  var mul = (typeof st.growthMul === 'number' && isFinite(st.growthMul)) ? st.growthMul : 1;
+  var showMul = Math.abs(mul - 1) > RDO_MOD_EPS;
+  _rdoShow(n.mul, 'stamul', showMul);
+  var mulSrc = [];
+  if (showMul) {
+    var capped = mul >= BAL.GROWTH_MUL_CAP;
+    _rdoSet(n.mul.v, 'stamulv', _rdoMul(mul) + (capped ? '  capped' : ''));
+    _rdoClass(n.mul.row, 'stamulrow', 'is-off', mul < 1);
+
+    var farms = _rdoFarms(state, sid);
+    var names = [], sick = 0;
+    for (var i = 0; i < farms.length; i++) {
+      var f = farms[i];
+      if (f.dead || f.siege) sick++;
+      if (names.length < RDO_MAX_FARMS) {
+        // Distance in TERRITORIES, which is the unit MULTIPLIER_REACH is
+        // measured in — "adjacent" is the whole mechanic (00-vision.md §2).
+        names.push(f.name + ' ×' + f.mult + (f.hops === 0 ? '' : ' · ' + f.hops + ' away'));
+      }
+    }
+    var extra = farms.length - names.length;
+    if (extra > 0) names.push('+' + extra + ' more');
+    if (names.length) mulSrc.push(names.join('  ·  '));
+    // The only farm state worth a second line: one that has stopped paying, or
+    // is about to. Everything else about coverage is ON THE MAP.
+    if (sick > 0) {
+      mulSrc.push(sick + ' of them ' + (sick > 1 ? 'are' : 'is') +
+        ' under attack or feeding nobody');
+    }
+  }
+  _rdoSources(n.mulSrc, 'stamulsrc', mulSrc);
+
+  // ── the neutral clock ──
+  //
+  // A two-station country falls to one volley early and is a wall of full
+  // garrisons later, and nothing else on screen says so. Recomputed at ~2Hz
+  // because it steps the sim forward a few thousand ticks.
+  var note = '';
+  if (!isRealPower(owner) && !contested) {
+    // The clock runs to CAPACITY, not to the hard ceiling. Both the threshold
+    // and the ETA target used to be GROWTH_CAP_EPSILON, and both had to move:
+    // that constant is no longer read by the sim, and "as expensive as it will
+    // ever be" stopped being true when a neutral city gained another half a
+    // capacity to grow into. Capacity is also the last target an ETA can
+    // honestly quote — above it the room factor tapers linearly to zero at the
+    // ceiling, so the approach is exponential and the true answer is "never".
+    if (fill >= _rdoFullAt()) {
+      note = 'neutral and full — still creeping up';
+    } else if (fill >= RDO_NEUTRAL_WARN || _rdoEta.sid === sid) {
+      if (_rdoEta.sid !== sid || _rdoFrame % RDO_ETA_EVERY === 0) {
+        var t = _rdoTicksToFill(state, sid, _rdoFullAt());
+        _rdoEta = {
+          sid: sid,
+          text: t < 0 ? '' : 'neutral — full in ~' + Math.max(1, Math.round(t / _rdoTicksPerDay())) + ' days',
+        };
+      }
+      note = _rdoEta.text;
+    }
+  }
+  // The SINGLE write to n.note, and it has exactly one author. Two functions
+  // once shared this node and fought over the same cache key every frame: one
+  // set '', the other set its text, the diff saw a change both times, and a
+  // PAUSED game hovering a neutral station cost 2.007 DOM writes per frame
+  // forever. The diff gate is only sound with one author per key.
+  _rdoSet(n.note, 'stanote', note);
+  return true;
 }
 
-// ── supply ──────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// SUPPLY — cut off, and nothing else
+// ════════════════════════════════════════════════════════════════════════
 //
-// Cut off is the one modifier on this list that is invisible on the board and
-// fatal on the clock: growth stops dead (DISCONNECT_GROWTH) and the garrison
-// bleeds (DISCONNECT_DECAY). The section shows nothing at all while a station
-// is connected — see rule 4 — so its mere presence is the alarm.
+// Cut off is the one modifier that is invisible on the board and fatal on the
+// clock: growth stops dead (DISCONNECT_GROWTH) and the garrison bleeds
+// (DISCONNECT_DECAY). The section shows nothing at all while a station is
+// connected, because connected is the normal state and the default is not news.
+// **Its mere presence is the alarm** — which is why it is worth two rows and an
+// icon rather than a suppressed line inside the station block.
 
 function _rdoSupplyBuild(host) {
   _rdoForget('sup');
   var n = {};
-  n.state = _rdoRow(host, 'rdo-mod is-cut', 'supply');
+  n.state = _rdoIcoRow(host, 'rdo-mod is-cut is-head', 'alert', 'cut off',
+    'no chain of this power’s stations reaches home: growth stops and the garrison bleeds');
   n.stateSrc = _rdoSrcGroup(host);
-  n.growth = _rdoRow(host, 'rdo-mod', 'growth');
-  n.decay = _rdoRow(host, 'rdo-mod', 'decay');
-  n.decaySrc = _rdoSrcGroup(host);
   return n;
 }
 
 function _rdoSupplyUpdate(state, n) {
-  var sid = _rdoResolve();
-  if (!sid || !state || !state.stations || !state.stations[sid] || !STATIONS[sid]) return false;
+  var sid = _rdoFocusOn(state);
+  if (!sid) return false;
   var st = state.stations[sid];
   // computeConnectivity() writes this every tick; `undefined` on a state that
   // has not ticked yet is not "cut off", it is "not known yet".
   if (st.connected !== false) return false;
+
+  var since = (st.discSince === undefined || st.discSince < 0) ? state.tick : st.discSince;
+  var elapsed = state.tick - since;
+  var decaying = elapsed >= BAL.DISCONNECT_GRACE;
+  var total = totalUnits(st.units);
+
+  // The headline is the CLOCK, because the clock is the decision: relieve it
+  // before the grace period ends and nothing is lost at all.
+  _rdoSet(n.state.v, 'supstate', decaying
+    ? '−' + _rdoNum(total * BAL.DISCONNECT_DECAY * _rdoTicksPerDay()) + ' / day'
+    : 'decays in ' + (BAL.DISCONNECT_GRACE - elapsed) + ' ticks');
 
   var owner = st.owner;
   var pdef = (typeof POWERS !== 'undefined') ? POWERS[owner] : null;
@@ -1425,55 +1477,84 @@ function _rdoSupplyUpdate(state, n) {
   // A power that has lost its capital anchors on its largest surviving
   // component instead (BAL.FALLBACK_ANCHOR_ON_CAPITAL_LOSS), so naming the
   // capital would name a place that is no longer the thing it is cut off from.
-  _rdoSet(n.state.v, 'supstate', capHeld ? 'no path home' : 'cut from the main body');
-  _rdoSources(n.stateSrc, 'supstatesrc', [
+  _rdoSources(n.stateSrc, 'supsrc', [
     capHeld && STATIONS[capSid]
-      ? 'no chain of ' + _rdoPowerName(owner) + ' stations reaches ' + STATIONS[capSid].name
+      ? 'no route home to ' + STATIONS[capSid].name + ' · growth ' + _rdoMul(BAL.DISCONNECT_GROWTH)
       : _rdoPowerName(owner) + ' has lost its capital; this pocket is not the largest one left',
   ]);
-
-  _rdoSet(n.growth.v, 'supgrowth', _rdoMul(BAL.DISCONNECT_GROWTH));
-  _rdoClass(n.growth.row, 'supgrowthrow', 'is-off', true);
-
-  var since = (st.discSince === undefined || st.discSince < 0) ? state.tick : st.discSince;
-  var elapsed = state.tick - since;
-  var decaying = elapsed >= BAL.DISCONNECT_GRACE;
-  var total = totalUnits(st.units);
-  if (decaying) {
-    _rdoSet(n.decay.v, 'supdecay', '−' + _rdoPctFine(BAL.DISCONNECT_DECAY) + ' / tick');
-    _rdoSources(n.decaySrc, 'supdecaysrc', [
-      'cut off for ' + elapsed + ' ticks — ' +
-      _rdoNum(total * BAL.DISCONNECT_DECAY * _rdoTicksPerDay()) + ' / day at this size',
-    ]);
-  } else {
-    _rdoSet(n.decay.v, 'supdecay', 'in ' + (BAL.DISCONNECT_GRACE - elapsed) + ' ticks');
-    _rdoSources(n.decaySrc, 'supdecaysrc', [
-      'grace period is ' + BAL.DISCONNECT_GRACE + ' ticks; relieve it before then and nothing is lost',
-    ]);
-  }
   return true;
 }
 
-// ── strength ────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// FIGHT — what decides an assault, both directions
+// ════════════════════════════════════════════════════════════════════════
+//
+// This was two sections and fourteen rows: a STRENGTH block that decomposed the
+// defending power into garrison / fortification / matchup / attacking-out with
+// six source lines under them, and a MARCH block that priced two exits, the
+// terrain coming in, the sea crossing and any landing in progress.
+//
+// A player reading it is asking one question — **can I take this, and with
+// what** — and the answer is two numbers in the same unit:
+//
+//     power   ⛨ 81.6   ⚔ 65.0
+//
+// The shield is what this garrison holds the station WITH. The swords are what
+// the same troops are worth attacking OUT, on open ground, at their atk values
+// with no fort and no matchup. Side by side they say the thing a fortress
+// garrison most needs to say about itself: it is not a field army. The word
+// "power" stays because power is a game unit and no icon carries a unit.
+//
+// Then FORT, and only when there is one. It is additive (rule 2), it is drawn
+// additive, and its one source line carries the entire working that used to be
+// four: which levels came from the station and which from the terrain, whether
+// there are enough defenders to man it, and how much enemy artillery is
+// stripping. `armour attacks at ×0.82 — tanks do not reduce forts` was a fifth
+// line saying a constant rule of the game; it is the row's title now.
+//
+// MATCHUP appears only while somebody is actually standing here, because until
+// then there is nobody to be matched against.
+//
+// MARCH is one row: the range of exit times, quickest to slowest, in days. The
+// old block quoted each end on its own row with a source line naming the city
+// and its penalties — but the per-route number a player actually commits on is
+// on the PREVIEW LINE at the moment of the click (§8), computed for the route
+// they chose. What the rail can honestly add is the spread, which is the thing
+// defeat in detail is made of, and the penalties that cause it.
 
-function _rdoStrengthBuild(host) {
-  _rdoForget('str');
+// The smallest fortification worth a row, in POWER. One unit's worth: below
+// that the row is true, correct and beneath the resolution of any decision.
+var RDO_FORT_MIN_POWER = 1;
+
+function _rdoFightBuild(host) {
+  _rdoForget('fgt');
   var n = {};
-  n.hold = _rdoRow(host, 'rdo-mod is-head', 'holding here');
-  n.body = _rdoRow(host, 'rdo-mod', 'garrison');
-  n.bodySrc = _rdoSrcGroup(host);
-  n.fort = _rdoRow(host, 'rdo-mod is-add', 'fortification');
+
+  n.pwr = _rdoRow(host, 'rdo-mod is-head', 'power');
+  n.def = _rdoIcoVal(n.pwr.v, 'shield', 'power defending here, fortification included');
+  n.atk = _rdoIcoVal(n.pwr.v, 'swords', 'what these troops are worth attacking out, on open ground');
+
+  n.fort = _rdoRow(host, 'rdo-mod is-add', 'fort');
+  n.fort.row.setAttribute('title',
+    'ADDITIVE power, not a multiplier: fortification is troops added to the ' +
+    'defence. Artillery strips it; armour cannot reduce it.');
   n.fortSrc = _rdoSrcGroup(host);
+
   n.match = _rdoRow(host, 'rdo-mod', 'matchup');
   n.matchSrc = _rdoSrcGroup(host);
-  n.atk = _rdoRow(host, 'rdo-mod', 'attacking out');
-  n.atkSrc = _rdoSrcGroup(host);
+
+  n.march = _rdoIcoRow(host, 'rdo-mod', 'timer', 'out',
+    'march time from here to its quickest and slowest neighbour, in days');
+  n.marchSrc = _rdoSrcGroup(host);
+
+  n.land = _rdoIcoRow(host, 'rdo-mod is-cut', 'alert', 'landing',
+    'an amphibious assault coming ashore here');
   return n;
 }
 
-function _rdoStrengthUpdate(state, n) {
-  var sid = _rdoResolve();
-  if (!sid || !state || !state.stations || !state.stations[sid] || !STATIONS[sid]) return false;
+function _rdoFightUpdate(state, n) {
+  var sid = _rdoFocusOn(state);
+  if (!sid) return false;
   if (typeof stationPower !== 'function' || typeof fortLevel !== 'function') return false;
 
   var d = STATIONS[sid];
@@ -1487,129 +1568,109 @@ function _rdoStrengthUpdate(state, n) {
   var anyAtk = totalUnits(atk) > BAL.ANNIHILATION_EPSILON;
   var enemyMix = (typeof _mix === 'function') ? _mix(atk, false, fort) : null;
 
-  // The headline IS the sim's number, not a sum of the rows below it.
+  // The headline IS the sim's number, not a sum of the rows below it…
   var pDef = stationPower(state, sid, 'defender');
   var body = (typeof _bodyPower === 'function') ? _bodyPower(units, true, fort, enemyMix) : pDef;
-  // …and the fort block is the remainder, so the two rows cannot fail to add up
-  // to the headline even if sim/combat.js gains another term.
+  // …and the fort block is the REMAINDER, so the two cannot fail to add up to
+  // the headline even if sim/combat.js gains another term.
   var fbonus = pDef - body;
+  // The same troops at their atk values on open ground: no fort, no matchup.
+  var open = (typeof _bodyPower === 'function') ? _bodyPower(units, false, 0, null) : 0;
 
-  _rdoSet(n.hold.v, 'strhold', _rdoNum(pDef) + ' power');
-
-  _rdoSet(n.body.v, 'strbody', _rdoNum(body) + ' power');
-  var bodyLines = [];
-  var facs = _rdoTypeFactors(units, true);
-  if (facs) bodyLines.push(facs + ' defending · ' + _rdoNum(totalUnits(units)) + ' units');
-  else bodyLines.push('no garrison — this station changes hands without a fight');
-  _rdoSources(n.bodySrc, 'strbodysrc', bodyLines);
+  _rdoSet(n.def, 'fgtdef', _rdoNum(pDef));
+  _rdoSet(n.atk, 'fgtatk', _rdoNum(open));
+  _rdoClass(n.pwr.row, 'fgtpwrrow', 'is-stalled', totalUnits(units) <= BAL.ANNIHILATION_EPSILON);
 
   // ── the additive block ──
+  //
+  // Gated on the POWER it is worth, not on the level existing. Every producer
+  // on the board carries defense 1.05, which is 0.05 lvl and +0.3 power — less
+  // than one infantryman, on a station holding seven of them. A row that true
+  // and that irrelevant is the kind this rewrite exists to delete.
   var fortLines = [];
-  _rdoShow(n.fort, 'strfort', fort > 0);
-  if (fort > 0) {
-    _rdoSet(n.fort.v, 'strfortv', _rdoPlus(fbonus) + ' power');
-    var own = d.defense - 1;
-    if (Math.abs(own) > RDO_MOD_EPS) {
-      fortLines.push(_rdoTypeLabel(d) + ', defense ' + d.defense + ' → ' +
-        (own > 0 ? '+' : '−') + Math.abs(own).toFixed(2) + ' lvl');
-    }
-    var tKey = _rdoTerrainKey(sid);
-    var tDef = terrainOf(sid).defense;
-    if (Math.abs(tDef) > RDO_MOD_EPS) {
-      fortLines.push(tKey + ' · ' + _rdoTerritoryName(d.territory) + ' → +' + tDef.toFixed(2) + ' lvl');
-    }
-    fortLines.push(fort.toFixed(2) + ' lvl × ' + BAL.DEFENSE_BONUS_POWER + ' = ' +
-      _rdoPlus(fort * BAL.DEFENSE_BONUS_POWER) + ' at full garrison');
+  var showFort = fort * BAL.DEFENSE_BONUS_POWER >= RDO_FORT_MIN_POWER;
+  _rdoShow(n.fort, 'fgtfort', showFort);
+  if (showFort) {
+    // Never "×". See rule 2 in the file header, and .rdo-mod.is-add in
+    // style.css, which paints this row the garrison colour precisely so it
+    // cannot be read as one of the dim grey multipliers above it.
+    _rdoSet(n.fort.v, 'fgtfortv', _rdoPlus(fbonus) + ' power');
 
-    // Scale-in and artillery strip, both derived from the sim's own
-    // _fortBonus rather than restated: run it once with no attackers to get
-    // the un-stripped block, and the two factors fall out of the ratio.
+    var why = [];
+    var own = d.defense - 1;
+    if (Math.abs(own) > RDO_MOD_EPS) why.push(_rdoTypeLabel(d) + ' ' + _rdoLvl(own));
+    var tDef = terrainOf(sid).defense;
+    if (Math.abs(tDef) > RDO_MOD_EPS) why.push(_rdoTerrainKey(sid) + ' ' + _rdoLvl(tDef));
+    // Deliberately "6 power per lvl" and never "× 6". A multiplication sign
+    // anywhere in this block is the exact misreading rule 2 exists to stop:
+    // levels are what the station and its ground contribute, power-per-level is
+    // the rate they buy flat defenders at, and neither is a factor applied to
+    // the garrison.
+    why.push(BAL.DEFENSE_BONUS_POWER + ' power per lvl');
+    fortLines.push(why.join(' · '));
+
+    // Scale-in and artillery strip, both derived from the sim's own _fortBonus
+    // rather than restated: run it once with no attackers to get the
+    // un-stripped block, and the two factors fall out of the ratio.
     var fNoAtk = (typeof _fortBonus === 'function')
       ? _fortBonus(sid, units, emptyUnits(), fort) : fbonus;
     var full = fort * BAL.DEFENSE_BONUS_POWER;
     var scale = full > 0 ? fNoAtk / full : 1;
-    if (scale < 1 - RDO_MOD_EPS) {
-      fortLines.push('only ' + _rdoNum(totalUnits(units)) + ' of ' + BAL.DEFENSE_BONUS_FULL_AT +
-        ' defenders manning it — ' + _rdoMul(scale));
-    }
     var strip = fNoAtk > 0 ? 1 - (fbonus / fNoAtk) : 0;
+    var cut = [];
+    if (scale < 1 - RDO_MOD_EPS) {
+      cut.push('only ' + _rdoNum(totalUnits(units)) + ' of ' + BAL.DEFENSE_BONUS_FULL_AT +
+        ' manning it');
+    }
     if (strip > RDO_MOD_EPS) {
-      fortLines.push('enemy artillery strips ' + _rdoPctFine(strip) +
+      cut.push('guns strip ' + _rdoPctFine(strip) +
         (strip >= BAL.FORT_STRIP_CAP - RDO_MOD_EPS ? ' (capped)' : ''));
     }
-    if (typeof _strength === 'function' && BAL.UNITS.armour) {
-      var armF = _strength('armour', false, fort) / BAL.UNITS.armour.atk;
-      if (armF < 1 - RDO_MOD_EPS) {
-        fortLines.push('armour attacks at ' + _rdoMul(armF) + ' — tanks do not reduce forts');
-      }
-    }
+    if (cut.length) fortLines.push(cut.join(' · '));
   }
-  _rdoSources(n.fortSrc, 'strfortsrc', fortLines);
+  _rdoSources(n.fortSrc, 'fgtfortsrc', fortLines);
 
   // ── matchup, only while somebody is actually standing here ──
   var bodyPlain = (typeof _bodyPower === 'function') ? _bodyPower(units, true, fort, null) : 0;
   var m = bodyPlain > 0 ? body / bodyPlain : 1;
   var showMatch = anyAtk && bodyPlain > 0 && Math.abs(m - 1) > RDO_MOD_EPS;
-  _rdoShow(n.match, 'strmatch', showMatch);
+  _rdoShow(n.match, 'fgtmatch', showMatch);
   if (showMatch) {
-    _rdoSet(n.match.v, 'strmatchv', _rdoMul(m));
-    _rdoClass(n.match.row, 'strmatchrow', 'is-off', m < 1);
+    _rdoSet(n.match.v, 'fgtmatchv', _rdoMul(m));
+    _rdoClass(n.match.row, 'fgtmatchrow', 'is-off', m < 1);
   }
-  _rdoSources(n.matchSrc, 'strmatchsrc', showMatch ? [
-    'against ' + _rdoArticle(_rdoTopType(enemyMix)) + ' ' + _rdoTopType(enemyMix) +
-      '-heavy assault of ' + _rdoNum(totalUnits(atk)) + ' units',
+  _rdoSources(n.matchSrc, 'fgtmatchsrc', showMatch ? [
+    'against ' + _rdoNum(totalUnits(atk)) + ' units, mostly ' + _rdoTopType(enemyMix),
   ] : []);
 
-  // ── what this garrison is worth on the offensive ──
-  //
-  // The same troops, at their atk values, on open ground: no fort, no matchup.
-  // This is the number that says a fortress garrison is not a field army.
-  var open = (typeof _bodyPower === 'function') ? _bodyPower(units, false, 0, null) : 0;
-  var showAtk = totalUnits(units) > BAL.ANNIHILATION_EPSILON;
-  _rdoShow(n.atk, 'stratk', showAtk);
-  if (showAtk) _rdoSet(n.atk.v, 'stratkv', _rdoNum(open) + ' power');
-  _rdoSources(n.atkSrc, 'stratksrc', showAtk ? [
-    _rdoTypeFactors(units, false) + ' attacking · open ground, before the target’s fort',
-  ] : []);
+  _rdoFightMarch(state, n, sid);
+
+  // ── a landing in progress, which is a modifier on an ARRIVAL ──
+  var lw = null;
+  var waves = state.waves || [];
+  for (var w = 0; w < waves.length; w++) {
+    var wv = waves[w];
+    if (wv.landing && wv.path && wv.path[wv.path.length - 1] === sid) { lw = wv; break; }
+  }
+  _rdoShow(n.land, 'fgtland', !!lw);
+  if (lw) {
+    _rdoSet(n.land.v, 'fgtlandv', _rdoNum(lw.landing.ashore) + ' of ' +
+      _rdoNum(lw.landing.total) + ' ashore');
+  }
   return true;
 }
 
-// ── march ───────────────────────────────────────────────────────────────
-//
 // Speed is not a property of a station, it is a property of a LINK — terrain
-// modifies the march INTO a territory, and the sea multipliers belong to the
-// crossing. So the section reports the two things a station can honestly say:
-// how fast this garrison itself moves (its slowest type), and what leaving by
-// each exit actually costs in days.
-
-// Exit rows. Quickest and slowest bracket the choice; a full list of six
-// neighbours would be a table, and the rail is 284px wide.
-var RDO_MARCH_EXITS = 2;
-
-function _rdoMarchBuild(host) {
-  _rdoForget('mar');
-  var n = { exits: [] };
-  n.pace = _rdoRow(host, 'rdo-mod', 'pace');
-  n.paceSrc = _rdoSrcGroup(host);
-  for (var i = 0; i < RDO_MARCH_EXITS; i++) {
-    var r = _rdoRow(host, 'rdo-mod', '');
-    n.exits.push({ row: r, src: _rdoSrcGroup(host) });
+// modifies the march INTO a territory and the sea multipliers belong to the
+// crossing. So the row reports the only thing a station can honestly say about
+// leaving: the range of exit times, priced with the sim's own waveSpeed on a
+// throwaway wave (the same trick _rdoGrowthPerTick uses with _applyGrowth).
+function _rdoFightMarch(state, n, sid) {
+  if (typeof waveSpeed !== 'function' || typeof stationAdjacency !== 'function') {
+    _rdoShow(n.march, 'fgtmarch', false);
+    _rdoSources(n.marchSrc, 'fgtmarchsrc', []);
+    return;
   }
-  n.inb = _rdoRow(host, 'rdo-mod', 'arriving here');
-  n.inbSrc = _rdoSrcGroup(host);
-  n.sea = _rdoRow(host, 'rdo-mod', 'by sea');
-  n.seaSrc = _rdoSrcGroup(host);
-  n.land = _rdoRow(host, 'rdo-mod', 'landing');
-  n.landSrc = _rdoSrcGroup(host);
-  return n;
-}
-
-function _rdoMarchUpdate(state, n) {
-  var sid = _rdoResolve();
-  if (!sid || !state || !state.stations || !state.stations[sid] || !STATIONS[sid]) return false;
-  if (typeof waveSpeed !== 'function' || typeof stationAdjacency !== 'function') return false;
-
-  var d = STATIONS[sid];
   var st = state.stations[sid];
   var tpd = _rdoTicksPerDay();
 
@@ -1618,24 +1679,14 @@ function _rdoMarchUpdate(state, n) {
   var real = totalUnits(st.units) > BAL.ANNIHILATION_EPSILON;
   var ref = real ? st.units : { infantry: 1, artillery: 0, armour: 0 };
 
-  // ── pace: the slowest type present, which is what the whole stack moves at ──
+  // The slowest type present, which is what the whole stack moves at.
   var slowest = Infinity, slowType = '';
   for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
     var t = BAL.UNIT_ORDER[i];
     if (!(ref[t] > BAL.ANNIHILATION_EPSILON)) continue;
     if (BAL.UNITS[t].speed < slowest) { slowest = BAL.UNITS[t].speed; slowType = t; }
   }
-  var showPace = isFinite(slowest) && Math.abs(slowest - 1) > RDO_MOD_EPS;
-  _rdoShow(n.pace, 'marpace', showPace);
-  if (showPace) {
-    _rdoSet(n.pace.v, 'marpacev', _rdoMul(slowest));
-    _rdoClass(n.pace.row, 'marpacerow', 'is-off', slowest < 1);
-  }
-  _rdoSources(n.paceSrc, 'marpacesrc', showPace ? [
-    slowType + ' is the slowest type here — a stack moves at its slowest',
-  ] : []);
 
-  // ── exits, priced with the sim's own waveSpeed on a throwaway wave ──
   var adj = stationAdjacency()[sid] || [];
   var exits = [];
   for (var k = 0; k < adj.length; k++) {
@@ -1651,345 +1702,232 @@ function _rdoMarchUpdate(state, n) {
     if (a.days !== b.days) return a.days - b.days;
     return a.sid < b.sid ? -1 : 1;
   });
-  var picked = [];
-  if (exits.length) picked.push({ tag: exits.length > 1 ? 'quickest out' : 'only exit', e: exits[0] });
-  if (exits.length > 1) picked.push({ tag: 'slowest out', e: exits[exits.length - 1] });
 
-  for (var x = 0; x < RDO_MARCH_EXITS; x++) {
-    var on = x < picked.length;
-    _rdoShow(n.exits[x].row, 'marexit' + x, on);
-    if (!on) { _rdoSources(n.exits[x].src, 'marexitsrc' + x, []); continue; }
-    var p = picked[x];
-    _rdoSet(n.exits[x].row.k, 'marexitk' + x, p.tag);
-    _rdoSet(n.exits[x].row.v, 'marexitv' + x, _rdoNum(p.e.days) + ' days');
-    var why = [];
-    var nk = _rdoTerrainKey(p.e.sid);
-    var nm = BAL.TERRAIN[nk] ? BAL.TERRAIN[nk].move : 1;
-    if (Math.abs(nm - 1) > RDO_MOD_EPS) why.push(nk + ' ' + _rdoMul(nm));
-    if (p.e.sea) {
-      why.push('sea ' + _rdoMul(BAL.SEA_SPEED_MUL));
-      if (ref.artillery > BAL.ANNIHILATION_EPSILON) {
-        why.push('guns ' + _rdoMul(BAL.SEA_ARTILLERY_SPEED_MUL));
-      }
-    }
-    if (showPace) why.push(slowType + ' ' + _rdoMul(slowest));
-    _rdoSources(n.exits[x].src, 'marexitsrc' + x, [
-      'to ' + STATIONS[p.e.sid].name + (why.length ? ' — ' + why.join(', ') : ' — no penalties') +
-      (real ? '' : ' (quoted for infantry; nothing garrisoned)'),
-    ]);
-  }
+  _rdoShow(n.march, 'fgtmarch', exits.length > 0);
+  if (!exits.length) { _rdoSources(n.marchSrc, 'fgtmarchsrc', []); return; }
 
-  // ── the modifier this station imposes on everyone marching IN ──
-  var tKey = _rdoTerrainKey(sid);
-  var tMove = BAL.TERRAIN[tKey] ? BAL.TERRAIN[tKey].move : 1;
-  var showInb = Math.abs(tMove - 1) > RDO_MOD_EPS;
-  _rdoShow(n.inb, 'marinb', showInb);
-  if (showInb) {
-    _rdoSet(n.inb.v, 'marinbv', _rdoMul(tMove));
-    _rdoClass(n.inb.row, 'marinbrow', 'is-off', tMove < 1);
-  }
-  _rdoSources(n.inbSrc, 'marinbsrc', showInb ? [
-    tKey + ' · every march into ' + _rdoTerritoryName(d.territory) + ' pays this',
-  ] : []);
+  var lo = exits[0], hi = exits[exits.length - 1];
+  _rdoSet(n.march.v, 'fgtmarchv', exits.length > 1
+    ? _rdoNum(lo.days) + ' – ' + _rdoNum(hi.days) + ' d'
+    : _rdoNum(lo.days) + ' d');
 
-  // ── water ──
-  var seaNames = [];
-  for (var s = 0; s < exits.length; s++) if (exits[s].sea) seaNames.push(STATIONS[exits[s].sid].name);
-  _rdoShow(n.sea, 'marsea', seaNames.length > 0);
-  if (seaNames.length) {
-    _rdoSet(n.sea.v, 'marseav', _rdoMul(BAL.SEA_SPEED_MUL));
-    _rdoClass(n.sea.row, 'marsearow', 'is-off', true);
+  // WHY it is slow, not WHERE each road goes. The destinations are on the map,
+  // named, one link away from the node under the cursor; the penalties are not
+  // anywhere.
+  var why = [];
+  var anySea = false;
+  for (var s = 0; s < exits.length; s++) if (exits[s].sea) { anySea = true; break; }
+  if (isFinite(slowest) && Math.abs(slowest - 1) > RDO_MOD_EPS) {
+    why.push(_rdoUnitTag(slowType) + ' ' + _rdoMul(slowest) + ' — a stack moves at its slowest');
   }
-  _rdoSources(n.seaSrc, 'marseasrc', seaNames.length ? [
-    'water link to ' + seaNames.join(', '),
-    'guns ' + _rdoMul(BAL.SEA_ARTILLERY_SPEED_MUL) + ' again, −' +
-      _rdoPctFine(BAL.SEA_ARTILLERY_LOSS) + ' of them lost per crossing',
-  ] : []);
-
-  // ── a landing in progress, which is a speed modifier on an arrival ──
-  var lw = null;
-  var waves = state.waves || [];
-  for (var w = 0; w < waves.length; w++) {
-    var wv = waves[w];
-    if (wv.landing && wv.path && wv.path[wv.path.length - 1] === sid) { lw = wv; break; }
+  if (anySea) {
+    why.push('sea ' + _rdoMul(BAL.SEA_SPEED_MUL) + ' · −' +
+      _rdoPctFine(BAL.SEA_ARTILLERY_LOSS) + ' of the guns per crossing');
   }
-  _rdoShow(n.land, 'marland', !!lw);
-  if (lw) _rdoSet(n.land.v, 'marlandv', _rdoNum(lw.landing.ashore) + ' / ' + _rdoNum(lw.landing.total));
-  _rdoSources(n.landSrc, 'marlandsrc', lw ? [
-    _rdoPowerName(lw.owner) + ' coming ashore over ' + BAL.LANDING_TICKS +
-      ' ticks — ' + _rdoNum(totalUnits(lw.units)) + ' still at sea and unhittable',
-  ] : []);
-  return true;
+  if (!real) why.push('quoted for infantry; nothing garrisoned');
+  _rdoSources(n.marchSrc, 'fgtmarchsrc', why);
 }
 
-// ── orders ──────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// ORDERS — standing supply lines
+// ════════════════════════════════════════════════════════════════════════
 //
-// 01-data-schema.md, "Standing orders". The section answers the two questions a
-// player has after pressing R or F over a group: *did that land on this city*,
-// and *what is it actually worth per sweep*.
+// ── THE SEAM ─────────────────────────────────────────────────────────────
 //
-// RULE 4 FROM THE BLOCK ABOVE DECIDES ALMOST EVERYTHING HERE. "A row that is
-// always the same is not shown" — and `hold` is not merely the common value,
-// it is what ~all 108 stations on the board carry, because it is the default
-// and the off switch. So a station on `hold` hides the WHOLE section, exactly
-// as `supply` hides itself while a station is connected. The section's presence
-// is the reading; its absence is the other one.
+// Standing orders were rewritten underneath this file while it was being
+// rewritten. The mechanic is now ONE verb: a station carries `supplyTo`, a
+// sorted array of stations it streams units to. Empty means no order. A city
+// can feed several. There is no second verb and no per-station mode.
 //
-// This is also why there is no "order: hold" row and no set-it-here control.
-// The rail is where you find out what is true, not where the game is played
-// (00-vision.md §8) — the order is SET on the map, on a whole group at once,
-// with one keystroke that leaves the selection intact. A per-station dropdown
-// here would make setting twelve cities twelve trips to the right-hand column.
+// **Every fact this section prints comes through the four calls named below,
+// and nothing here re-derives any of them.** If the mechanic moves again, this
+// list is the whole surface to re-point:
 //
-// EVERY NUMBER COMES OUT OF THE SIM — AND IT IS THE RIGHT ONE.
+//   what does this city supply    stationSupply(state, sid)      core/state.js
+//   who supplies this city        stationSuppliedBy(state, sid)  core/state.js
+//   what leaves next sweep, and   standingOrderNext(state, sid)  sim/movement.js
+//     if not, why not               -> { units, target, blocked, edges }
+//   the same for a whole power    standingOrderPlan(state, pid)  sim/movement.js
 //
-// This row used to read `standingOrderSend(state, sid)`, which is the SOURCE'S
-// WILLINGNESS: how much a feed city wants to ship, before the destination gets
-// a say. Once the headroom ceiling landed in sim/movement.js those two numbers
-// stopped being the same number, and the panel went on printing the first one.
-// Measured live on the 8-city German opening, 7 feeders into one rally:
+// Everything is typeof-guarded, so a build in which the mechanic is mid-rewrite
+// hides this section rather than retiring it — a missing global here must not
+// cost the player the three sections above.
 //
-//   rail said     "next sweep — 5.6 units · 12% of the surplus above the keep floor"
-//   header said   "20.1 units leave on the next sweep, one every 25 ticks"
-//   reality       Leipzig Works sat at 28.5 / 28. Zero sends, zero units,
-//                 forever — orderStats.sends stayed at 0 across 400 ticks.
+// WHY standingOrderNext AND NOT standingOrderSend. known-issues #18, and it is
+// the single most expensive mistake this panel has made. `standingOrderSend` is
+// a source's WILLINGNESS — how much it wants to ship, before the destination
+// gets a say. The two were the same number until destinations gained a headroom
+// veto, then silently stopped being, and the rail went on printing the
+// willingness:
 //
-// A promise that never happens, with nothing on screen explaining why, is worse
-// than showing no number: the player has no way to tell a working supply line
-// from a stalled one, and the fix (spend that stack, or set a rally with room)
-// is invisible.
+//   rail said     "next sweep — 5.6 units"
+//   header said   "20.1 units leave on the next sweep"
+//   reality        0 sends. 0 units. Forever.
 //
-// So the headline is `standingOrderNext(state, sid)` — what ACTUALLY leaves,
-// which rally it is aimed at, and a machine-readable reason when the answer is
-// zero. That function shares the sweep's own planner, so it cannot drift from
-// what the sweep does; the willingness is still quoted, but only as the FRACTION
-// on the source line, where it is a description of the rule rather than a
-// forecast.
+// A wrong number is eventually noticed. That one was plausible, stable and
+// recomputed every frame, and the fix it hid — spend that stack, or supply a
+// city with room — was invisible. `standingOrderNext` shares the sweep's own
+// planner, so it cannot drift from what the sweep does. **Willingness is a fine
+// thing to compute and a terrible thing to print.**
 //
-// THE BLOCKED CASE IS THE IMPORTANT ONE and it names the city: "nothing ships —
-// Leipzig Works is full" reads correctly and tells the player exactly what to
-// do. Each reason gets its own sentence in _rdoOrdersWhy below, because the
-// fixes are different — a city at its keep floor should be LEFT ALONE, one under
-// the minimum stream needs nothing but time, and a full rally needs spending.
-var RDO_ORDERS_ORDER = 13;
+// THE BLOCKED CASE IS THE IMPORTANT ONE, and it names the city. A bare zero is
+// the same failure in a smaller font.
+//
+// There is no set-it-here control and there is not going to be one. The rail is
+// where you find out what is true, not where the game is played (00-vision.md
+// §8) — a line is drawn on the MAP, on a whole selection at once, with `R` and
+// a click. A per-station widget here would make supplying twelve cities twelve
+// trips to the right-hand column.
+
+// Does this block need the PLAYER, or only time?
+//
+// The warning colour is spent only on the first kind. A city at its keep floor,
+// or with a surplus under the minimum stream, is the rule working exactly as
+// designed and will ship as it grows; colouring those is crying wolf on the
+// normal case, and a rail that shouts about everything is a rail nobody reads.
+// A full destination, a cut corridor and a lost city are different: nothing
+// changes until the player does something.
+function _rdoOrdersActionable(reason) {
+  return reason === 'destination-full' || reason === 'unreachable' ||
+         reason === 'target-lost';
+}
+
+// The sim's machine-readable reasons as one short clause, naming the city when
+// the sim named one. A reason this file has not been taught falls through to the
+// bare statement rather than throwing, so a NEW sim reason degrades to "nothing
+// is getting through" instead of retiring the section.
+function _rdoOrdersWhyShort(reason, target) {
+  var dest = target ? _rdoStationName(target) : null;
+  switch (reason) {
+    case 'destination-full': return dest ? dest + ' is full' : 'every destination is full';
+    case 'target-lost':      return dest ? dest + ' is not yours any more' : 'a destination was lost';
+    case 'at-keep-floor':    return 'at the keep floor — a city never ships itself defenceless';
+    case 'below-min-send':   return 'the share is under the ' + BAL.ORDERS.MIN_SEND + '-unit minimum';
+    case 'unreachable':      return 'no route over ground you hold';
+    case 'no-order':         return 'no supply line set';
+    default:                 return 'nothing is getting through';
+  }
+}
 
 function _rdoOrdersBuild(host) {
   _rdoForget('ord');
   var n = {};
-  n.order = _rdoRow(host, 'rdo-mod is-head', 'order');
-  n.order.v.classList.add('rdo-order-v');
-  n.orderSrc = _rdoSrcGroup(host);
-  // `rdo-order-sweep` exists so a blocked stream can be coloured without the
-  // rule reaching the empire header's growth row, which carries `is-stalled`
-  // too. Scoped in the orders: block in style.css.
-  n.sweep = _rdoRow(host, 'rdo-mod rdo-order-sweep', 'next sweep');
-  n.sweepSrc = _rdoSrcGroup(host);
-  n.feeders = _rdoRow(host, 'rdo-mod', 'feeding in');
-  n.feedersSrc = _rdoSrcGroup(host);
+  n.out = _rdoRow(host, 'rdo-mod', 'supplies');
+  n.outSrc = _rdoSrcGroup(host);
+  n.in = _rdoRow(host, 'rdo-mod', 'fed by');
+  n.inSrc = _rdoSrcGroup(host);
   return n;
 }
 
-// One sentence per blocked reason, in the player's terms and naming the city
-// when the sim named one. The reasons come from sim/movement.js; a reason this
-// file has not been taught falls through to the bare statement rather than
-// throwing, so a new sim reason degrades to "nothing ships" instead of retiring
-// the section.
-function _rdoOrdersWhy(state, sid, next) {
-  var d = STATIONS[sid];
-  var st = state.stations[sid];
-  var dest = next.target ? _rdoStationName(next.target) : null;
-
-  switch (next.blocked) {
-    case 'destination-full':
-      return dest
-        ? 'nothing ships — ' + dest + ' is full. Spend that stack, or set a rally with room'
-        : 'nothing ships — every rally you hold is already at its ceiling';
-    case 'at-keep-floor':
-      return 'holding ' + _rdoNum(totalUnits(st.units)) + ' against a ' +
-        _rdoNum(BAL.ORDERS.KEEP_FLOOR * (d.capacity || 0)) +
-        '-unit keep floor — a feed city never ships itself defenceless';
-    case 'below-min-send':
-      return 'the surplus is under the ' + BAL.ORDERS.MIN_SEND +
-        '-unit minimum stream — it ships once it has grown';
-    case 'unreachable':
-      return 'nothing ships — no route to a rally over ground you hold';
-    case 'no-seed':
-      return 'nothing ships — no rally set, and this city has no frontier to fall back to';
-    case 'already-there':
-      return 'nothing ships — with no rally set, this city is itself the front';
-    default:
-      return 'nothing ships';
-  }
-}
-
-// Does this block need the PLAYER, or only time?
-//
-// The warning colour is spent only on the first kind. A city sitting at its keep
-// floor, or with a surplus under the minimum stream, is the rule working exactly
-// as designed and will ship as it grows — colouring those is crying wolf on the
-// normal case, and a rail that shouts about everything is a rail nobody reads.
-// A full rally, a cut corridor and "no rally anywhere" are different: nothing
-// changes until the player does something.
-function _rdoOrdersActionable(reason) {
-  return reason === 'destination-full' || reason === 'unreachable' || reason === 'no-seed';
-}
-
-// The same reasons as a fragment, for the empire header's one-line summary.
-function _rdoOrdersWhyShort(reason, target) {
-  var dest = target ? _rdoStationName(target) : null;
-  switch (reason) {
-    case 'destination-full':
-      return dest ? dest + ' is full' : 'every rally is full';
-    case 'at-keep-floor':   return 'they are at their keep floor';
-    case 'below-min-send':  return 'their surplus is under the ' + BAL.ORDERS.MIN_SEND + '-unit minimum';
-    case 'unreachable':     return 'no route to a rally over ground you hold';
-    case 'no-seed':         return 'no rally set, and no frontier to fall back to';
-    case 'already-there':   return 'they are already on the front';
-    default:                return 'nothing is getting through';
-  }
-}
-
 function _rdoOrdersUpdate(state, n) {
-  var sid = _rdoResolve();
-  if (!sid || !state || !state.stations || !state.stations[sid] || !STATIONS[sid]) return false;
+  var sid = _rdoFocusOn(state);
+  if (!sid) return false;
+  if (typeof stationSupply !== 'function') return false;
+  // Neutral is never an actor and takes no sweeps — the same gate
+  // standingOrderNext applies before it will plan anything. Without it a
+  // neutral city carrying a stale line (a fixture, a console poke) would be
+  // described as a supply network that is merely blocked, which is a different
+  // and more actionable statement than the truth.
+  if (typeof isRealPower === 'function' && !isRealPower(state.stations[sid].owner)) return false;
 
-  var st = state.stations[sid];
-  // Through core's accessor, so this file is not the second place the default
-  // is written down. Read LIVE every frame and cached nowhere: an order does
-  // not survive a capture (setStationOwner resets it), so a panel holding on to
-  // one would keep describing a city that has changed hands.
-  var order = (typeof stationOrder === 'function')
-    ? stationOrder(state, sid)
-    : (st.order || 'hold');
-  if (order === 'hold') return false;
+  var to = stationSupply(state, sid) || [];
+  // O(stations), and safe here only because it is asked about ONE station per
+  // frame — the one under the cursor. core/state.js says so at the function and
+  // deliberately offers no index, because an index would be a second copy of the
+  // same fact invalidated by every capture.
+  var from = (typeof stationSuppliedBy === 'function') ? stationSuppliedBy(state, sid) : [];
+  // `hold` is not merely the common value, it is what ~all 108 stations carry,
+  // because it is the default and the off switch. So a station with no lines in
+  // either direction hides the WHOLE section, exactly as `supply` hides itself
+  // while a station is connected. The section's presence is the reading.
+  if (!to.length && !from.length) return false;
 
-  var isFeed = (order === 'feed');
-  _rdoSet(n.order.v, 'ordv', order);
-  _rdoSources(n.orderSrc, 'ordsrc', [
-    isFeed
-      ? 'a source — ships surplus to the nearest rally, or to the front if none is set'
-      : 'a sink — feed cities stream their surplus to the nearest rally',
-  ]);
-
-  // ── what leaves next sweep (feed only) ──
-  //
-  // The row is suppressed on a rally for the same reason `pace` is suppressed
-  // on an all-infantry garrison: a rally never ships, so the answer is not
-  // merely zero, it is not a question this station has.
-  _rdoShow(n.sweep, 'ordsweep', isFeed);
-  var sweepSrc = [];
-  if (isFeed) {
-    // What ACTUALLY leaves, not what this city is willing to part with. See the
-    // block comment above RDO_ORDERS_ORDER.
+  // ── what leaves ──
+  _rdoShow(n.out, 'ordout', to.length > 0);
+  var outSrc = [];
+  if (to.length) {
     var next = (typeof standingOrderNext === 'function')
       ? standingOrderNext(state, sid)
       : { units: 0, target: null, blocked: 'no-order' };
     var ships = next.units > 0;
-    var tpd = _rdoTicksPerDay();
-    _rdoSet(n.sweep.v, 'ordsweepv', ships ? _rdoNum(next.units) + ' units' : 'nothing');
-    _rdoClass(n.sweep.row, 'ordsweeprow', 'is-stalled',
-      !ships && _rdoOrdersActionable(next.blocked));
+    _rdoSet(n.out.v, 'ordoutv', ships ? _rdoNum(next.units) + ' / sweep' : 'nothing');
+    _rdoClass(n.out.row, 'ordoutrow', 'is-stalled', !ships && _rdoOrdersActionable(next.blocked));
     if (ships) {
-      // The destination is named FIRST: a stream is a pipe and the far end is
-      // the half the player cannot see on the map. The fraction below it is the
-      // rule, not a forecast — the number above already is the forecast.
-      sweepSrc.push('to ' + _rdoStationName(next.target) + ' · ' +
-        _rdoPct(BAL.ORDERS.SEND_FRACTION) + ' of the surplus above the keep floor');
-      sweepSrc.push(_rdoNum(next.units * tpd / BAL.ORDERS.INTERVAL) + ' / day at this size');
+      // The destinations are named FIRST: a stream is a pipe and the far end is
+      // the half the player cannot read off the node under the cursor.
+      var names = [];
+      for (var i = 0; i < to.length && i < RDO_MAX_FARMS; i++) names.push(_rdoStationName(to[i]));
+      if (to.length > names.length) names.push('+' + (to.length - names.length) + ' more');
+      outSrc.push('→ ' + names.join(', ') + ' · one sweep every ' + BAL.ORDERS.INTERVAL + ' ticks');
     } else {
-      sweepSrc.push(_rdoOrdersWhy(state, sid, next));
+      outSrc.push(_rdoOrdersWhyShort(next.blocked, next.target));
     }
   }
-  _rdoSources(n.sweepSrc, 'ordsweepsrc', sweepSrc);
+  _rdoSources(n.outSrc, 'ordoutsrc', outSrc);
 
-  // ── what is aimed at this rally ──
+  // ── what arrives ──
   //
-  // Read off the empire aggregate, which already walks every station this power
-  // holds on a tick throttle — so hovering a rally costs no extra sweep. Only
-  // for the human's own ground: the aggregate is keyed to PLAYER, and quoting
-  // it under another power's city would be a number about somebody else.
-  var me = window.PLAYER || null;
-  var mine = (me && st.owner === me);
-  var e = (!isFeed && mine) ? _rdoHeaderStats(state, me) : null;
-  var showFeeders = !!(e && e.feed > 0);
-  _rdoShow(n.feeders, 'ordfeed', showFeeders);
-  var feedSrc = [];
-  if (showFeeders) {
-    _rdoSet(n.feeders.v, 'ordfeedv', e.feed + ' cities  ·  ' + _rdoNum(e.feedSend) + ' / sweep');
-    // Deliberately an EMPIRE-wide figure, and said so. A feed city ships to its
-    // NEAREST rally, and which one that is comes out of an ownership-aware
-    // search inside sim/movement.js that this file has no access to. Quoting
-    // the empire total as if it were this rally's inbound would be a confident
-    // lie the moment a second rally exists; naming the scope is honest and
-    // still answers "is my network actually running".
-    feedSrc.push(e.rally > 1
-      ? 'empire-wide — each feed city ships to its nearest of your ' + e.rally +
-        ' rallies, which may not be this one'
-      : 'empire-wide — the only rally you hold, so every feed city that can reach it ships here');
-    // "7 cities · 0.0 / sweep" is true and still leaves the player guessing.
-    // The rally being hovered is very often the reason itself.
-    if (!(e.feedSend > 0) && e.feedBlocked > 0) {
-      feedSrc.push('nothing is getting through — ' + _rdoOrdersWhyShort(e.feedWhy, e.feedWhyAt));
-    }
+  // A COUNT, not a total. Summing what the sources will ship would need
+  // standingOrderPlan for the whole power on the hovered frame, and the empire
+  // section above already prints that number for the empire, on a tick
+  // throttle. Two places computing one sum is how the last two bugs in this
+  // file happened.
+  _rdoShow(n.in, 'ordin', from.length > 0);
+  var inSrc = [];
+  if (from.length) {
+    _rdoSet(n.in.v, 'ordinv', from.length + ' cit' + (from.length > 1 ? 'ies' : 'y'));
+    var fn = [];
+    for (var j = 0; j < from.length && j < RDO_MAX_FARMS; j++) fn.push(_rdoStationName(from[j]));
+    if (from.length > fn.length) fn.push('+' + (from.length - fn.length) + ' more');
+    inSrc.push('← ' + fn.join(', '));
   }
-  _rdoSources(n.feedersSrc, 'ordfeedsrc', feedSrc);
+  _rdoSources(n.inSrc, 'ordinsrc', inSrc);
   return true;
 }
 
 // ── registration ────────────────────────────────────────────────────────
 //
-// Station detail is the rail's first section, registered here at load. It is
-// registered through the same public seam any later section will use — there
-// is no privileged path — so if this call works, so will the next one.
-railAddSection({
-  id: 'station',
-  order: RDO_SECTION_ORDER,
-  build: _rdoBuild,
-  update: _rdoSectionUpdate,
-});
+// Every section registers through the same public seam any later one will use —
+// there is no privileged path — so if these calls work, so will the next one.
+// None of them passes a `title`: see the note in the file header.
 
 railAddSection({
   id: 'empire',
-  title: 'Empire',
   order: RDO_HEADER_ORDER,
   build: _rdoHeaderBuild,
   update: _rdoHeaderUpdate,
 });
 
 railAddSection({
+  id: 'station',
+  order: RDO_SECTION_ORDER,
+  build: _rdoStationBuild,
+  update: _rdoStationUpdate,
+});
+
+railAddSection({
   id: 'supply',
-  title: 'Supply',
   order: RDO_SUPPLY_ORDER,
   build: _rdoSupplyBuild,
   update: _rdoSupplyUpdate,
 });
 
 railAddSection({
-  id: 'strength',
-  title: 'Strength',
-  order: RDO_STRENGTH_ORDER,
-  build: _rdoStrengthBuild,
-  update: _rdoStrengthUpdate,
+  id: 'fight',
+  order: RDO_FIGHT_ORDER,
+  build: _rdoFightBuild,
+  update: _rdoFightUpdate,
 });
 
 railAddSection({
   id: 'orders',
-  title: 'Orders',
   order: RDO_ORDERS_ORDER,
   build: _rdoOrdersBuild,
   update: _rdoOrdersUpdate,
 });
 
-railAddSection({
-  id: 'march',
-  title: 'March',
-  order: RDO_MARCH_ORDER,
-  build: _rdoMarchBuild,
-  update: _rdoMarchUpdate,
-});
-
 // The per-frame pump, called by app/loop.js behind safeRender. It drives the
-// whole rail, not just this file's section: `renderReadout` is the only
+// whole rail, not just this file's sections: `renderReadout` is the only
 // per-frame hook the loop offers here, so it is what the rail rides on.
 function renderReadout(state) {
   return _rdoRailPump(state);

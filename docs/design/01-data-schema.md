@@ -177,9 +177,16 @@ Distinct from the static data above. This is the only thing that mutates.
 }
 ```
 
-`station.order` is `'hold' | 'rally' | 'feed'` and defaults to `'hold'` — see
-"Standing orders" below. It lives here rather than in `data/stations.js` because
-it is **mutable player intent**, and `data/` is static geometry.
+`station.supplyTo` is a **sorted array of destination station ids**, defaulting
+to `[]` — see "Standing orders" below. Empty is the off switch; there is no
+`'hold'` sentinel and no station "type" of order. It lives here rather than in
+`data/stations.js` because it is **mutable player intent**, and `data/` is
+static geometry.
+
+> *Revised 2026-07.* This field replaced a two-verb `order: 'hold' | 'rally' |
+> 'feed'` scheme. Both earlier designs made the sim decide something the player
+> could not see — which rally a given feeder served — so the pairing was
+> promoted into the data the player edits directly.
 
 `wave.standing` is present **only on a wave created by a standing order**, and
 only ever as `true`. An ordinary send produces a wave with no such property, so
@@ -222,7 +229,7 @@ which is what makes headless testing and replay free.
 | # | Global | File | Responsibility |
 |---|---|---|---|
 | 1 | `growthTick(state)` | `sim/growth.js` | Logistic growth, multiplier reach scaled by control tier, disconnection decay |
-| 2 | `ordersTick(state)` | `sim/movement.js` | Standing orders: `feed` stations ship surplus to a `rally` (throttled, not every tick) |
+| 2 | `ordersTick(state)` | `sim/movement.js` | Standing orders: each station ships surplus to every station in its `supplyTo` list, split evenly (throttled, not every tick) |
 | 3 | `movementTick(state)` | `sim/movement.js` | Advance waves along links; resolve arrivals |
 | 4 | `combatTick(state)` | `sim/combat.js` | Square-law attrition wherever hostile forces share a station; flip stations |
 | 5 | `relationsTick(state)` | `sim/relations.js` | Balance-of-power drift (throttled, not every tick) |
@@ -346,15 +353,18 @@ Nothing in `render/` or `app/` may mutate state directly. Read freely, write onl
 
 | | |
 |---|---|
-| `state.stations[sid].order` | `'hold' \| 'rally' \| 'feed'` — what to draw on the node. `stationOrder(state, sid)` is the safe accessor. |
+| `stationSupply(state, sid)` | Sorted destination ids this station supplies; `[]` when none, never null. **It is the stored array, not a copy — read it, never mutate it.** O(1), safe every frame. Do not read `state.stations[sid].supplyTo` directly: the accessor defaults a snapshot written before the field existed. |
+| `stationSuppliedBy(state, sid)` | Sorted source ids shipping *to* this station, scoped to its own owner. **O(stations), deliberately no index** — an index is a second copy of the same fact, invalidated by every capture and every order edit (known-issues #9). Fine for one station per frame (the hovered city); **not safe in a loop over the board.** |
 | `wave.standing === true` | This stack is a standing stream, not a committed march. Absent on every other wave. Draw it thinner/dimmer than a volley — the visual difference is the player's only cue that a trail is automatic. |
-| `standingOrderNext(state, sid)` | `{ units, target, blocked }` — what **actually** leaves on the next sweep, where it goes, and why it does not. The number a panel shows for **one** station. ~80µs; one call per frame is free. |
-| `standingOrderPlan(state, pid)` | The same, for every feed city a power holds, in one search. **Anything wanting more than one station calls this** — the empire header and the map's blocked-feeder marks both do. A loop of `standingOrderNext` repeats the search per city. |
+| `standingOrderNext(state, sid)` | `{ units, edges:[{target,units,blocked}], blocked, target }` — what **actually** leaves on the next sweep, per destination, and why it does not. `units` is the total across all edges, `0` when everything is blocked; `blocked` is `null` when `units > 0`, else the first edge's reason, or `'no-order'` when the city supplies nowhere. The number a panel shows for **one** station. One call per frame is free. |
+| `standingOrderPlan(state, pid)` | The same, keyed by source id, for every supplying city a power holds, in **one** pass. **Anything wanting more than one station calls this** — `standingOrderNext` plans the whole power in order to answer about one station, so one call per frame is fine and a loop over the board is not. Both are pure (asserted). |
 | `standingOrderSend(state, sid)` | Units this station is **willing** to ship, `0` if none. The source's side only, and **not** what to print: the two stopped being the same number when the headroom ceiling landed, and a panel showing this one advertises a stream a full rally is taking none of. Quote it as the *fraction rule*, never as a forecast. |
 | `state.orderStats` | `{ sweeps, sends, unitsSent, standDowns, unitsLost, fights }`. `fights` is a tripwire that must always read 0. |
-| `applyCommand(GAME, { type:'order', owner:PLAYER, stations:selectedSources(), order:'feed' })` | The **only** way to set an order. Per-station validation: an unowned station in the list is rejected on its own (`'not-owned'`) and the rest still apply. |
+| `applyCommand(GAME, { type:'order', owner:PLAYER, stations:selectedSources(), target:'lei' })` | The **only** way to set a supply line. `target` is a station id to **toggle**, or `null` to clear every line on the selected stations. The add/remove verdict is decided **once for the whole group** in a read-only first pass — if any selected station lacks the target, the whole group adds it — so a mixed selection resolves one way rather than per station. Per-station validation: an unowned station in the list is rejected on its own (`'not-owned'`) and the rest still apply. |
 
-An order set on a station is cleared when it changes hands, so a panel must read `order` live rather than caching it.
+Each entry in `result.accepted` is `{ station, target, added, changed }`. **`changed` is the one to report to the player** — `accepted` lists every station the command *applied to*, including no-ops, so a confirmation built on `accepted.length` will claim "3 cities cleared" when none of the three had a line (known-issues #18).
+
+A station's supply list is emptied when it changes hands — `setStationOwner` does it, and it is the **only** sanctioned way to transfer a station, because a raw write also leaves `state.ownerEpoch` stale. A panel must therefore read `stationSupply` live rather than caching it, and anything caching route geometry must invalidate on `ownerEpoch` as well as on the list itself.
 
 ---
 

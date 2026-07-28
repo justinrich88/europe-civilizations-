@@ -282,9 +282,51 @@ function suiteTuning(d) {
     assertNone(missing, 'BAL is missing constants');
   });
 
-  test('send fraction default is 0.75 (00-vision.md §8)', function () {
-    assertEqual(B.SEND_FRACTION_DEFAULT, 0.75, 'SEND_FRACTION_DEFAULT');
-    assert(B.SEND_FRACTIONS.indexOf(0.75) >= 0, 'SEND_FRACTIONS must contain the default');
+  // §8 still says "a persistent 25/50/75/All setting … default 75%", and that
+  // sentence no longer describes what ships: the default is 25% and the setting
+  // is ONE-SHOT, relaxing back after every volley. The citation is deliberately
+  // dropped from the name rather than left there to rot — a test that cites a
+  // document it contradicts teaches the wrong thing twice. data/tuning.js
+  // carries the reasoning above the constant.
+  test('send fraction defaults to the timid end of the ladder', function () {
+    assertEqual(B.SEND_FRACTION_DEFAULT, 0.25, 'SEND_FRACTION_DEFAULT');
+    assert(B.SEND_FRACTIONS.indexOf(B.SEND_FRACTION_DEFAULT) >= 0,
+      'SEND_FRACTIONS must contain the default');
+    // The default has to be the CHEAPEST rung, not merely present on the ladder.
+    // That is the whole design: an absent-minded click spends as little as the
+    // game allows, and committing everything costs a deliberate keystroke.
+    var min = B.SEND_FRACTIONS.slice().sort(function (a, b) { return a - b; })[0];
+    assertEqual(B.SEND_FRACTION_DEFAULT, min,
+      'the one-shot default must be the smallest fraction on the ladder');
+  });
+
+  test('a send always leaves a seed behind, so no city is ever killed by its own order', function () {
+    // Logistic growth is proportional to `units` (§2), so a station emptied to
+    // exactly zero has a growth rate of exactly zero and is dead ground forever.
+    // SEND_KEEP_UNITS is what stops "All" from doing that. Asserted as > 0
+    // rather than as 1.0: the exact value is tuning, the fact that it is
+    // non-zero is the invariant.
+    assert(isFinite(B.SEND_KEEP_UNITS) && B.SEND_KEEP_UNITS > 0,
+      'SEND_KEEP_UNITS must be a positive number of units');
+    // ...and small enough to be a seed rather than a garrison. A floor that
+    // could defend the place would quietly cancel "I emptied my rear" as a real
+    // risk, which §5 wants kept.
+    assert(B.SEND_KEEP_UNITS <= 2, 'SEND_KEEP_UNITS is a seed, not a garrison');
+  });
+
+  test('the speed ladder has a default that is on it', function () {
+    assert(Array.isArray(B.SPEEDS) && B.SPEEDS.length > 0, 'BAL.SPEEDS must be a non-empty array');
+    assert(B.SPEEDS.indexOf(B.SPEED_DEFAULT) >= 0,
+      'BAL.SPEED_DEFAULT (' + B.SPEED_DEFAULT + ') is not one of BAL.SPEEDS [' + B.SPEEDS + ']');
+    // Pause is a separate flag, never a rung — a 0 here would make "unpause"
+    // ambiguous about what speed to restore.
+    assert(B.SPEEDS.indexOf(0) < 0, 'pause is a flag, not a speed');
+    // newGame() sources its opening speed from SPEED_DEFAULT. If the two ever
+    // disagree a fresh game starts at a speed the HUD cannot show as selected.
+    if (typeof newGame === 'function') {
+      assertEqual(newGame(1).speed, B.SPEED_DEFAULT,
+        'newGame() does not open at BAL.SPEED_DEFAULT');
+    }
   });
 
   test('rout threshold is 0 — fight to annihilation (§5)', function () {
@@ -1097,6 +1139,40 @@ function _grantFromCapital(state, LINKS, capital, pid, n) {
   return granted;
 }
 
+// Cut one station off from its capital FOR REAL, and return it.
+//
+// The fixture this replaces took the last station of a 6-deep grant and its
+// comment claimed that was "two hops out". It was not: on this map the first
+// capital has exactly six links, so a 6-deep breadth-first grant hands out
+// nothing but its DIRECT NEIGHBOURS. The victim stayed wired to the capital,
+// reported connected === true, and the decay suite went green anyway — because
+// the fixture also parked 40 units in a station of capacity 28 and what it
+// measured was OVERSTACK_DECAY bleeding the surplus, not disconnection. The
+// over-capacity rework raised the bleed line above 40 and the accident stopped
+// working, which is the only reason anyone looked.
+//
+// So: grant deep enough to get past the capital's own neighbourhood, then pick
+// the victim BY THE PROPERTY the test needs — nothing its owner still holds
+// touches it — rather than by an index that means something different on every
+// map. Callers must still assert `connected === false`; that missing assertion
+// is what let the rot sit.
+function _cutOffStation(state, LINKS, capital, pid) {
+  var adj = _linkAdjacency(LINKS);
+  var chain = _grantFromCapital(state, LINKS, capital, pid, 12);
+  for (var i = chain.length - 1; i >= 0; i--) {
+    var victim = chain[i];
+    for (var j = 0; j < chain.length; j++) {
+      _setOwner(state, chain[j], chain[j] === victim ? pid : 'neutral');
+    }
+    var nb = adj[victim] || [], touches = false;
+    for (var k = 0; k < nb.length; k++) {
+      if (state.stations[nb[k]] && state.stations[nb[k]].owner === pid) { touches = true; break; }
+    }
+    if (!touches) return victim;
+  }
+  return null;
+}
+
 function _clearBoard(state, owner) {
   Object.keys(state.stations).forEach(function (sid) {
     _setOwner(state, sid, owner);
@@ -1111,14 +1187,60 @@ function suiteSimGrowth(d) {
   suite('sim / logistic growth');
   var fns = ctx.fns, S = ctx.data.STATIONS, B = ctx.data.BAL;
 
-  test('growth stalls at capacity (§2)', function () {
+  // Capacity used to be where growth STOPPED. Since the over-capacity rework
+  // (data/tuning.js GROWTH_OVERFLOW_RATE, on the player's instruction) it is
+  // only where growth gets slow, and the hard stop moved out to
+  // GROWTH_OVERFLOW_CEIL x capacity. This test moved with the rule rather than
+  // being loosened: it still pins a hard number growth may not cross, and it
+  // additionally pins that the station DOES cross the old one — so an
+  // implementation that quietly went back to stalling at capacity fails here
+  // just as loudly as one with no ceiling at all.
+  test('growth stops at the overflow ceiling, and not before capacity (§2)', function () {
     var sid = _anyStation(S, function (st) { return st.type === 'holding'; });
     assert(sid, 'no holding station on the map');
+    var cap = S[sid].capacity, ceil = cap * B.GROWTH_OVERFLOW_CEIL;
     var s = fns.newGame(1);
-    s.stations[sid].units.infantry = S[sid].capacity * 0.99;
-    _run(fns, s, 600);
-    assert(s.stations[sid].units.infantry <= S[sid].capacity * 1.001,
-      'station grew past capacity: ' + s.stations[sid].units.infantry + ' > ' + S[sid].capacity);
+    s.stations[sid].units.infantry = cap * 0.99;
+    _run(fns, s, 6000);
+    var got = s.stations[sid].units.infantry;
+    assert(got <= ceil * 1.001,
+      'station grew past the overflow ceiling: ' + got.toFixed(3) + ' > ' + ceil);
+    if (B.GROWTH_OVERFLOW_CEIL > 1) {
+      assert(got > cap * 1.05,
+        'station stalled at ' + got.toFixed(3) + ' against a capacity of ' + cap +
+        ' — growth is still stopping AT capacity, so GROWTH_OVERFLOW_RATE is not reaching it');
+    }
+  });
+
+  // The assertion that pins what "50%" MEANS. GROWTH_OVERFLOW_RATE is a
+  // fraction of the station's OWN PEAK growth, which the logistic puts at half
+  // full: growth is BASE * rate * mul * units * room(units), so at cap/2 the
+  // product units*room is cap/4, and at cap it is cap * (0.25 * RATE). The
+  // ratio is therefore exactly RATE, with everything else cancelling — which
+  // is why this can be asserted to floating-point tolerance rather than to a
+  // hand-waved band. Someone changing the floor to a flat "half the rate" or
+  // to a fraction of capacity instead of a fraction of peak lands outside it.
+  test('growth at capacity is exactly GROWTH_OVERFLOW_RATE of the peak rate', function () {
+    if (!(B.GROWTH_OVERFLOW_RATE > 0)) {
+      return skipTest('overflow rate', 'GROWTH_OVERFLOW_RATE is 0 — the documented off switch');
+    }
+    var sid = _anyStation(S, function (st) { return st.type === 'holding'; });
+    var cap = S[sid].capacity;
+    // One tick, growthMul pinned, so the only thing that differs between the
+    // two samples is the room factor this test exists to measure.
+    var oneTick = function (frac) {
+      var s = fns.newGame(1);
+      s.stations[sid].units.infantry = cap * frac;
+      s.stations[sid].growthMul = 1;
+      _run(fns, s, 1);
+      return s.stations[sid].units.infantry - cap * frac;
+    };
+    var peak = oneTick(0.5), atCap = oneTick(1.0);
+    assert(peak > 0, 'a half-full station did not grow at all');
+    assertClose(atCap / peak, B.GROWTH_OVERFLOW_RATE, 1e-6,
+      'growth at capacity is ' + (atCap / peak).toFixed(6) + ' of the peak rate, not ' +
+      B.GROWTH_OVERFLOW_RATE + ' — "slow production by 50%" no longer means 50% of ' +
+      'what this station can do at its best');
   });
 
   test('a half-full station grows fastest', function () {
@@ -1281,15 +1403,22 @@ function suiteSimDisconnect(d) {
   test('a disconnected station stops growing and decays (§5)', function () {
     var pid = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; })[0];
     var s = fns.newGame(9);
-    // Isolate one owned station by handing every other station of that power
-    // to neutral: nothing links it home any more.
-    // Two hops out, then the hop in between handed back to neutral: the far
-    // station is ours, and nothing we own links it home.
-    var chain = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 6);
-    assert(chain.length >= 2, 'could not grow a chain from ' + P[pid].capital);
-    var victim = chain[chain.length - 1];
-    chain.forEach(function (sid) { if (sid !== victim) _setOwner(s, sid, 'neutral'); });
-    s.stations[victim].units.infantry = 40;
+    var victim = _cutOffStation(s, ctx.data.LINKS, P[pid].capital, pid);
+    assert(victim, 'could not cut any station off from ' + P[pid].capital);
+
+    // HALF FULL, deliberately. The old fixture used 40 units against a
+    // capacity of 28, where the surplus decays whether the station is cut off
+    // or not. Half capacity is where a CONNECTED station grows fastest, so if
+    // the disconnect rule stops firing this assertion cannot be satisfied by
+    // any other mechanism in the sim.
+    s.stations[victim].units.infantry = S[victim].capacity * 0.5;
+
+    // The precondition, asserted rather than assumed — its absence is exactly
+    // what let this test measure the wrong thing for as long as it did.
+    fns.step(s);
+    assertEqual(s.stations[victim].connected, false,
+      victim + ' still reports connected — the fixture never cut it off, so ' +
+      'nothing below this measures disconnection');
 
     var before = s.stations[victim].units.infantry;
     _run(fns, s, B.DISCONNECT_GRACE + 400);
@@ -1300,12 +1429,14 @@ function suiteSimDisconnect(d) {
   test('decay rate matches DISCONNECT_DECAY within a factor of two', function () {
     var pid = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; })[0];
     var s = fns.newGame(9);
-    var chain = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 6);
-    if (chain.length < 2) return skipTest('decay rate', 'could not grow a chain from the capital');
-    var victim = chain[chain.length - 1];
-    chain.forEach(function (sid) { if (sid !== victim) _setOwner(s, sid, 'neutral'); });
-    s.stations[victim].units.infantry = 100;
+    var victim = _cutOffStation(s, ctx.data.LINKS, P[pid].capital, pid);
+    if (!victim) return skipTest('decay rate', 'could not cut a station off from the capital');
+    // Below the overstack line on purpose: at 100 units in a city of capacity
+    // 28 this measured OVERSTACK_DECAY and called it DISCONNECT_DECAY.
+    s.stations[victim].units.infantry = S[victim].capacity * 0.5;
     _run(fns, s, B.DISCONNECT_GRACE);
+    assertEqual(s.stations[victim].connected, false,
+      victim + ' still reports connected — this is not measuring decay at all');
     var start = s.stations[victim].units.infantry;
     var n = 300;
     _run(fns, s, n);
@@ -1525,6 +1656,99 @@ function suiteSimCommands(d) {
       return JSON.stringify(s.stations);
     };
     assertEqual(run(), run(), 'two runs from the same seed diverged');
+  });
+
+  // =========================================================================
+  // BAL.SEND_KEEP_UNITS — "if you send all, one troop stays so population
+  // increases".
+  //
+  // Not a nicety. Growth is logistic (00-vision.md §2):
+  //
+  //     growth = rate x units x (1 - units / capacity)
+  //
+  // which is PROPORTIONAL TO `units`, so a station emptied to exactly zero has
+  // a growth rate of exactly zero and can never recover however long it is
+  // held. Before the clamp, "All" permanently destroyed the city that sent it.
+  //
+  // The regrowth test is the one that matters and the other three exist to stop
+  // it passing for the wrong reason: a clamp that kept half the garrison would
+  // also regrow, and would be a different game.
+  // =========================================================================
+
+  var _spBoard = function (seed, units) {
+    var pid = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; })[0];
+    var s = fns.newGame(seed);
+    var granted = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 1);
+    assert(granted.length === 1, 'could not grant a neighbour of ' + P[pid].capital);
+    var src = P[pid].capital;
+    s.stations[src].units = units;
+    return { s: s, pid: pid, src: src, dst: granted[0] };
+  };
+
+  test('an "All" send leaves exactly the seed behind, proportioned across types', function () {
+    var b = _spBoard(90, { infantry: 60, artillery: 3, armour: 2 });
+    var res = fns.apply(b.s, {
+      type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 1.0,
+    });
+    assert(res.ok, 'the send was rejected: ' + res.reason);
+
+    var left = b.s.stations[b.src].units;
+    assertClose(totalUnits(left), B.SEND_KEEP_UNITS, 1e-9,
+      'an "All" send did not leave exactly SEND_KEEP_UNITS behind');
+    // PROPORTIONAL, not "one infantry". What stays is a scaled-down copy of the
+    // garrison — a city that held only artillery must keep artillery, or the
+    // clamp would quietly change the composition of what it saved.
+    var k = B.SEND_KEEP_UNITS / 65;
+    assertClose(left.infantry, 60 * k, 1e-9, 'infantry left behind');
+    assertClose(left.artillery, 3 * k, 1e-9, 'artillery left behind');
+    assertClose(left.armour, 2 * k, 1e-9, 'armour left behind');
+  });
+
+  test('the clamp is invisible to a fraction that was never going to empty the city', function () {
+    // 25% of 40 is 10, and 30 would be left standing — nowhere near the seed.
+    // This is the control that makes the test above about the CLAMP rather than
+    // about splitUnits: if the floor were applied unconditionally instead of as
+    // a ceiling on the fraction, this send would change and every balance run
+    // with it.
+    var b = _spBoard(91, { infantry: 40, artillery: 0, armour: 0 });
+    var res = fns.apply(b.s, {
+      type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 0.25,
+    });
+    assert(res.ok, 'the send was rejected: ' + res.reason);
+    assertClose(b.s.stations[b.src].units.infantry, 30, 1e-9,
+      'a 25% send from a full city is not what it was before the clamp existed');
+    assertClose(totalUnits(res.waves[0].units), 10, 1e-9, 'the wave carried the wrong amount');
+  });
+
+  test('a city already at the seed has nothing spare and is refused', function () {
+    var b = _spBoard(92, { infantry: B.SEND_KEEP_UNITS, artillery: 0, armour: 0 });
+    var res = fns.apply(b.s, {
+      type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 1.0,
+    });
+    assertEqual(res.ok, false, 'a city with nothing above the seed sent anyway');
+    assertEqual(res.rejected[0].reason, 'too-few-units', 'wrong rejection reason');
+    assertClose(totalUnits(b.s.stations[b.src].units), B.SEND_KEEP_UNITS, 1e-9,
+      'the refused send took units anyway');
+  });
+
+  test('a city emptied by an "All" volley REGROWS — the whole reason the seed exists', function () {
+    var b = _spBoard(93, { infantry: 60, artillery: 0, armour: 0 });
+    var res = fns.apply(b.s, {
+      type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 1.0,
+    });
+    assert(res.ok, 'the send was rejected: ' + res.reason);
+    var after = totalUnits(b.s.stations[b.src].units);
+    assert(after > 0, 'the source was emptied to exactly zero');
+
+    _run(fns, b.s, 1000);
+    var grown = totalUnits(b.s.stations[b.src].units);
+    // A tenth of capacity is far above anything rounding could produce and far
+    // below what the logistic curve actually reaches, so the assertion is about
+    // "it recovers" rather than about the growth constants.
+    assert(grown > ctx.data.STATIONS[b.src].capacity * 0.1,
+      'a city emptied by an "All" volley did not recover: ' + after.toFixed(3) +
+      ' -> ' + grown.toFixed(3) + ' over 1000 ticks. With no seed left behind ' +
+      'logistic growth multiplies by zero forever and the city is dead ground.');
   });
 }
 
@@ -2306,13 +2530,13 @@ function suiteSimBeachhead(d) {
 // ===========================================================================
 // sim / standing orders
 //
-// 00-vision.md §8 says "the board never plays itself". Standing orders are a
+// 00-vision.md §8 says "the board never plays itself". Supply lines are a
 // deliberate, scoped amendment to that sentence, and THE SCOPE IS THE
 // AMENDMENT — which is what this suite exists to hold in place. Two rules
 // carry the whole mechanic, and every test here is one of them from a
 // different angle:
 //
-//   1. LOGISTICS CAN BE AUTOMATED; COMMITMENT CANNOT. A standing order moves
+//   1. LOGISTICS CAN BE AUTOMATED; COMMITMENT CANNOT. A supply line moves
 //      units only between stations their owner already holds. It never
 //      attacks, never targets ground its owner does not hold, and never
 //      initiates combat. If an implementation can cause a fight, it is wrong.
@@ -2326,11 +2550,22 @@ function suiteSimBeachhead(d) {
 //      a time, which is DEFEAT IN DETAIL — the mistake §8 names as the
 //      defining one — committed automatically on the player's behalf.
 //
+// THE SCHEMA THESE TESTS ARE WRITTEN AGAINST, because it has now changed twice
+// and the reason is worth carrying: a station holds `supplyTo`, a sorted list
+// of the cities it streams surplus to, and nothing else. There is no order
+// type. Both earlier designs had one — hold/rally/feed, then
+// hold/reinforce/defend — and both made the sim decide something the player
+// could not see (which rally a feeder served; whether a city was "threatened"),
+// where a wrong decision looks exactly like a right one. A list of stated
+// destinations has nothing left to infer, and it is the only shape in which one
+// city can supply several.
+//
 // Two of these tests carry an explicit CONTROL rather than an assertion alone,
 // because the failure mode this project has been bitten by three times is a
 // test that passes against broken code (known-issues #8). The stand-down test
-// runs the same race with a manual wave and requires it to fight; the floor
-// test fails if no send was ever actually limited by the floor.
+// runs the same race with a manual wave and requires it to fight; the split
+// test runs the same fixture with a destination emptied and requires the shares
+// to change.
 //
 // Fixtures are built from the live link graph, never from hard-coded city ids:
 // the map is generated and any id written here would rot.
@@ -2365,11 +2600,54 @@ function _ordLongestOwnPath(s, pid, own) {
   return best;
 }
 
-function _ordSetOrders(s, pid, orders) {
-  var ids = Object.keys(orders).sort();
-  for (var i = 0; i < ids.length; i++) {
-    applyCommand(s, { type: 'order', owner: pid, stations: [ids[i]], order: orders[ids[i]] });
+// Draw a supply line from every station in `sources` to `target`.
+//
+// THROUGH applyCommand, like every other write in this project, and the command
+// is a GROUP TOGGLE: if any selected station lacks the edge it is added to all
+// of them, otherwise it is removed from all of them (sim/commands.js). So a
+// fixture that wants "these cities supply that one" must pass only the stations
+// that do not already have the edge, or a second call cancels the first. That
+// asymmetry is deliberate in the UI — it is how the player cancels — and this
+// helper is where the suite absorbs it, rather than every test remembering.
+function _ordLink(s, pid, sources, target) {
+  var add = [];
+  for (var i = 0; i < sources.length; i++) {
+    var have = s.stations[sources[i]].supplyTo || [];
+    if (have.indexOf(target) < 0) add.push(sources[i]);
   }
+  if (!add.length) return null;
+  add.sort();
+  return applyCommand(s, { type: 'order', owner: pid, stations: add, target: target });
+}
+
+// Total units in the waves this source put on the board, and how they split by
+// destination. Read off the waves rather than off any counter the phase keeps
+// about itself — "a wave of the right size exists" is the only evidence that
+// does not depend on the code under test being honest about itself.
+function _ordShipped(s, from, sinceWaveId) {
+  var out = { total: 0, byTarget: {}, n: 0 };
+  for (var i = 0; i < s.waves.length; i++) {
+    var w = s.waves[i];
+    if (w.from !== from) continue;
+    if (sinceWaveId !== undefined && w.id < sinceWaveId) continue;
+    var u = totalUnits(w.units);
+    out.total += u;
+    out.byTarget[w.to] = (out.byTarget[w.to] || 0) + u;
+    out.n++;
+  }
+  return out;
+}
+
+// The ceiling automation obeys, mirrored from sim/movement.js's _ordCeilingMul.
+// Read by INTENT rather than by naming one constant, because the constant has
+// already moved once: sim/growth.js used to stop growth at
+// GROWTH_CAP_EPSILON x capacity and since the over-capacity rework it tapers to
+// zero at GROWTH_OVERFLOW_CEIL x capacity instead. A test that pinned the old
+// name would go quietly green while measuring a ceiling nothing enforces.
+function _ordCeilMul(d) {
+  var B = d.BAL;
+  if (isFinite(B.GROWTH_OVERFLOW_CEIL) && B.GROWTH_OVERFLOW_CEIL > 0) return B.GROWTH_OVERFLOW_CEIL;
+  return isFinite(B.GROWTH_CAP_EPSILON) ? B.GROWTH_CAP_EPSILON : 1;
 }
 
 function suiteStandingOrders(d) {
@@ -2387,14 +2665,15 @@ function suiteStandingOrders(d) {
   var pid = 'ger';
 
   // -------------------------------------------------------------------------
-  test('hold is the default and sends nothing — today\'s behaviour exactly', function () {
+  test('a board with no supply lines sends nothing — today\'s behaviour exactly', function () {
     var b = _ordBoard(fns, d, 41, pid, 8);
     for (var i = 0; i < b.own.length; i++) {
-      assertEqual(b.s.stations[b.own[i]].order, 'hold', b.own[i] + ' did not default to hold');
+      assertEqual((b.s.stations[b.own[i]].supplyTo || []).length, 0,
+        b.own[i] + ' started with a supply line');
     }
     _run(fns, b.s, 300);
-    assertEqual(b.s.waves.length, 0, 'a board on hold spawned waves by itself');
-    assertEqual(b.s.orderStats.sends, 0, 'a board on hold shipped units by itself');
+    assertEqual(b.s.waves.length, 0, 'a board with no orders spawned waves by itself');
+    assertEqual(b.s.orderStats.sends, 0, 'a board with no orders shipped units by itself');
     assert(b.s.orderStats.sweeps > 0, 'the orders phase never ran at all');
   });
 
@@ -2407,98 +2686,46 @@ function suiteStandingOrders(d) {
   });
 
   // -------------------------------------------------------------------------
-  test('feed streams into the nearest rally, and only into it', function () {
+  test('a supply line streams into the city it names, and only that one', function () {
     var b = _ordBoard(fns, d, 43, pid, 8);
-    var rally = d.POWERS[pid].capital;
-    var orders = {};
-    for (var i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
-    // A rally needs HEADROOM to be a rally at all: a mustering point, not a
-    // warehouse. The fixture builds every station at 90% of capacity, so the
-    // one being reinforced is drained first — the real case is a city that has
-    // just been fought over, not one already full.
-    b.s.stations[rally].units = { infantry: 1, artillery: 0, armour: 0 };
+    var dest = d.POWERS[pid].capital;
+    var sources = b.own.filter(function (x) { return x !== dest; });
+    _ordLink(b.s, pid, sources, dest);
+    // A destination needs HEADROOM to receive anything: a mustering point, not a
+    // warehouse. The fixture builds every station at 90% of capacity, so the one
+    // being supplied is drained first — the real case is a city that has just
+    // been fought over, not one already full.
+    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
 
-    var before = totalUnits(b.s.stations[rally].units);
+    var before = totalUnits(b.s.stations[dest].units);
     _run(fns, b.s, 400);
 
     assert(b.s.orderStats.sends > 0, 'no stream was ever sent');
-    assert(totalUnits(b.s.stations[rally].units) > before + 10,
-      'the rally did not accumulate: ' + before.toFixed(1) + ' -> ' +
-      totalUnits(b.s.stations[rally].units).toFixed(1));
-    // Every wave the phase created is a standing one aimed at the rally.
+    assert(totalUnits(b.s.stations[dest].units) > before + 10,
+      'the destination did not accumulate: ' + before.toFixed(1) + ' -> ' +
+      totalUnits(b.s.stations[dest].units).toFixed(1));
+    // Every wave the phase created is a standing one aimed at the named city.
+    // This is the assertion the whole rewrite exists for: the sim no longer
+    // CHOOSES a destination, so a wave aimed anywhere else is not a worse guess,
+    // it is a bug.
     var bad = [];
     for (var w = 0; w < b.s.waves.length; w++) {
-      if (b.s.waves[w].to !== rally || !b.s.waves[w].standing) bad.push(b.s.waves[w].to);
+      if (b.s.waves[w].to !== dest || !b.s.waves[w].standing) bad.push(b.s.waves[w].to);
     }
-    assertNone(bad, 'a standing wave was aimed somewhere other than the rally');
-  });
-
-  // -------------------------------------------------------------------------
-  test('with no rally set, feed ships to the nearest owned station ON THE FRONT', function () {
-    var b = _ordBoard(fns, d, 44, pid, 8);
-    var orders = {};
-    for (var i = 0; i < b.own.length; i++) orders[b.own[i]] = 'feed';
-    _ordSetOrders(b.s, pid, orders);
-
-    // The front, computed independently of the sim: an owned station adjacent
-    // to any station its owner does not hold.
-    var adj = _linkAdjacency(d.LINKS), front = {};
-    for (i = 0; i < b.own.length; i++) {
-      var nb = adj[b.own[i]] || [];
-      for (var j = 0; j < nb.length; j++) {
-        if (b.s.stations[nb[j]].owner !== pid) { front[b.own[i]] = true; break; }
-      }
-    }
-    assert(Object.keys(front).length > 0, 'the fixture has no front to ship to');
-
-    // The design choice this test exists to pin down: with the capital-only
-    // opening, 101 of 108 stations are NEUTRAL, so "the front" cannot mean
-    // "adjacent to an enemy" — that set is empty for most of a game and the
-    // fallback would silently never fire (known-issues #11 in a new place).
-    // The front is where your ground stops. So it is not enough that streams
-    // land somewhere on the front: at least one must land on a station whose
-    // only unheld neighbours are NEUTRAL, or this test cannot tell the two
-    // definitions apart. Measured — an enemy-only definition leaves exactly one
-    // qualifying station on this fixture and the test passes without this.
-    var neutralOnly = {};
-    for (i = 0; i < b.own.length; i++) {
-      if (!front[b.own[i]]) continue;
-      var onlyNeutral = true, nb2 = adj[b.own[i]] || [];
-      for (j = 0; j < nb2.length; j++) {
-        var o = b.s.stations[nb2[j]].owner;
-        if (o !== pid && o !== 'neutral') onlyNeutral = false;
-      }
-      if (onlyNeutral) neutralOnly[b.own[i]] = true;
-    }
-    assert(Object.keys(neutralOnly).length > 0, 'fixture has no neutral-only frontier');
-
-    _run(fns, b.s, 200);
-    assert(b.s.orderStats.sends > 0, 'nothing shipped with no rally set');
-    var bad = [], hitNeutralFront = 0;
-    for (var w = 0; w < b.s.waves.length; w++) {
-      var dest = b.s.waves[w].to;
-      if (!front[dest]) bad.push(b.s.waves[w].from + '->' + dest);
-      if (neutralOnly[dest]) hitNeutralFront++;
-    }
-    assertNone(bad, 'a standing wave was sent somewhere that is not on the front');
-    assert(hitNeutralFront > 0,
-      'no stream was sent to a frontier that faces only NEUTRAL ground — the front ' +
-      'is being read as "adjacent to an enemy", which is empty for most of a game');
+    assertNone(bad, 'a standing wave was aimed somewhere other than the named destination');
   });
 
   // -------------------------------------------------------------------------
   test('a stream created this tick MOVES this tick (orders run before movement)', function () {
     var b = _ordBoard(fns, d, 52, pid, 8);
-    var rally = d.POWERS[pid].capital;
-    var orders = {};
-    for (var i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
+    var dest = d.POWERS[pid].capital;
+    _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
+    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
 
     fns.step(b.s);        // tick 0 is a sweep tick
     assert(b.s.waves.length > 0, 'the first sweep created no streams at all');
     var still = [];
-    for (i = 0; i < b.s.waves.length; i++) {
+    for (var i = 0; i < b.s.waves.length; i++) {
       var wv = b.s.waves[i];
       if (wv.hop === 0 && wv.progress === 0) still.push(wv.from + '->' + wv.to);
     }
@@ -2507,6 +2734,159 @@ function suiteStandingOrders(d) {
     // end-state assertion, and a permanent one-tick lie in the ETA a renderer
     // draws from launchTick.
     assertNone(still, 'a stream created this tick had not moved by the end of it');
+  });
+
+  // =========================================================================
+  // MANY DESTINATIONS FROM ONE CITY.
+  //
+  // "right now it's difficult to reinforce more than one city from a single
+  // city" — the player. One target per source made it impossible. A source's
+  // allowed outflow is now split EVENLY across the destinations that have room,
+  // and a destination with none is skipped and its share redistributed.
+  //
+  // EVEN, not neediest-first. "Neediest" is another rule the sim would apply
+  // off screen, where a wrong ranking looks identical to a right one — the exact
+  // failure both earlier versions of this mechanic had. An even split is a thing
+  // the player can state and check. Skipping a full destination is not a
+  // judgement, it is the capacity ceiling.
+  // =========================================================================
+
+  // A source big enough that its outflow still clears MIN_SEND after being cut
+  // three ways. At 90% of a 72-capacity capital the whole outflow is ~5.6 units
+  // and a third of that is under the 2.0 minimum, so the split would be
+  // invisible behind below-min-send — the fixture has to be sized past that or
+  // it tests the wrong rule. Returned with the source's own capacity so the
+  // caller can say why.
+  function _ordSplitBoard(seed, nTargets, fullOne) {
+    var b = _ordBoard(fns, d, seed, pid, 8);
+    var from = d.POWERS[pid].capital;
+    var targets = b.own.filter(function (x) { return x !== from; }).slice(0, nTargets).sort();
+    assertEqual(targets.length, nTargets, 'fixture could not find ' + nTargets + ' destinations');
+    for (var i = 0; i < targets.length; i++) _ordLink(b.s, pid, [from], targets[i]);
+    assertEqual((b.s.stations[from].supplyTo || []).join(','), targets.join(','),
+      'the fixture did not draw the lines it meant to');
+
+    // Stocked well over capacity so the outflow is large. Over-capacity is legal
+    // and is exactly the state a city that has just been reinforced is in.
+    b.s.stations[from].units = {
+      infantry: d.STATIONS[from].capacity * 3, artillery: 0, armour: 0,
+    };
+    for (i = 0; i < targets.length; i++) {
+      var stuff = (fullOne && targets[i] === fullOne);
+      b.s.stations[targets[i]].units = {
+        infantry: stuff ? d.STATIONS[targets[i]].capacity : 1, artillery: 0, armour: 0,
+      };
+    }
+    return { s: b.s, from: from, targets: targets };
+  }
+
+  test('a source with three destinations splits its outflow evenly across them', function () {
+    var f = _ordSplitBoard(80, 3, null);
+    fns.step(f.s);                                  // tick 0 is a sweep tick
+
+    var got = _ordShipped(f.s, f.from);
+    assertEqual(got.n, 3, 'a source with three lines shipped ' + got.n + ' streams');
+    var each = [];
+    for (var i = 0; i < f.targets.length; i++) {
+      var u = got.byTarget[f.targets[i]];
+      assert(u > 0, 'nothing was shipped to ' + f.targets[i]);
+      each.push(u);
+    }
+    // EVEN, to floating point. Not "roughly": the split is a division, and a
+    // tolerance here would hide an implementation that sized the second and
+    // third streams against the shrinking garrison instead of against the
+    // outflow, which is a real and plausible way to get this wrong.
+    assertClose(each[1], each[0], 1e-9, 'the second stream was not the same size as the first');
+    assertClose(each[2], each[0], 1e-9, 'the third stream was not the same size as the first');
+    assert(each[0] >= O.MIN_SEND, 'VACUITY: the fixture shares are under MIN_SEND, so the ' +
+      'split is indistinguishable from the minimum-stream rule');
+  });
+
+  test('a full destination is skipped and its share is redistributed', function () {
+    // The same fixture twice. The second run is the CONTROL: with all three
+    // destinations empty the shares must be smaller, or the first run's larger
+    // shares prove nothing about redistribution and only that a target was
+    // dropped.
+    var open3 = _ordSplitBoard(81, 3, null);
+    fns.step(open3.s);
+    var a = _ordShipped(open3.s, open3.from);
+    assertEqual(a.n, 3, 'the control fixture did not ship to all three');
+
+    var full = _ordSplitBoard(81, 3, null);
+    var stuffed = full.targets[1];
+    full.s.stations[stuffed].units = {
+      infantry: d.STATIONS[stuffed].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
+    };
+    // What the planner says BEFORE the sweep, so the reason is asserted and not
+    // merely the outcome.
+    var pre = standingOrderNext(full.s, full.from);
+    var stuckEdge = null;
+    for (var i = 0; i < pre.edges.length; i++) {
+      if (pre.edges[i].target === stuffed) stuckEdge = pre.edges[i];
+    }
+    assert(!!stuckEdge, 'the plan had no edge for the full destination');
+    assertEqual(stuckEdge.blocked, 'destination-full',
+      'a full destination was not reported as destination-full');
+    assertEqual(stuckEdge.units, 0, 'a full destination was allotted units anyway');
+
+    fns.step(full.s);
+    var b2 = _ordShipped(full.s, full.from);
+    assertEqual(b2.n, 2, 'the full destination was shipped to anyway');
+    assertEqual(b2.byTarget[stuffed], undefined, 'a stream went to the full destination');
+
+    // THE CLAIM. Same total outflow, divided two ways instead of three — so each
+    // surviving stream is 3/2 of what it was, and the totals match.
+    var perOpen = a.total / 3, perFull = b2.total / 2;
+    assertClose(b2.total, a.total, 1e-6,
+      'the skipped destination\'s share was dropped rather than redistributed: ' +
+      b2.total.toFixed(4) + ' shipped in total against ' + a.total.toFixed(4));
+    assertClose(perFull, perOpen * 1.5, 1e-6,
+      'the two surviving streams were not 3/2 the size of the three-way shares');
+  });
+
+  test('a source with ONE destination ships exactly what it did before many-to-many', function () {
+    // The regression guard on the split arithmetic. A single line must still be
+    // the whole allowed outflow, undivided — a split implemented as "divide by
+    // the list length" with an off-by-one would fail here and nowhere else.
+    var b = _ordBoard(fns, d, 82, pid, 8);
+    var from = d.POWERS[pid].capital;
+    var to = b.own.filter(function (x) { return x !== from; })[0];
+    _ordLink(b.s, pid, [from], to);
+    b.s.stations[to].units = { infantry: 1, artillery: 0, armour: 0 };
+
+    growthTick(b.s);
+    var have = totalUnits(b.s.stations[from].units);
+    var cap = d.STATIONS[from].capacity;
+    var expect = O.SEND_FRACTION * (have - O.KEEP_FLOOR * cap);
+    assert(expect >= O.MIN_SEND, 'VACUITY: the fixture source cannot clear MIN_SEND');
+
+    var nx = standingOrderNext(b.s, from);
+    assertEqual(nx.edges.length, 1, 'one supply line produced ' + nx.edges.length + ' edges');
+    assertClose(nx.units, expect, 1e-9,
+      'a single-destination source did not ship SEND_FRACTION of its surplus above the floor');
+    assertEqual(nx.edges[0].target, to, 'the single edge named the wrong city');
+  });
+
+  test('adding a second destination spreads the stream rather than doubling it', function () {
+    // The keep floor is a PER SOURCE rule, and this is what says so. If the
+    // fraction were applied per edge, a player could drain a city arbitrarily
+    // fast simply by drawing more lines out of it — which would make the floor,
+    // and the whole "never ships itself defenceless" rule, meaningless.
+    var one = _ordSplitBoard(83, 1, null);
+    growthTick(one.s);
+    var a = standingOrderNext(one.s, one.from);
+
+    var two = _ordSplitBoard(83, 2, null);
+    growthTick(two.s);
+    var b2 = standingOrderNext(two.s, two.from);
+
+    assert(a.units > 0 && b2.units > 0, 'VACUITY: one of the fixtures shipped nothing');
+    assertEqual(b2.edges.length, 2, 'the two-line fixture did not produce two edges');
+    assertClose(b2.units, a.units, 1e-9,
+      'a city with two supply lines shipped a different TOTAL from one with a single line: ' +
+      b2.units.toFixed(4) + ' vs ' + a.units.toFixed(4));
+    assertClose(b2.edges[0].units, a.units / 2, 1e-9, 'the first of two shares is not half');
+    assertClose(b2.edges[1].units, a.units / 2, 1e-9, 'the second of two shares is not half');
   });
 
   // -------------------------------------------------------------------------
@@ -2523,15 +2903,11 @@ function suiteStandingOrders(d) {
       var s = newGame(seeds[k]);
       var seenWave = 0;
       for (var t = 0; t < 6000 && !s.winner; t++) {
-        // Re-issue orders every 500 ticks: capital rallies, everything else
-        // feeds. Re-issuing is not incidental — a captured station's order is
-        // reset (core/state.js setStationOwner), so this also keeps a live
-        // board's worth of orders on ground that is changing hands constantly,
-        // which is exactly the condition rule 1 has to survive.
-        // Re-issued every 200 ticks: capital rallies, every other city feeds.
-        // Re-issuing is not incidental — a captured station's order is reset
-        // (core/state.js setStationOwner), so on a board changing hands
-        // constantly the orders would otherwise thin out to nothing and the
+        // Re-issued every 200 ticks: every city supplies its power's capital.
+        // Re-issuing is not incidental — supply lines are cleared on capture
+        // (core/state.js setStationOwner) and edges whose destination changes
+        // hands are dropped by the sweep, so on a board changing hands
+        // constantly the network would otherwise thin out to nothing and the
         // test would end up measuring a quiet board. 200 ticks was chosen by
         // measurement: at 500 the whole batch produced ZERO stand-downs, which
         // would have left the games unable to detect the stand-down code being
@@ -2540,17 +2916,14 @@ function suiteStandingOrders(d) {
           for (var p = 0; p < POWER_IDS.length; p++) {
             var q = POWER_IDS[p];
             if (q === 'neutral' || !s.powers[q] || s.powers[q].alive === false) continue;
-            var cap = POWERS[q].capital, feeds = [];
+            var cap = POWERS[q].capital;
+            if (!s.stations[cap] || s.stations[cap].owner !== q) continue;
+            var srcs = [];
             for (var i = 0; i < STATION_IDS.length; i++) {
               var sid = STATION_IDS[i];
-              if (s.stations[sid].owner === q && sid !== cap) feeds.push(sid);
+              if (s.stations[sid].owner === q && sid !== cap) srcs.push(sid);
             }
-            if (s.stations[cap] && s.stations[cap].owner === q) {
-              applyCommand(s, { type: 'order', owner: q, stations: [cap], order: 'rally' });
-            }
-            if (feeds.length) {
-              applyCommand(s, { type: 'order', owner: q, stations: feeds, order: 'feed' });
-            }
+            if (srcs.length) _ordLink(s, q, srcs, cap);
           }
         }
         stepTick(s);
@@ -2582,10 +2955,6 @@ function suiteStandingOrders(d) {
 
     // Vacuity guards. An assertion about streams that never ran is not an
     // assertion about anything.
-    // Thresholds are well under what the runs actually produce (measured ~470
-    // sends per pair of games). They dropped by roughly half when the capacity
-    // ceiling landed, which is the ceiling working: a rally that is full stops
-    // being shipped to, instead of accepting units it would bleed off.
     assert(totalSends > 300, 'only ' + totalSends + ' standing sends across ' + seeds.length +
       ' games — too few for "never caused a fight" to mean anything');
     assert(totalLaunched > 300, 'only ' + totalLaunched + ' standing waves were inspected');
@@ -2655,37 +3024,36 @@ function suiteStandingOrders(d) {
   });
 
   // -------------------------------------------------------------------------
-  test('feed respects the garrison floor and never empties a city', function () {
+  test('a supply line respects the garrison floor and never empties a city', function () {
     var b = _ordBoard(fns, d, 46, pid, 8);
     var i;
-    // The rally is the SMALLEST station on the board and the biggest station is
-    // a feeder, deliberately. The floor is a fraction of CAPACITY, so a floor
-    // low enough to sit under BAL.ORDERS.MIN_SEND is indistinguishable from the
-    // minimum-stream rule doing the work — the test has to be run on a station
-    // whose floor is large enough that a floorless implementation would send.
+    // The destination is the SMALLEST station on the board and the biggest
+    // station is a source, deliberately. The floor is a fraction of CAPACITY, so
+    // a floor low enough to sit under BAL.ORDERS.MIN_SEND is indistinguishable
+    // from the minimum-stream rule doing the work — the test has to be run on a
+    // station whose floor is large enough that a floorless implementation would
+    // send.
     var bySize = b.own.slice().sort(function (x, y) {
       var c = d.STATIONS[x].capacity - d.STATIONS[y].capacity;
       return c !== 0 ? c : (x < y ? -1 : 1);
     });
-    var rally = bySize[0];
+    var dest = bySize[0];
     var starved = bySize[bySize.length - 1];
     var floorOf = function (sid) { return d.STATIONS[sid].capacity * O.KEEP_FLOOR; };
     assert(floorOf(starved) * O.SEND_FRACTION > d.BAL.ORDERS.MIN_SEND,
       'fixture is too small to distinguish the floor from MIN_SEND');
 
-    var orders = {};
-    for (i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
+    _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
 
-    // The rally is emptied here and re-emptied every tick below. A rally now
+    // The destination is emptied here and re-emptied every tick below. It now
     // stops accepting units at its capacity, so a static one fills in a handful
     // of sweeps and the whole board goes quiet — which would leave this test
-    // asserting about a floor that was never approached. A rally that keeps
-    // SPENDING what it receives is the case where a stream runs continuously,
-    // and it is the case the floor exists for.
-    b.s.stations[rally].units = { infantry: 0, artillery: 0, armour: 0 };
+    // asserting about a floor that was never approached. A destination that
+    // keeps SPENDING what it receives is the case where a stream runs
+    // continuously, and it is the case the floor exists for.
+    b.s.stations[dest].units = { infantry: 0, artillery: 0, armour: 0 };
 
-    // Start the biggest feeder EXACTLY at its floor.
+    // Start the biggest source EXACTLY at its floor.
     b.s.stations[starved].units = { infantry: floorOf(starved), artillery: 0, armour: 0 };
 
     // One tick, which is a sweep tick. A station at its floor must ship
@@ -2700,7 +3068,7 @@ function suiteStandingOrders(d) {
     assert(fromOthers > 0, 'VACUITY: no station shipped anything on this sweep, so the ' +
       'floor was never the reason ' + starved + ' stayed put');
 
-    var feeders = b.own.filter(function (sid) { return sid !== rally; }).sort();
+    var sources = b.own.filter(function (sid) { return sid !== dest; }).sort();
     var breaches = [], limited = 0, sends = 0;
 
     for (var t = 0; t < 1200; t++) {
@@ -2708,12 +3076,12 @@ function suiteStandingOrders(d) {
       // every individual send, and an end-state check is satisfied by regrowth
       // papering over a city that was briefly stripped bare.
       var pre = {}, j;
-      for (j = 0; j < feeders.length; j++) pre[feeders[j]] = totalUnits(b.s.stations[feeders[j]].units);
+      for (j = 0; j < sources.length; j++) pre[sources[j]] = totalUnits(b.s.stations[sources[j]].units);
       var wavesBefore = b.s.waves.length;
       fns.step(b.s);
-      b.s.stations[rally].units = { infantry: 0, artillery: 0, armour: 0 };   // spent at the front
-      for (j = 0; j < feeders.length; j++) {
-        var sid = feeders[j];
+      b.s.stations[dest].units = { infantry: 0, artillery: 0, armour: 0 };   // spent at the front
+      for (j = 0; j < sources.length; j++) {
+        var sid = sources[j];
         var now = totalUnits(b.s.stations[sid].units);
         if (now < floorOf(sid) - 1e-9) {
           breaches.push(sid + ' fell to ' + now.toFixed(2) + ' against a floor of ' +
@@ -2729,7 +3097,7 @@ function suiteStandingOrders(d) {
       }
     }
 
-    assertNone(breaches, 'a feed station was drained below its garrison floor');
+    assertNone(breaches, 'a source was drained below its garrison floor');
     assert(sends > 20, 'VACUITY: only ' + sends + ' sends happened — the floor was never ' +
       'given the chance to bind');
     assert(limited > 0, 'VACUITY: no send was ever actually limited by the floor. This test ' +
@@ -2737,19 +3105,15 @@ function suiteStandingOrders(d) {
   });
 
   // -------------------------------------------------------------------------
-  test('a front measurably builds up versus the same board on hold', function () {
-    // WHAT THIS MEASURES, restated after the capacity ceiling landed. A rally
-    // can no longer accumulate past its capacity, so standing orders do not buy
-    // a bigger garrison than the map allows — they buy SPEED. The case is a
-    // front city that has just been fought over: with feeders behind it, it is
-    // back to fighting weight in a few sim-minutes; on its own it climbs the
-    // logistic curve from almost nothing and takes an order of magnitude
-    // longer. Measured at 600 ticks (60 sim-seconds), where that gap is real.
-    //
-    // The earlier version of this test compared a rally left at 90% capacity
-    // and reported a 13.6x build-up. That number was an artefact of the bug it
-    // failed to catch: most of those units were over capacity and queued to be
-    // bled off by OVERSTACK_DECAY. This is the honest figure.
+  test('a front measurably builds up versus the same board with no supply lines', function () {
+    // WHAT THIS MEASURES, restated after the capacity ceiling landed. A
+    // destination can no longer accumulate past its capacity, so supply lines do
+    // not buy a bigger garrison than the map allows — they buy SPEED. The case
+    // is a front city that has just been fought over: with cities behind it
+    // supplying it, it is back to fighting weight in a few sim-minutes; on its
+    // own it climbs the logistic curve from almost nothing and takes an order of
+    // magnitude longer. Measured at 600 ticks (60 sim-seconds), where that gap
+    // is real.
     var build = function (withOrders) {
       var b = _ordBoard(fns, d, 47, pid, 10);
       var adj = _linkAdjacency(d.LINKS), front = [];
@@ -2760,81 +3124,84 @@ function suiteStandingOrders(d) {
         }
       }
       assert(front.length > 0, 'fixture has no front');
-      var rally = front.slice().sort()[0];
-      b.s.stations[rally].units = { infantry: 1, artillery: 0, armour: 0 };   // just taken
+      var dest = front.slice().sort()[0];
+      b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };   // just taken
       if (withOrders) {
-        var orders = {};
-        for (i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-        _ordSetOrders(b.s, pid, orders);
+        _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
       }
       _run(fns, b.s, 600);
-      return { mass: totalUnits(b.s.stations[rally].units), s: b.s, rally: rally,
-               cap: d.STATIONS[rally].capacity };
+      return { mass: totalUnits(b.s.stations[dest].units), s: b.s, dest: dest,
+               cap: d.STATIONS[dest].capacity };
     };
 
     var on = build(true), off = build(false);
     assertEqual(off.s.orderStats.sends, 0, 'the control board shipped units with no orders set');
     assert(on.mass > off.mass * 2.5,
-      'mass at the front did not build: with orders ' + on.mass.toFixed(1) +
-      ', on hold ' + off.mass.toFixed(1) + ' at ' + on.rally);
+      'mass at the front did not build: with supply lines ' + on.mass.toFixed(1) +
+      ', without ' + off.mass.toFixed(1) + ' at ' + on.dest);
     // ...and it built to roughly its capacity, not past it. The ceiling is the
     // other half of the claim: a front that builds is worth nothing if what it
     // builds is bled off again.
-    assert(on.mass < on.cap * 1.15,
-      'the front overshot its capacity of ' + on.cap + ': ' + on.mass.toFixed(1));
+    assert(on.mass < on.cap * _ordCeilMul(d) * 1.15,
+      'the front overshot the ceiling growth stops at (' +
+      (on.cap * _ordCeilMul(d)).toFixed(1) + '): ' + on.mass.toFixed(1));
   });
 
   // -------------------------------------------------------------------------
   // THE CAPACITY CEILING (00-vision.md §2: a full station has stopped paying
   // dividends). growthTick bleeds anything over capacity at OVERSTACK_DECAY, so
   // automation that ignores the ceiling builds a warehouse that destroys what
-  // it is fed. Shipped without this rule, 7 feeders into a 28-capacity rally
-  // settled at ~556 units — every unit delivered was deleted on arrival, and
-  // the loss hid inside a rising empire total.
+  // it is fed. Shipped without this rule, 7 sources into a 28-capacity
+  // destination settled at ~556 units — every unit delivered was deleted on
+  // arrival, and the loss hid inside a rising empire total.
+  //
+  // It is also, since `defend` was cut, the mechanic's whole sense of timing: a
+  // quiet front is full and takes nothing, so its sources bank at home; a front
+  // that is losing units has headroom and pulls. A trigger expressed as a fact
+  // about the board rather than as a judgement the sim makes off screen.
   // -------------------------------------------------------------------------
 
-  test('a rally at capacity receives nothing, and its feeders keep their units', function () {
+  test('a destination at its ceiling receives nothing, and its sources keep their units', function () {
     var b = _ordBoard(fns, d, 60, pid, 8);
-    var rally = d.POWERS[pid].capital;
-    var orders = {}, i;
-    for (i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
-    b.s.stations[rally].units = { infantry: d.STATIONS[rally].capacity, artillery: 0, armour: 0 };
+    var dest = d.POWERS[pid].capital;
+    var sources = b.own.filter(function (x) { return x !== dest; });
+    var i;
+    _ordLink(b.s, pid, sources, dest);
+    b.s.stations[dest].units = {
+      infantry: d.STATIONS[dest].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
+    };
 
-    // VACUITY GUARD: the feeders must be willing to ship, or "nothing shipped"
+    // VACUITY GUARD: the sources must be willing to ship, or "nothing shipped"
     // says nothing about the ceiling.
-    var willing = 0, want = {};
-    for (i = 0; i < b.own.length; i++) {
-      want[b.own[i]] = (typeof standingOrderSend === 'function')
-        ? standingOrderSend(b.s, b.own[i]) : 0;
-      if (want[b.own[i]] >= d.BAL.ORDERS.MIN_SEND) willing++;
+    var willing = 0;
+    for (i = 0; i < sources.length; i++) {
+      if (standingOrderSend(b.s, sources[i]) >= d.BAL.ORDERS.MIN_SEND) willing++;
     }
-    assert(willing >= 3, 'only ' + willing + ' feeders were willing to ship — this test ' +
+    assert(willing >= 3, 'only ' + willing + ' sources were willing to ship — this test ' +
       'would pass with the ceiling removed');
 
     var before = {};
     for (i = 0; i < b.own.length; i++) before[b.own[i]] = totalUnits(b.s.stations[b.own[i]].units);
     _run(fns, b.s, 200);
 
-    assertEqual(b.s.orderStats.sends, 0, 'a rally at capacity was shipped to anyway');
-    assertEqual(b.s.waves.length, 0, 'a full rally still had streams in the air');
+    assertEqual(b.s.orderStats.sends, 0, 'a destination at capacity was shipped to anyway');
+    assertEqual(b.s.waves.length, 0, 'a full destination still had streams in the air');
     var lost = [];
     for (i = 0; i < b.own.length; i++) {
       var sid = b.own[i];
-      if (sid === rally) continue;
+      if (sid === dest) continue;
       if (totalUnits(b.s.stations[sid].units) < before[sid] - 1e-9) lost.push(sid);
     }
-    assertNone(lost, 'a feeder lost units with nowhere to send them');
+    assertNone(lost, 'a source lost units with nowhere to send them');
   });
 
-  test('a rally never runs away past its capacity', function () {
+  test('a destination never runs away past the ceiling growth stops at', function () {
     var b = _ordBoard(fns, d, 61, pid, 8);
-    var rally = d.POWERS[pid].capital;
-    var cap = d.STATIONS[rally].capacity;
-    var orders = {}, i;
-    for (i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
-    b.s.stations[rally].units = { infantry: 1, artillery: 0, armour: 0 };
+    var dest = d.POWERS[pid].capital;
+    var cap = d.STATIONS[dest].capacity;
+    var i;
+    _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
+    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
 
     // Long enough to have reached the old runaway equilibrium several times
     // over: at ~0.26 units/tick of inflow against (u - cap) x OVERSTACK_DECAY,
@@ -2843,12 +3210,12 @@ function suiteStandingOrders(d) {
     var peak = 0, sizingBreaches = [], prevSends = 0, checks = 0;
     for (var t = 0; t < 3000; t++) {
       fns.step(b.s);
-      var here = totalUnits(b.s.stations[rally].units);
+      var here = totalUnits(b.s.stations[dest].units);
       if (here > peak) peak = here;
 
       // THE SIZING INVARIANT, exact, checked on the ticks where a stream was
-      // actually sized — what is standing at the rally plus everything in the
-      // air must never have been allowed to exceed the ceiling.
+      // actually sized — what is standing at the destination plus everything in
+      // the air must never have been allowed to exceed the ceiling.
       //
       // Only on those ticks, and that is not a dodge. Growth runs before the
       // orders phase, so on a sweep tick the garrison read here is exactly the
@@ -2863,12 +3230,12 @@ function suiteStandingOrders(d) {
         checks++;
         var air = 0;
         for (i = 0; i < b.s.waves.length; i++) {
-          if (b.s.waves[i].to === rally) air += totalUnits(b.s.waves[i].units);
+          if (b.s.waves[i].to === dest) air += totalUnits(b.s.waves[i].units);
         }
-        if (here + air > cap * d.BAL.GROWTH_CAP_EPSILON + 1e-6) {
+        if (here + air > cap * _ordCeilMul(d) + 1e-6) {
           sizingBreaches.push('tick ' + b.s.tick + ': ' + here.toFixed(2) + ' + ' +
             air.toFixed(2) + ' in the air vs a ceiling of ' +
-            (cap * d.BAL.GROWTH_CAP_EPSILON).toFixed(2));
+            (cap * _ordCeilMul(d)).toFixed(2));
         }
       }
     }
@@ -2881,122 +3248,170 @@ function suiteStandingOrders(d) {
     // ~20x capacity — inflow of ~0.26 units/tick against a bleed of
     // (u - cap) x OVERSTACK_DECAY — so the gap between pass and fail here is
     // three orders of magnitude, not a tuning question.
-    assert(peak < cap * 1.15, 'the rally ran away past its capacity of ' + cap +
+    var ceil = cap * _ordCeilMul(d);
+    assert(peak < ceil * 1.15, 'the destination ran away past the ceiling of ' + ceil.toFixed(1) +
       ' — peak ' + peak.toFixed(1) + '. With no ceiling this settles near ' + (cap * 20) + '.');
-    assert(peak > cap * 0.9, 'VACUITY: the rally never approached its ceiling, so the ' +
+    assert(peak > ceil * 0.9, 'VACUITY: the destination never approached its ceiling, so the ' +
       'ceiling was never the thing that stopped it');
   });
 
   test('inbound standing waves count against headroom', function () {
-    // Three feeders that each fit on their own but together overshoot. Without
+    // Three sources that each fit on their own but together overshoot. Without
     // per-destination bookkeeping every one of them is correctly sized against
     // a headroom the other two are about to spend, and they bust the ceiling
-    // together — which is the shape of the last few sweeps before a rally fills.
+    // together — which is the shape of the last few sweeps before a destination
+    // fills.
     var b = _ordBoard(fns, d, 62, pid, 8);
-    var rally = d.POWERS[pid].capital;
-    var cap = d.STATIONS[rally].capacity;
-    var feeders = b.own.filter(function (s2) { return s2 !== rally; }).sort().slice(0, 3);
-    _ordSetOrders(b.s, pid, { });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [rally], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: feeders, order: 'feed' });
+    var dest = d.POWERS[pid].capital;
+    var cap = d.STATIONS[dest].capacity;
+    var sources = b.own.filter(function (s2) { return s2 !== dest; }).sort().slice(0, 3);
+    _ordLink(b.s, pid, sources, dest);
 
-    b.s.stations[rally].units = { infantry: 1, artillery: 0, armour: 0 };
-    var wants = feeders.map(function (sid) { return standingOrderSend(b.s, sid); });
+    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+    var wants = sources.map(function (sid) { return standingOrderSend(b.s, sid); });
     var total = wants[0] + wants[1] + wants[2];
     var mx = Math.max(wants[0], Math.max(wants[1], wants[2]));
-    assert(mx >= d.BAL.ORDERS.MIN_SEND, 'no feeder was willing to ship');
+    assert(mx >= d.BAL.ORDERS.MIN_SEND, 'no source was willing to ship');
     // Room for more than the largest single stream but less than all three.
     var room = Math.max(mx * 1.5, total * 0.6);
     assert(room < total, 'fixture headroom does not force an overshoot');
-    var ceiling = cap * d.BAL.GROWTH_CAP_EPSILON;
-    assert(ceiling - room > 0, 'fixture rally is too small for this construction');
-    b.s.stations[rally].units = { infantry: ceiling - room, artillery: 0, armour: 0 };
+    var ceiling = cap * _ordCeilMul(d);
+    assert(ceiling - room > 0, 'fixture destination is too small for this construction');
+    b.s.stations[dest].units = { infantry: ceiling - room, artillery: 0, armour: 0 };
 
     fns.step(b.s);            // tick 0 is a sweep tick
     var air = 0, shippers = 0;
     for (var i = 0; i < b.s.waves.length; i++) {
-      if (b.s.waves[i].to !== rally) continue;
+      if (b.s.waves[i].to !== dest) continue;
       air += totalUnits(b.s.waves[i].units);
       shippers++;
     }
-    assert(shippers >= 2, 'only ' + shippers + ' feeder(s) shipped — the aggregation this ' +
+    assert(shippers >= 2, 'only ' + shippers + ' source(s) shipped — the aggregation this ' +
       'test is about never happened');
-    assert(air <= room + 1e-6, 'three feeders collectively overshot the headroom: ' +
+    assert(air <= room + 1e-6, 'three sources collectively overshot the headroom: ' +
       air.toFixed(2) + ' into ' + room.toFixed(2) + ' of room');
     assert(air < total - 1e-6, 'VACUITY: everything they wanted fitted, so nothing was ' +
       'held back by the running total');
 
     // This is also the fixture where the per-send CLAMP is the thing doing the
-    // work rather than the per-sweep filter: the last feeder to be reached has
+    // work rather than the per-sweep filter: the last source to be reached has
     // room left, but less room than it wants, so it must ship a short stream
     // rather than a full one or be skipped. Asserted directly against what each
     // source said it was willing to send.
     var clampedOrSkipped = 0;
-    for (i = 0; i < feeders.length; i++) {
+    for (i = 0; i < sources.length; i++) {
       if (wants[i] < d.BAL.ORDERS.MIN_SEND) continue;
       var shipped = 0;
       for (var j = 0; j < b.s.waves.length; j++) {
-        if (b.s.waves[j].from === feeders[i]) shipped += totalUnits(b.s.waves[j].units);
+        if (b.s.waves[j].from === sources[i]) shipped += totalUnits(b.s.waves[j].units);
       }
       if (shipped < wants[i] - 1e-6) clampedOrSkipped++;
     }
-    assert(clampedOrSkipped > 0, 'VACUITY: no feeder shipped less than it wanted, so the ' +
+    assert(clampedOrSkipped > 0, 'VACUITY: no source shipped less than it wanted, so the ' +
       'clamp was never exercised — only the per-sweep headroom filter was');
   });
 
-  test('a further rally with room beats a nearer one without', function () {
-    // Rule 1's actual purpose, and the one thing the per-send clamp cannot do
-    // on its own: the CHOICE of destination has to see the ceiling, or a feeder
-    // picks the nearest rally, finds it full, and no-ops forever while a rally
-    // one hop further back sits empty.
+  test('a stream is CLAMPED to the room left, not skipped and not overshot', function () {
+    // THE CLAMP IN ISOLATION, and it needed its own fixture. Every other test
+    // in this block is satisfied by the per-sweep SKIP — a destination with less
+    // than MIN_SEND of room is dropped from the split entirely — so an
+    // implementation with the clamp deleted still passes them: the aggregate
+    // assertions are all of the form "no more than the room", and a source that
+    // is skipped ships nothing, which is also no more than the room. Measured:
+    // removing `want = share > room ? room : share` left the whole suite green.
+    // known-issues #8 exactly.
     //
-    // Run twice on the same fixture — once with the near rally full, once with
-    // it empty. The second run is the control: it proves the near rally really
-    // is the one the router prefers, so the first run's answer is the ceiling
-    // changing the choice rather than the geometry doing it.
-    var run = function (nearIsFull) {
-      var b = _ordBoard(fns, d, 64, pid, 10);
-      var path = _ordLongestOwnPath(b.s, pid, b.own);
-      assert(path && path.length >= 3, 'fixture has no multi-hop own-ground route');
-      var feeder = path[0], near = path[1], far = path[path.length - 1];
-      _ordSetOrders(b.s, pid, { });
-      applyCommand(b.s, { type: 'order', owner: pid, stations: [near, far], order: 'rally' });
-      applyCommand(b.s, { type: 'order', owner: pid, stations: [feeder], order: 'feed' });
-      b.s.stations[near].units = {
-        infantry: nearIsFull ? d.STATIONS[near].capacity : 1, artillery: 0, armour: 0,
-      };
-      b.s.stations[far].units = { infantry: 1, artillery: 0, armour: 0 };
-      fns.step(b.s);
-      var to = null;
-      for (var i = 0; i < b.s.waves.length; i++) if (b.s.waves[i].from === feeder) to = b.s.waves[i].to;
-      return { to: to, near: near, far: far, sends: b.s.orderStats.sends };
-    };
+    // The separating case is a destination with room in the gap: MORE than
+    // MIN_SEND, so the edge is not skipped, and LESS than the source wants, so
+    // the only correct answer is the room itself.
+    var b = _ordBoard(fns, d, 84, pid, 8);
+    var dest = d.POWERS[pid].capital;
+    var bySize = b.own.filter(function (x) { return x !== dest; }).sort(function (x, y) {
+      var c = d.STATIONS[y].capacity - d.STATIONS[x].capacity;
+      return c !== 0 ? c : (x < y ? -1 : 1);
+    });
+    var from = bySize[0];
+    _ordLink(b.s, pid, [from], dest);
 
-    var control = run(false);
-    assertEqual(control.to, control.near,
-      'CONTROL FAILED: with both rallies empty the stream did not go to the NEARER one, ' +
-      'so this fixture cannot show the ceiling changing the choice');
+    growthTick(b.s);                      // read the numbers the sweep will see
+    var want = standingOrderSend(b.s, from);
+    var room = want * 0.5;
+    assert(room > O.MIN_SEND, 'fixture cannot separate the clamp from the skip: the ' +
+      'source wants ' + want.toFixed(2) + ', so half of it is under MIN_SEND');
 
-    var full = run(true);
-    assert(full.sends > 0, 'the feeder no-opped instead of finding the rally with room');
-    assertEqual(full.to, full.far,
-      'the stream went to the full rally at ' + full.near + ' instead of the one with room at ' +
-      full.far);
+    var ceiling = d.STATIONS[dest].capacity * _ordCeilMul(d);
+    b.s.stations[dest].units = { infantry: ceiling - room, artillery: 0, armour: 0 };
+
+    var nx = standingOrderNext(b.s, from);
+    assertEqual(nx.blocked, null, 'the edge was skipped rather than clamped');
+    assertClose(nx.units, room, 1e-9,
+      'a stream into a destination with ' + room.toFixed(2) + ' of room shipped ' +
+      nx.units.toFixed(2) + ' — it wanted ' + want.toFixed(2) +
+      '. Without the clamp this is the full want and the ceiling is busted.');
+
+    // ...and the sweep really does it, not just the prediction.
+    ordersTick(b.s);
+    var got = _ordShipped(b.s, from);
+    assertEqual(got.n, 1, 'the sweep did not ship exactly one stream');
+    assertClose(got.total, room, 1e-9, 'the sweep shipped a different amount from the plan');
+    assert(totalUnits(b.s.stations[dest].units) + got.total <= ceiling + 1e-6,
+      'the send overshot the destination ceiling it was sized against');
   });
 
-  test('every seed full is a no-op, and the feed cities keep growing', function () {
+  test('setStationSupply sorts, dedupes, and refuses a city as its own destination', function () {
+    // core/state.js is the one door both the command layer and the sweep write
+    // through, and three of its guarantees are load-bearing somewhere the tests
+    // above cannot see them:
+    //
+    //   SORTED   the sweep issues one applyCommand per entry, in list order, and
+    //            each is sized against what the previous one left. Two runs of
+    //            one seed must therefore walk the list in the same order or wave
+    //            ids diverge and determinism is gone.
+    //   NO SELF  sim/movement.js drops the `to === from` case entirely on the
+    //            strength of this, rather than carrying a blocked reason no
+    //            fixture could reach. A self-edge would put a zero-hop send in
+    //            the sweep that applyCommand then rejects, and the plan would be
+    //            promising units that never move.
+    //   DEDUPED  a duplicate entry would take two shares of the even split.
+    //
+    // Asserted directly because sim/commands.js validates the same things one
+    // layer up, so nothing reachable through applyCommand can distinguish these
+    // from their absence — measured: removing either guard left the suite green.
+    var b = _ordBoard(fns, d, 85, pid, 6);
+    var self = b.own[0];
+    var rest = b.own.filter(function (x) { return x !== self; }).sort();
+    assert(rest.length >= 3, 'fixture needs at least three destinations');
+
+    // Deliberately hostile input: reverse order, a duplicate, the station
+    // itself, an id that is not on the board, and a non-string.
+    var reversed = rest.slice().reverse();
+    setStationSupply(b.s, self, reversed.concat([reversed[0], self, 'no-such-city', 42, null]));
+
+    assertEqual((b.s.stations[self].supplyTo || []).join(','), rest.join(','),
+      'setStationSupply did not return a sorted, deduped, self-free list');
+
+    // Idempotent: writing the same set again is not a change.
+    assertEqual(setStationSupply(b.s, self, rest.slice().reverse()), false,
+      'rewriting an identical list reported a change');
+    assertEqual(setStationSupply(b.s, self, rest.slice(0, 1)), true,
+      'shrinking the list did not report a change');
+    assertEqual(setStationSupply(b.s, self, null), true, 'clearing did not report a change');
+    assertEqual((b.s.stations[self].supplyTo || []).length, 0, 'clearing left lines behind');
+  });
+
+  test('nowhere with room is a no-op, and the sources keep growing', function () {
     var b = _ordBoard(fns, d, 63, pid, 8);
-    var rally = d.POWERS[pid].capital;
-    var orders = {}, i;
-    for (i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
-    // Every station, rally included, stuffed to capacity.
+    var dest = d.POWERS[pid].capital;
+    var i;
+    _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
     for (i = 0; i < b.own.length; i++) {
       b.s.stations[b.own[i]].units = {
         infantry: d.STATIONS[b.own[i]].capacity * 0.6, artillery: 0, armour: 0,
       };
     }
-    b.s.stations[rally].units = { infantry: d.STATIONS[rally].capacity, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = {
+      infantry: d.STATIONS[dest].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
+    };
 
     var before = {};
     for (i = 0; i < b.own.length; i++) before[b.own[i]] = totalUnits(b.s.stations[b.own[i]].units);
@@ -3006,41 +3421,83 @@ function suiteStandingOrders(d) {
     var stalled = [];
     for (i = 0; i < b.own.length; i++) {
       var sid = b.own[i];
-      if (sid === rally) continue;
+      if (sid === dest) continue;
       if (totalUnits(b.s.stations[sid].units) <= before[sid]) stalled.push(sid);
     }
-    assertNone(stalled, 'a feed city with nowhere to ship did not keep growing');
+    assertNone(stalled, 'a source with nowhere to ship did not keep growing');
   });
 
   // -------------------------------------------------------------------------
-  test('an unreachable rally is a no-op, not an error', function () {
+  test('an unreachable destination is a no-op, not an error', function () {
     var b = _ordBoard(fns, d, 48, pid, 8);
     var path = _ordLongestOwnPath(b.s, pid, b.own);
-    var from = path[0], rally = path[path.length - 1];
-    _ordSetOrders(b.s, pid, { });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [rally], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [from], order: 'feed' });
+    var from = path[0], dest = path[path.length - 1];
+    _ordLink(b.s, pid, [from], dest);
     // Cut the corridor: every intermediate goes to another power.
     for (var i = 1; i < path.length - 1; i++) _setOwner(b.s, path[i], 'fra');
     _run(fns, b.s, 200);
-    assertEqual(b.s.orderStats.fights, 0, 'a cut-off feed city started a fight');
+    assertEqual(b.s.orderStats.fights, 0, 'a cut-off source started a fight');
     // Asserted on SENDS, not on the garrison: cutting the corridor can also cut
     // the blob off from its capital, and disconnection decay would then shrink
-    // the garrison for a reason that has nothing to do with standing orders.
+    // the garrison for a reason that has nothing to do with supply lines.
     assertEqual(b.s.orderStats.sends, 0,
-      'a feed city with no legal route to its rally shipped units anyway');
-    assertEqual(b.s.waves.length, 0, 'a cut-off feed city put waves on the board');
+      'a source with no legal route to its destination shipped units anyway');
+    assertEqual(b.s.waves.length, 0, 'a cut-off source put waves on the board');
+    // The EDGE SURVIVES. Unreachable is a fact about the board this turn, not
+    // about the player's intent, and a corridor that reopens must resume on its
+    // own — deleting the line on a temporary cut would silently undo their work.
+    assertEqual((b.s.stations[from].supplyTo || []).join(','), dest,
+      'a temporarily unreachable destination was dropped from the supply list');
   });
 
   // -------------------------------------------------------------------------
-  test('an order does not survive a change of owner', function () {
+  test('supply lines do not survive a change of owner', function () {
     var b = _ordBoard(fns, d, 49, pid, 4);
-    var sid = b.own[0];
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [sid], order: 'feed' });
-    assertEqual(b.s.stations[sid].order, 'feed', 'the order was not set');
+    var sid = b.own[0], other = b.own[1];
+    _ordLink(b.s, pid, [sid], other);
+    assertEqual((b.s.stations[sid].supplyTo || []).join(','), other, 'the line was not drawn');
     _setOwner(b.s, sid, 'fra');
-    assertEqual(b.s.stations[sid].order, 'hold',
-      "a captured station kept the previous owner's standing order");
+    assertEqual((b.s.stations[sid].supplyTo || []).length, 0,
+      "a captured station kept the previous owner's supply lines");
+  });
+
+  // -------------------------------------------------------------------------
+  test('a lost destination drops that edge and ONLY that edge', function () {
+    // The rule that stops a supply line becoming an attack order the player
+    // scheduled and forgot. Per edge, because a city supplying three others that
+    // loses one of them must keep the other two — clearing the list would
+    // silently cancel work on news the player may not have seen.
+    var b = _ordBoard(fns, d, 66, pid, 8);
+    var from = d.POWERS[pid].capital;
+    var others = b.own.filter(function (x) { return x !== from; });
+    var keep = others[0], lose = others[1];
+    _ordLink(b.s, pid, [from], keep);
+    _ordLink(b.s, pid, [from], lose);
+    assertEqual((b.s.stations[from].supplyTo || []).length, 2, 'the fixture drew ' +
+      (b.s.stations[from].supplyTo || []).length + ' lines, not 2');
+
+    _setOwner(b.s, lose, 'fra');
+
+    // BEFORE the sweep: the edge is still stored, and the planner already
+    // refuses to act on it and says why. That gap is deliberate and bounded —
+    // see the LOST DESTINATION block in sim/movement.js.
+    var pre = standingOrderNext(b.s, from);
+    var lostEdge = null;
+    for (var i = 0; i < pre.edges.length; i++) if (pre.edges[i].target === lose) lostEdge = pre.edges[i];
+    assert(!!lostEdge, 'the plan dropped the lost edge instead of reporting it');
+    assertEqual(lostEdge.blocked, 'target-lost', 'a lost destination was not reported as such');
+    assertEqual(lostEdge.units, 0, 'a lost destination was allotted units');
+
+    _run(fns, b.s, O.INTERVAL + 1);
+
+    assertEqual((b.s.stations[from].supplyTo || []).join(','), keep,
+      'the sweep did not drop exactly the lost edge');
+    assertEqual(b.s.orderStats.fights, 0, 'a line at ground its owner lost started a fight');
+    var atEnemy = [];
+    for (i = 0; i < b.s.waves.length; i++) {
+      if (b.s.waves[i].to === lose) atEnemy.push(b.s.waves[i].from);
+    }
+    assertNone(atEnemy, 'a standing wave was sent at a city the enemy now holds');
   });
 
   // -------------------------------------------------------------------------
@@ -3061,27 +3518,117 @@ function suiteStandingOrders(d) {
       'the control command was rejected for an unrelated reason: ' + manual.reason);
   });
 
-  // -------------------------------------------------------------------------
-  test('the order command validates, and rejects per station', function () {
+  // =========================================================================
+  // THE ORDER COMMAND. A toggle, decided for the GROUP rather than per station,
+  // the way bold works on mixed text — which is what makes a repeated gesture
+  // idempotent and gives the player cancel for free.
+  // =========================================================================
+
+  test('the order command validates its destination', function () {
     var b = _ordBoard(fns, d, 51, pid, 4);
     var foreign = null;
     for (var i = 0; i < STATION_IDS.length; i++) {
       if (b.s.stations[STATION_IDS[i]].owner !== pid) { foreign = STATION_IDS[i]; break; }
     }
-    var res = fns.apply(b.s, { type: 'order', owner: pid, stations: [b.own[0], foreign], order: 'rally' });
-    assert(res.ok, 'a mixed order list failed wholesale instead of per station');
-    assertEqual(res.accepted.length, 1, 'the foreign station was ordered anyway');
-    assertEqual(res.rejected[0].reason, 'not-owned', 'wrong per-station rejection');
-    assertEqual(b.s.stations[b.own[0]].order, 'rally', 'the owned station was not set');
-    assertEqual(b.s.stations[foreign].order, 'hold', 'a foreign station took an order');
 
-    var bad = fns.apply(b.s, { type: 'order', owner: pid, stations: [b.own[0]], order: 'attack' });
-    assertEqual(bad.reason, 'unknown-order', 'an unknown order was not rejected');
-    assertEqual(b.s.stations[b.own[0]].order, 'rally', 'a bad order changed state');
+    // Whole-command failures. If the destination is wrong then no source could
+    // have saved it, so rejecting the sources one at a time would report the
+    // same fact ten times and bury the reason.
+    var unknown = fns.apply(b.s, {
+      type: 'order', owner: pid, stations: [b.own[0]], target: 'no-such-city',
+    });
+    assertEqual(unknown.reason, 'unknown-target', 'an unknown destination was not rejected');
+
+    var enemy = fns.apply(b.s, {
+      type: 'order', owner: pid, stations: [b.own[0]], target: foreign,
+    });
+    assertEqual(enemy.reason, 'target-not-owned',
+      'a supply line at ground its owner does not hold was accepted');
+    assertEqual((b.s.stations[b.own[0]].supplyTo || []).length, 0,
+      'a rejected order changed state anyway');
+
+    // Per-station rejections. One bad entry must not cost the rest of the list:
+    // marqueeing the front and clicking one of the cities in it is the normal
+    // way to say "everyone else supply this one".
+    var mixed = fns.apply(b.s, {
+      type: 'order', owner: pid, stations: [b.own[0], b.own[1], foreign], target: b.own[1],
+    });
+    assert(mixed.ok, 'a mixed list failed wholesale instead of per station');
+    assertEqual((b.s.stations[b.own[0]].supplyTo || []).join(','), b.own[1],
+      'the good station did not get its line');
+    assertEqual((b.s.stations[b.own[1]].supplyTo || []).length, 0,
+      'a station was made to supply itself');
+    assertEqual((b.s.stations[foreign].supplyTo || []).length, 0,
+      'a foreign station took a supply line');
+    var why = {};
+    for (i = 0; i < mixed.rejected.length; i++) why[mixed.rejected[i].reason] = true;
+    assert(why['self-target'], 'the destination inside the list was not rejected self-target');
+    assert(why['not-owned'], 'the foreign station was not rejected not-owned');
+  });
+
+  test('toggling the same edge twice is a no-op — that is the cancel gesture', function () {
+    var b = _ordBoard(fns, d, 53, pid, 4);
+    var from = b.own[0], to = b.own[1];
+    applyCommand(b.s, { type: 'order', owner: pid, stations: [from], target: to });
+    assertEqual((b.s.stations[from].supplyTo || []).join(','), to, 'the line was not drawn');
+    applyCommand(b.s, { type: 'order', owner: pid, stations: [from], target: to });
+    assertEqual((b.s.stations[from].supplyTo || []).length, 0,
+      'toggling the same destination again did not remove the line');
+    // ...and a third press puts it back, so the gesture is a toggle rather than
+    // a one-way clear that happens to look like one.
+    applyCommand(b.s, { type: 'order', owner: pid, stations: [from], target: to });
+    assertEqual((b.s.stations[from].supplyTo || []).join(','), to, 'the toggle is one-way');
+  });
+
+  test('a group toggle with mixed prior state ADDS to all rather than flipping each', function () {
+    // The bold-on-mixed-text rule. Flipping each station independently would
+    // make a group gesture do two different things at once, and the player would
+    // have no way to predict which — the same complaint that killed the inferred
+    // rally.
+    var b = _ordBoard(fns, d, 54, pid, 6);
+    var to = b.own[0];
+    var group = b.own.filter(function (x) { return x !== to; }).slice(0, 3);
+    applyCommand(b.s, { type: 'order', owner: pid, stations: [group[0]], target: to });
+    assertEqual((b.s.stations[group[0]].supplyTo || []).join(','), to, 'fixture setup failed');
+
+    applyCommand(b.s, { type: 'order', owner: pid, stations: group, target: to });
+    var missing = group.filter(function (sid) {
+      return (b.s.stations[sid].supplyTo || []).indexOf(to) < 0;
+    });
+    assertNone(missing, 'a group toggle over mixed state flipped stations individually ' +
+      'instead of adding the edge to all of them');
+
+    // Now every station has it, so the same gesture removes it from all.
+    applyCommand(b.s, { type: 'order', owner: pid, stations: group, target: to });
+    var kept = group.filter(function (sid) {
+      return (b.s.stations[sid].supplyTo || []).indexOf(to) >= 0;
+    });
+    assertNone(kept, 'a group toggle over uniform state did not clear the edge');
+  });
+
+  test('a null destination clears every line on the listed stations and nothing else', function () {
+    var b = _ordBoard(fns, d, 55, pid, 6);
+    var to = b.own[0];
+    var group = b.own.filter(function (x) { return x !== to; });
+    _ordLink(b.s, pid, group, to);
+    var untouched = group[group.length - 1];
+
+    applyCommand(b.s, {
+      type: 'order', owner: pid,
+      stations: group.filter(function (x) { return x !== untouched; }),
+      target: null,
+    });
+
+    var stillSet = group.filter(function (sid) {
+      return sid !== untouched && (b.s.stations[sid].supplyTo || []).length > 0;
+    });
+    assertNone(stillSet, 'a clear left supply lines behind');
+    assertEqual((b.s.stations[untouched].supplyTo || []).join(','), to,
+      'a clear reached a station that was not in the list');
   });
 
   // -------------------------------------------------------------------------
-  test('determinism — same seed, two runs, identical state, with orders active', function () {
+  test('determinism — same seed, two runs, identical state, with supply lines active', function () {
     var run = function () {
       var s = newGame(777);               // AI ON: orders and AI must interleave
       for (var t = 0; t < 1500 && !s.winner; t++) {
@@ -3089,15 +3636,14 @@ function suiteStandingOrders(d) {
           for (var p = 0; p < POWER_IDS.length; p++) {
             var q = POWER_IDS[p];
             if (q === 'neutral' || !s.powers[q] || s.powers[q].alive === false) continue;
-            var cap = POWERS[q].capital, feeds = [];
+            var cap = POWERS[q].capital;
+            if (!s.stations[cap] || s.stations[cap].owner !== q) continue;
+            var srcs = [];
             for (var i = 0; i < STATION_IDS.length; i++) {
               var sid = STATION_IDS[i];
-              if (s.stations[sid].owner === q && sid !== cap) feeds.push(sid);
+              if (s.stations[sid].owner === q && sid !== cap) srcs.push(sid);
             }
-            if (s.stations[cap] && s.stations[cap].owner === q) {
-              applyCommand(s, { type: 'order', owner: q, stations: [cap], order: 'rally' });
-            }
-            if (feeds.length) applyCommand(s, { type: 'order', owner: q, stations: feeds, order: 'feed' });
+            if (srcs.length) _ordLink(s, q, srcs, cap);
           }
         }
         stepTick(s);
@@ -3106,7 +3652,7 @@ function suiteStandingOrders(d) {
     };
     var a = run(), b = run();
     assertEqual(a.length, b.length, 'two runs from the same seed produced different-sized states');
-    assertEqual(a === b, true, 'two runs from the same seed diverged with orders active');
+    assertEqual(a === b, true, 'two runs from the same seed diverged with supply lines active');
   });
 
   // =========================================================================
@@ -3115,13 +3661,13 @@ function suiteStandingOrders(d) {
   // standingOrderSend() is the SOURCE'S WILLINGNESS and the readout was showing
   // it. Once the headroom ceiling landed those stopped being the same number,
   // and the rail advertised "6.4 units next sweep" every frame of a game in
-  // which a full rally took exactly none of them. A promise that never happens,
-  // with nothing on screen saying why, is worse than no number.
+  // which a full destination took exactly none of them. A promise that never
+  // happens, with nothing on screen saying why, is worse than no number.
   //
-  // standingOrderNext() answers the other question — what really leaves, where
-  // it goes, and why it does not — by sharing the sweep's own planner. These
-  // tests are what makes "shares" mean something: the first proves the two
-  // agree on every sweep of a long run rather than merely being written to.
+  // standingOrderNext() answers the other question — what really leaves, down
+  // which line, and why it does not — by sharing the sweep's own planner. These
+  // tests are what makes "shares" mean something: the first proves the two agree
+  // on every sweep of a long run rather than merely being written to.
   // =========================================================================
 
   if (typeof standingOrderNext !== 'function') {
@@ -3140,42 +3686,61 @@ function suiteStandingOrders(d) {
       'the tick phase order changed; this test drives the phases by hand');
 
     var b = _ordBoard(fns, d, 65, pid, 10);
-    var rally = d.POWERS[pid].capital;
-    var orders = {}, i;
-    for (i = 0; i < b.own.length; i++) orders[b.own[i]] = b.own[i] === rally ? 'rally' : 'feed';
-    _ordSetOrders(b.s, pid, orders);
-    // Emptied so the early sweeps ship and the later ones do not: the rally
-    // fills as it is fed and the same feeders go from streaming to blocked
-    // inside one run, which is what makes the vacuity guard below satisfiable
-    // without two fixtures.
-    b.s.stations[rally].units = { infantry: 1, artillery: 0, armour: 0 };
+    var dest = d.POWERS[pid].capital;
+    var others = b.own.filter(function (x) { return x !== dest; });
+    var i;
+    _ordLink(b.s, pid, others, dest);
+    // A SECOND destination on half of them, so the many-to-many arithmetic is
+    // under the same exactness assertion as the single-line case rather than
+    // being checked only by the small fixtures above.
+    var second = others[0];
+    _ordLink(b.s, pid, others.slice(1), second);
+    // Emptied so the early sweeps ship and the later ones do not: the
+    // destinations fill as they are fed and the same sources go from streaming
+    // to blocked inside one run, which is what makes the vacuity guard below
+    // satisfiable without two fixtures.
+    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[second].units = { infantry: 1, artillery: 0, armour: 0 };
 
     var s = b.s;
-    var checks = 0, ship = 0, block = 0, reasons = {};
-    var mismatch = [], destWrong = [], drainWrong = [], planWrong = [];
+    var checks = 0, ship = 0, block = 0, reasons = {}, multi = 0;
+    var mismatch = [], destWrong = [], drainWrong = [], planWrong = [], edgeWrong = [];
+
+    // Both destinations are spent at the end of every tick, standing in for a
+    // front that is using what it receives. Without it they fill in a handful of
+    // sweeps and the whole run is blocked — which would make this a test of the
+    // blocked path only, and the vacuity guard below would (correctly) fail.
+    // Applied AFTER every phase, so the prediction is always taken on the same
+    // board the sweep then acts on.
+    var spend = function () {
+      s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+      s.stations[second].units = { infantry: 1, artillery: 0, armour: 0 };
+    };
 
     for (var t = 0; t < 1400 && !s.winner; t++) {
-      if (s.tick % O.INTERVAL !== 0) { fns.step(s); continue; }
+      if (s.tick % O.INTERVAL !== 0) { fns.step(s); spend(); continue; }
 
       growthTick(s);                                    // phase 1
 
-      var feeds = [], sid;
+      var sources = [], sid;
       for (i = 0; i < STATION_IDS.length; i++) {
         sid = STATION_IDS[i];
-        if (s.stations[sid].owner === pid && s.stations[sid].order === 'feed') feeds.push(sid);
+        if (s.stations[sid].owner === pid && (s.stations[sid].supplyTo || []).length) sources.push(sid);
       }
       var pred = {}, before = {};
-      for (i = 0; i < feeds.length; i++) {
-        pred[feeds[i]] = standingOrderNext(s, feeds[i]);
-        before[feeds[i]] = totalUnits(s.stations[feeds[i]].units);
+      for (i = 0; i < sources.length; i++) {
+        pred[sources[i]] = standingOrderNext(s, sources[i]);
+        before[sources[i]] = totalUnits(s.stations[sources[i]].units);
+        if (pred[sources[i]].edges.length > 1) multi++;
       }
       // The bulk accessor two renderers actually call must say the same thing
       // as the per-station one. It shares the planner, so this cannot drift —
       // which is exactly why it is asserted rather than assumed.
       var bulk = standingOrderPlan(s, pid);
-      for (i = 0; i < feeds.length; i++) {
-        var bf = feeds[i], bp = bulk[bf], sp = pred[bf];
-        if (!bp || bp.units !== sp.units || bp.target !== sp.target || bp.blocked !== sp.blocked) {
+      for (i = 0; i < sources.length; i++) {
+        var bf = sources[i], bp = bulk[bf], sp = pred[bf];
+        if (!bp || bp.units !== sp.units || bp.target !== sp.target || bp.blocked !== sp.blocked ||
+            bp.edges.length !== sp.edges.length) {
           planWrong.push('tick ' + s.tick + ' ' + bf + ': plan ' + JSON.stringify(bp) +
             ' vs next ' + JSON.stringify(sp));
         }
@@ -3191,27 +3756,40 @@ function suiteStandingOrders(d) {
         var w = s.waves[i];
         if (w.id < firstNew) continue;
         got[w.from] = (got[w.from] || 0) + totalUnits(w.units);
-        gotTo[w.from] = w.to;
+        (gotTo[w.from] || (gotTo[w.from] = {}))[w.to] = totalUnits(w.units);
       }
 
-      for (i = 0; i < feeds.length; i++) {
-        var f = feeds[i], p = pred[f], sent = got[f] || 0;
+      for (i = 0; i < sources.length; i++) {
+        var f = sources[i], p = pred[f], sent = got[f] || 0;
         checks++;
         if (p.units > 0) ship++;
         else { block++; reasons[p.blocked] = (reasons[p.blocked] || 0) + 1; }
 
-        // The claim, stated three ways. Same number, same destination, and the
-        // source really lost exactly what was predicted — the last one because
-        // "a wave of the right size exists" and "this city paid for it" are
-        // different facts and a planner could get one right and the other wrong.
+        // The claim, stated four ways. Same total, same split by destination,
+        // and the source really lost exactly what was predicted — the last one
+        // because "waves of the right size exist" and "this city paid for them"
+        // are different facts and a planner could get one right and the other
+        // wrong.
         var tol = 1e-9 * Math.max(1, sent);
         if (Math.abs(p.units - sent) > tol) {
           mismatch.push('tick ' + s.tick + ' ' + f + ': predicted ' + p.units.toFixed(6) +
             ', shipped ' + sent.toFixed(6) + ' (blocked=' + p.blocked + ')');
         }
-        if (sent > 0 && gotTo[f] !== p.target) {
-          destWrong.push('tick ' + s.tick + ' ' + f + ': predicted -> ' + p.target +
-            ', went -> ' + gotTo[f]);
+        var perDest = gotTo[f] || {};
+        for (var k = 0; k < p.edges.length; k++) {
+          var ed = p.edges[k];
+          var real = perDest[ed.target] || 0;
+          if (Math.abs(ed.units - real) > 1e-9 * Math.max(1, real)) {
+            edgeWrong.push('tick ' + s.tick + ' ' + f + '->' + ed.target + ': predicted ' +
+              ed.units.toFixed(6) + ', shipped ' + real.toFixed(6) +
+              ' (blocked=' + ed.blocked + ')');
+          }
+        }
+        for (var to2 in perDest) {
+          var known = false;
+          for (k = 0; k < p.edges.length; k++) if (p.edges[k].target === to2) known = true;
+          if (!known) destWrong.push('tick ' + s.tick + ' ' + f + ' shipped to ' + to2 +
+            ', which the plan never mentioned');
         }
         var drained = before[f] - totalUnits(s.stations[f].units);
         if (Math.abs(drained - sent) > tol) {
@@ -3222,10 +3800,12 @@ function suiteStandingOrders(d) {
 
       movementTick(s); combatTick(s); relationsTick(s); victoryTick(s);
       s.tick++;
+      spend();
     }
 
     assertNone(mismatch, 'standingOrderNext disagreed with what the sweep shipped');
-    assertNone(destWrong, 'standingOrderNext named the wrong destination');
+    assertNone(edgeWrong, 'standingOrderNext got a per-destination share wrong');
+    assertNone(destWrong, 'the sweep shipped somewhere the plan never named');
     assertNone(drainWrong, 'the source did not pay exactly what was predicted');
     assertNone(planWrong, 'standingOrderPlan disagreed with standingOrderNext');
 
@@ -3239,6 +3819,8 @@ function suiteStandingOrders(d) {
       'shipping path was barely exercised');
     assert(block > 20, 'VACUITY: only ' + block + ' predictions were blocked, so the case ' +
       'this function exists for was barely exercised');
+    assert(multi > 20, 'VACUITY: only ' + multi + ' predictions covered a source with more ' +
+      'than one destination, so the split arithmetic was barely exercised');
     assert(Object.keys(reasons).length > 0, 'VACUITY: no blocked reason was ever produced');
   });
 
@@ -3246,49 +3828,54 @@ function suiteStandingOrders(d) {
   test('every blocked reason is reachable — one fixture each', function () {
     var seen = {};
     var note = function (nx) { seen[nx.blocked] = (seen[nx.blocked] || 0) + 1; return nx; };
+    var edgeReason = function (nx, to) {
+      for (var k = 0; k < nx.edges.length; k++) {
+        if (nx.edges[k].target === to) { seen[nx.edges[k].blocked] = 1; return nx.edges[k].blocked; }
+      }
+      return null;
+    };
     var cap = d.POWERS[pid].capital;
-    var i, sid, b, feeders;
+    var i, b, sources;
 
-    // no-order — a station on `hold`, and a rally, which is a sink and never
-    // ships. Both must read as "this station has no feed order", not as zero.
+    // no-order — a city that supplies nowhere. Must read as "this station has
+    // no supply lines", not as a zero that looks like a stalled one.
     b = _ordBoard(fns, d, 70, pid, 6);
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [cap], order: 'rally' });
-    assertEqual(note(standingOrderNext(b.s, cap)).blocked, 'no-order', 'a rally did not read as no-order');
-    var held = b.own.filter(function (x) { return x !== cap; })[0];
-    assertEqual(note(standingOrderNext(b.s, held)).blocked, 'no-order', 'a hold station did not read as no-order');
+    assertEqual(note(standingOrderNext(b.s, cap)).blocked, 'no-order',
+      'a city with no supply lines did not read as no-order');
 
-    // destination-full — THE LIVE REPRO. Feeders willing, rally at its ceiling.
+    // destination-full — THE LIVE REPRO. Sources willing, destination at its
+    // ceiling.
     b = _ordBoard(fns, d, 71, pid, 7);
-    feeders = b.own.filter(function (x) { return x !== cap; });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [cap], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: feeders, order: 'feed' });
-    b.s.stations[cap].units = { infantry: d.STATIONS[cap].capacity, artillery: 0, armour: 0 };
+    sources = b.own.filter(function (x) { return x !== cap; });
+    _ordLink(b.s, pid, sources, cap);
+    b.s.stations[cap].units = {
+      infantry: d.STATIONS[cap].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
+    };
     var willing = 0, sawFull = 0;
-    for (i = 0; i < feeders.length; i++) {
-      if (standingOrderSend(b.s, feeders[i]) > 0) willing++;
-      var nx = note(standingOrderNext(b.s, feeders[i]));
+    for (i = 0; i < sources.length; i++) {
+      if (standingOrderSend(b.s, sources[i]) > 0) willing++;
+      var nx = note(standingOrderNext(b.s, sources[i]));
       if (nx.blocked === 'destination-full') {
         sawFull++;
-        assertEqual(nx.units, 0, feeders[i] + ' reported units against a full rally');
-        assertEqual(nx.target, cap, 'the blocked feeder did not name the rally that is full');
+        assertEqual(nx.units, 0, sources[i] + ' reported units against a full destination');
+        assertEqual(nx.target, cap, 'the blocked source did not name the city that is full');
       }
     }
     // The control that makes this the BUG and not just a fixture: the old
     // readout number is non-zero on exactly the stations the new one says ship
     // nothing. Without this the test would pass against a function that always
     // returned 0.
-    assert(willing >= 3, 'VACUITY: only ' + willing + ' feeders were WILLING to ship, so ' +
+    assert(willing >= 3, 'VACUITY: only ' + willing + ' sources were WILLING to ship, so ' +
       'standingOrderSend and standingOrderNext were never actually in disagreement');
-    assert(sawFull >= 3, 'only ' + sawFull + ' feeders reported destination-full');
+    assert(sawFull >= 3, 'only ' + sawFull + ' sources reported destination-full');
 
-    // at-keep-floor — a feeder sitting exactly on its floor, with room at the
-    // rally so nothing else can be the reason.
+    // at-keep-floor — a source sitting exactly on its floor, with room at the
+    // destination so nothing else can be the reason.
     b = _ordBoard(fns, d, 72, pid, 7);
-    feeders = b.own.filter(function (x) { return x !== cap; });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [cap], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: feeders, order: 'feed' });
+    sources = b.own.filter(function (x) { return x !== cap; });
+    _ordLink(b.s, pid, sources, cap);
     b.s.stations[cap].units = { infantry: 1, artillery: 0, armour: 0 };
-    var floored = feeders[0];
+    var floored = sources[0];
     b.s.stations[floored].units = {
       infantry: d.STATIONS[floored].capacity * O.KEEP_FLOOR, artillery: 0, armour: 0,
     };
@@ -3304,39 +3891,33 @@ function suiteStandingOrders(d) {
     assertEqual(note(standingOrderNext(b.s, floored)).blocked, 'below-min-send',
       floored + ' just above its floor did not report below-min-send');
 
-    // unreachable — a rally cut off by ground another power holds.
+    // unreachable — a destination cut off by ground another power holds.
     b = _ordBoard(fns, d, 73, pid, 8);
     var path = _ordLongestOwnPath(b.s, pid, b.own);
     assert(path && path.length >= 3, 'fixture has no multi-hop own-ground route');
     var from = path[0], far = path[path.length - 1];
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [far], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [from], order: 'feed' });
+    _ordLink(b.s, pid, [from], far);
     b.s.stations[far].units = { infantry: 1, artillery: 0, armour: 0 };
     for (i = 1; i < path.length - 1; i++) _setOwner(b.s, path[i], 'fra');
     assertEqual(note(standingOrderNext(b.s, from)).blocked, 'unreachable',
-      'a feed city cut off from its only rally did not report unreachable');
+      'a source cut off from its only destination did not report unreachable');
 
-    // already-there — the no-rally fallback, on a power whose single city is
-    // itself the front. There is nowhere to ship to because this IS the place.
-    b = _ordBoard(fns, d, 74, pid, 0);
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [cap], order: 'feed' });
-    var only = note(standingOrderNext(b.s, cap));
-    assertEqual(only.blocked, 'already-there', 'a lone front-line feed city did not report already-there');
-    assertEqual(only.target, cap, 'already-there did not name itself');
-
-    // no-seed — no rally set AND no front to fall back to, which needs a power
-    // that holds every station on the board and therefore borders nothing.
-    b = _ordBoard(fns, d, 75, pid, 6);
-    for (i = 0; i < STATION_IDS.length; i++) _setOwner(b.s, STATION_IDS[i], pid);
-    applyCommand(b.s, { type: 'order', owner: pid, stations: STATION_IDS.slice(), order: 'feed' });
-    assertEqual(note(standingOrderNext(b.s, STATION_IDS[0])).blocked, 'no-seed',
-      'a power that borders nothing and holds no rally did not report no-seed');
+    // target-lost — the destination has changed hands and the sweep has not run
+    // yet. Reported per edge and named, so a panel can say which city went.
+    b = _ordBoard(fns, d, 74, pid, 6);
+    var others = b.own.filter(function (x) { return x !== cap; });
+    _ordLink(b.s, pid, [cap], others[0]);
+    _setOwner(b.s, others[0], 'fra');
+    var lost = note(standingOrderNext(b.s, cap));
+    assertEqual(lost.blocked, 'target-lost', 'a destination that changed hands did not report target-lost');
+    assertEqual(lost.target, others[0], 'target-lost did not name the city that was lost');
+    assertEqual(edgeReason(lost, others[0]), 'target-lost', 'the edge did not carry the reason');
 
     // Every reason the sim can emit has now been produced by a fixture. A
     // reason nothing can reach is either dead code or a lie about the sim, and
     // this is the assertion that stops one being added quietly.
     var expected = ['no-order', 'destination-full', 'at-keep-floor', 'below-min-send',
-                    'unreachable', 'already-there', 'no-seed'];
+                    'unreachable', 'target-lost'];
     var unreached = [];
     for (i = 0; i < expected.length; i++) {
       if (!seen[expected[i]]) unreached.push(expected[i]);
@@ -3348,9 +3929,7 @@ function suiteStandingOrders(d) {
   test('standingOrderNext is pure — safe to call every frame', function () {
     var b = _ordBoard(fns, d, 76, pid, 8);
     var cap = d.POWERS[pid].capital;
-    var feeders = b.own.filter(function (x) { return x !== cap; });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [cap], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: feeders, order: 'feed' });
+    _ordLink(b.s, pid, b.own.filter(function (x) { return x !== cap; }), cap);
     b.s.stations[cap].units = { infantry: 1, artillery: 0, armour: 0 };
 
     var snap = JSON.stringify(b.s);
@@ -3373,22 +3952,24 @@ function suiteStandingOrders(d) {
   // -------------------------------------------------------------------------
   test('willingness and what-leaves are different numbers, and the sweep sides with the latter',
   function () {
-    // 7 feeders into a full rally: the exact board the readout was lying about.
+    // 7 sources into a full destination: the exact board the readout was lying
+    // about.
     var b = _ordBoard(fns, d, 77, pid, 7);
     var cap = d.POWERS[pid].capital;
-    var feeders = b.own.filter(function (x) { return x !== cap; });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: [cap], order: 'rally' });
-    applyCommand(b.s, { type: 'order', owner: pid, stations: feeders, order: 'feed' });
-    b.s.stations[cap].units = { infantry: d.STATIONS[cap].capacity, artillery: 0, armour: 0 };
+    var sources = b.own.filter(function (x) { return x !== cap; });
+    _ordLink(b.s, pid, sources, cap);
+    b.s.stations[cap].units = {
+      infantry: d.STATIONS[cap].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
+    };
 
     var want = 0, leaves = 0;
-    for (var i = 0; i < feeders.length; i++) {
-      want += standingOrderSend(b.s, feeders[i]);
-      leaves += standingOrderNext(b.s, feeders[i]).units;
+    for (var i = 0; i < sources.length; i++) {
+      want += standingOrderSend(b.s, sources[i]);
+      leaves += standingOrderNext(b.s, sources[i]).units;
     }
-    assert(want > 10, 'VACUITY: the feeders were not willing to ship in the first place (' +
+    assert(want > 10, 'VACUITY: the sources were not willing to ship in the first place (' +
       want.toFixed(1) + ')');
-    assertEqual(leaves, 0, 'units left a board whose only rally is full: ' + leaves.toFixed(1));
+    assertEqual(leaves, 0, 'units left a board whose only destination is full: ' + leaves.toFixed(1));
 
     // And the sweep itself agrees with the second number, not the first — which
     // is the whole complaint: the empire header was quoting `want`.

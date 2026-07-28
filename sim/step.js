@@ -15,7 +15,7 @@
 // (01-data-schema.md, "Sim internals — phase functions"):
 //
 //   1. growthTick     logistic growth, multiplier reach, disconnection decay
-//   2. ordersTick     standing orders: feed cities ship surplus to a rally
+//   2. ordersTick     standing orders: a city ships surplus to each city it supplies
 //   3. movementTick   advance waves; resolve arrivals
 //   4. combatTick     square-law attrition; flip stations
 //   5. relationsTick  balance-of-power drift (throttled internally)

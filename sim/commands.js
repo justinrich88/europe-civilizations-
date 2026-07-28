@@ -198,6 +198,67 @@ function _cmdFilterTypes(units, types) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// What a source actually hands over for a given fraction.
+//
+// THE ONE PLACE THE AMOUNT IS DECIDED. render/select.js draws its preview from
+// this same function rather than calling splitUnits() itself, because the two
+// used to be separate expressions that happened to agree — and known-issue #18
+// is exactly the failure that arrangement produces: a readout that answers a
+// different question from the one on screen and never looks wrong. Sharing a
+// helper is not sharing a decision; this IS the decision.
+//
+// BAL.SEND_KEEP_UNITS is held back off the top, whatever the fraction. Logistic
+// growth is proportional to `units`, so a station emptied to exactly zero is
+// dead ground that can never recover — see the constant's own comment. The
+// clamp is proportional across the three types, so what stays behind is a
+// scaled-down copy of the garrison rather than an arbitrary slice of one kind.
+//
+// Returns a zeroed bundle when there is nothing spare; callers already reject
+// that as 'too-few-units' against BAL.MIN_SEND_UNITS.
+function sendPayload(units, fraction) {
+  var total = totalUnits(units);
+  var keep = (BAL && isFinite(BAL.SEND_KEEP_UNITS)) ? BAL.SEND_KEEP_UNITS : 0;
+  var spare = total - keep;
+  if (!(spare > 0)) return { infantry: 0, artillery: 0, armour: 0 };
+  // min(): the fraction still wins whenever it asks for less than the ceiling,
+  // so a 25% send from a full city is untouched by any of this.
+  var f = Math.min(fraction, spare / total);
+  return splitUnits(units, f);
+}
+
+// ---------------------------------------------------------------------------
+// Supply-line helpers. Small on purpose: `supplyTo` is a plain sorted array of
+// station ids, and the only two questions ever asked of it are "is this edge
+// present" and "what does the list become". A Set would read better and would
+// not survive a JSON snapshot, which is the whole basis of replay here.
+// ---------------------------------------------------------------------------
+
+function _cmdSupplyIndex(station, target) {
+  var list = station && station.supplyTo;
+  return (list && list.indexOf) ? list.indexOf(target) : -1;
+}
+
+// The list `station` should end up with. `adding` is the group's single verdict
+// (see _cmdApplyOrder), not a per-station decision, and a null target means
+// clear everything.
+//
+// Returns a NEW array always, never a mutated one: `setStationSupply` sorts and
+// stores what it is given, and handing it the live array would make "did this
+// change anything" unanswerable.
+function _cmdNextSupply(station, target, adding) {
+  if (target === null) return [];
+  var list = (station.supplyTo || []).slice();
+  var at = list.indexOf(target);
+  if (adding) {
+    if (at < 0) list.push(target);
+  } else if (at >= 0) {
+    list.splice(at, 1);
+  }
+  list.sort();
+  return list;
+}
+
 function _cmdReject(result, source, reason) {
   result.rejected.push({ source: source, reason: reason });
   return result;
@@ -282,7 +343,7 @@ function applyCommand(state, cmd) {
     if (st.owner !== owner) { _cmdReject(result, src, 'not-owned'); continue; }
     if (src === target) { _cmdReject(result, src, 'self-target'); continue; }
 
-    var take = _cmdFilterTypes(splitUnits(st.units, fraction), cmd.types);
+    var take = _cmdFilterTypes(sendPayload(st.units, fraction), cmd.types);
     if (totalUnits(take) < BAL.MIN_SEND_UNITS) { _cmdReject(result, src, 'too-few-units'); continue; }
 
     // OWNERSHIP-AWARE. A source whose only path to the target runs through
@@ -345,21 +406,42 @@ function applyCommand(state, cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// { type:'order', owner, stations:[stationId,…], order:'hold'|'rally'|'feed' }
+// { type:'order', owner, stations:[stationId,…], target: stationId }  — TOGGLE
+// { type:'order', owner, stations:[stationId,…], target: null }       — CLEAR
 //
-// Sets a STANDING ORDER on stations the owner holds (00-vision.md §8 as
-// amended; sim/movement.js runs them). 'hold' is the default and the off
-// switch, so clearing an order is the same command with the same shape.
+// Edits the SUPPLY LINES of stations the owner holds (00-vision.md §8 as
+// amended; sim/movement.js runs them). A station's `supplyTo` is a sorted list
+// of cities it streams units to; an empty list is no standing order at all, and
+// is the state every station starts and every captured station returns to.
+//
+// ONE VERB, MANY DESTINATIONS — and it took three passes to get here:
+//
+//   1. `feed` / `rally` / `hold`: bare labels, with the pipe between a feeder
+//      and a sink INFERRED by nearest-seed matching. The sim picked the
+//      destination and nothing on the board could tell you which one it picked.
+//   2. `reinforce` / `defend` / `hold`, each naming one destination. Better —
+//      the player states the pipe — but `defend` only fired when the sim judged
+//      the target "threatened", which is the SAME hidden guess wearing a
+//      different hat. Cut on the player's instruction: *"it's the same action in
+//      the inverse."* The capacity ceiling already does defend's job out of a
+//      number that is on screen — a full destination accepts nothing, so a quiet
+//      front banks force at home by itself.
+//   3. This. One verb, and `supplyTo` is a LIST because one target per source
+//      made *"reinforce more than one city from a single city"* impossible.
+//
+// TOGGLE, AND THE GROUP DECIDES TOGETHER. Not per station: a mixed selection
+// where some stations already feed the target would otherwise flip each one and
+// leave the group in a state nobody asked for. So it works the way bold works on
+// mixed text — if ANY station in the group lacks the edge, the whole group gains
+// it; only when every one of them already has it does the group lose it. Which
+// makes the gesture idempotent, and makes cancel free: press R and click the
+// same city again.
 //
 // It goes through applyCommand for the reason everything else does: nothing in
-// render/ or app/ may mutate state, and a station's order is state. The
-// alternative — a UI writing state.stations[sid].order directly — would be a
-// second path by which the board changes, and the whole replay/headless-testing
-// property of this project rests on there not being one.
-//
-// ADDITIVE. Before this existed, any cmd.type other than 'send' failed with
-// 'unknown-type' and touched nothing; every pre-existing caller still gets
-// byte-identical behaviour, exactly as cmd.types was added.
+// render/ or app/ may mutate state, and a supply line is state. The alternative
+// — a UI writing state.stations[sid].supplyTo directly — would be a second path
+// by which the board changes, and the whole replay/headless-testing property of
+// this project rests on there not being one.
 //
 // Per-station validation, like a volley's sources: one unowned station in a
 // list does not cost the player the other nine.
@@ -373,11 +455,32 @@ function _cmdApplyOrder(state, cmd, result) {
   if (owner === 'neutral') return _cmdFail(result, 'neutral-cannot-act');
   if (state.powers[owner].alive === false) return _cmdFail(result, 'power-eliminated');
 
-  var order = cmd.order;
-  var known = (typeof isStationOrder === 'function')
-    ? isStationOrder(order)
-    : (order === 'hold' || order === 'rally' || order === 'feed');
-  if (!known) return _cmdFail(result, 'unknown-order');
+  // --- the destination ---
+  //
+  // Whole-command validation, like a volley's target: if the destination is
+  // wrong then no source could have saved it, so rejecting the sources one at a
+  // time would report the same fact ten times and bury the reason.
+  //
+  // A null target is not an error — it is CLEAR, the off switch, and it is the
+  // same command shape with one argument left out rather than a second command
+  // type. An off switch that needs its own message is one that eventually does
+  // not get sent.
+  var target = (cmd.target === undefined) ? null : cmd.target;
+  if (target !== null) {
+    if (typeof target !== 'string' || !state.stations[target]) {
+      return _cmdFail(result, 'unknown-target');
+    }
+    // A SUPPLY LINE MAY ONLY EVER POINT AT GROUND ITS OWNER HOLDS. The same
+    // boundary the `standing` waves are held to further up, checked here as
+    // well because that check happens when the wave is BUILT — by which time the
+    // line has been sitting on the station for minutes, and one aimed at an
+    // enemy city would be an attack the player scheduled and forgot.
+    // sim/movement.js drops a line whose destination changes hands; this stops
+    // one being created that way in the first place.
+    if (state.stations[target].owner !== owner) {
+      return _cmdFail(result, 'target-not-owned');
+    }
+  }
 
   if (!Array.isArray(cmd.stations) || cmd.stations.length === 0) {
     return _cmdFail(result, 'no-stations');
@@ -394,17 +497,59 @@ function _cmdApplyOrder(state, cmd, result) {
   }
   ids.sort();
 
+  // --- decide the direction ONCE, for the whole group ---
+  //
+  // Two passes over the same list. The first only reads, so that every station
+  // that will actually be written is judged against the same verdict — a single
+  // pass that decided as it went would add the edge to the first station and
+  // then remove it from the second, which is the incoherent per-station toggle
+  // this exists to avoid.
+  //
+  // Stations that will be rejected below (not ours, unknown, the target itself)
+  // are excluded from the vote as well as from the write: a city we do not own
+  // has no opinion about what our group is doing.
+  var adding = false;
+  if (target !== null) {
+    for (var v = 0; v < ids.length; v++) {
+      var vst = state.stations[ids[v]];
+      if (!vst || vst.owner !== owner || ids[v] === target) continue;
+      if (_cmdSupplyIndex(vst, target) < 0) { adding = true; break; }
+    }
+  }
+
   for (var j = 0; j < ids.length; j++) {
     var id = ids[j];
     var st = state.stations[id];
     if (!st) { _cmdReject(result, id, 'unknown-station'); continue; }
-    // You may only give orders to your own cities. Setting one on a rival's
-    // station would be commanding ground you do not hold, which is the same
-    // boundary the send rules draw.
+    // You may only order your own cities. Commanding a rival's station is the
+    // same boundary the send rules draw.
     if (st.owner !== owner) { _cmdReject(result, id, 'not-owned'); continue; }
-    if (typeof setStationOrder === 'function') setStationOrder(state, id, order);
-    else st.order = order;
-    result.accepted.push({ station: id, order: order });
+    // A city cannot supply itself. Per-station rather than whole-command:
+    // marqueeing the front and clicking one of the cities in it is the normal
+    // way to say "everyone else feed this one", and dropping the other nine
+    // because the destination was caught in the marquee would be maddening.
+    if (id === target) { _cmdReject(result, id, 'self-target'); continue; }
+
+    // `changed` is the difference between "this command applied to the station"
+    // and "this station is now different", and they are NOT the same. Clearing
+    // a group in which nobody had a supply line accepts every station and
+    // changes none; a group toggle in which one member already had the line
+    // changes the others and not it. A UI that counts `accepted` reports "3
+    // cities cleared" when it cleared nothing — which is exactly the false
+    // confirmation the banner exists to prevent, so the honest number is
+    // produced HERE rather than recovered by the caller diffing state around
+    // the call (known-issues #18: a readout must not answer a question of its
+    // own by a route the decision did not take).
+    var before = (st.supplyTo || []).length;
+    var next = _cmdNextSupply(st, target, adding);
+    if (typeof setStationSupply === 'function') setStationSupply(state, id, next);
+    else st.supplyTo = next;
+    result.accepted.push({
+      station: id,
+      target: target,
+      added: target !== null && adding,
+      changed: (st.supplyTo || next).length !== before,
+    });
   }
 
   if (!result.accepted.length) {

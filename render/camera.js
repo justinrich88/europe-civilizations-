@@ -292,8 +292,22 @@ function _camZoomCentre(factor) {
   _camZoomAt(factor, CAM.view.x + CAM.view.w / 2, CAM.view.y + CAM.view.h / 2);
 }
 
+// True while the empire picker owns the board (render/start.js puts
+// `is-choosing` on .app). This file self-bootstraps on DOMContentLoaded, long
+// before app/main.js's boot() runs, so without this the camera is fully live on
+// a screen whose only verb is "pick a country" — and the homeland labels the
+// picker draws are not counter-scaled the way map.js's station symbols are, so
+// a zoom visibly breaks them. style.css hides the controls during the pick;
+// hiding a control while leaving the gesture live is the worse half of the fix,
+// which is what this guard is for. startScreenHide() calls cameraReset().
+function _camIdle() {
+  var app = document.querySelector('.app');
+  return !!(app && app.classList.contains('is-choosing'));
+}
+
 function _camOnWheel(evt) {
   if (!CAM.view) return;
+  if (_camIdle()) return;        // before preventDefault: let the picker scroll
   evt.preventDefault();          // otherwise the page/trackpad scrolls instead
   _camCheckSize();
   var dy = evt.deltaY;
@@ -459,7 +473,7 @@ function _camIsPanButton(evt) {
 }
 
 function _camOnMouseDown(evt) {
-  if (!_camIsPanButton(evt) || !CAM.view) return;
+  if (!_camIsPanButton(evt) || !CAM.view || _camIdle()) return;
   // Middle-click otherwise arms autoscroll on some platforms and the drag
   // never arrives. No stopPropagation: select.js must keep seeing every event.
   evt.preventDefault();
@@ -521,6 +535,7 @@ function _camOnKeyDown(evt) {
   var tag = (t && t.tagName) || (document.activeElement && document.activeElement.tagName);
   if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
   if (evt.metaKey || evt.ctrlKey || evt.altKey) return;      // Cmd+0 is the browser's
+  if (_camIdle()) return;   // the picker owns the keyboard; Enter is its confirm
 
   if (evt.key === '0') { evt.preventDefault(); cameraReset(); return; }
   if (evt.key === '-' || evt.key === '_') {
@@ -673,6 +688,46 @@ function cameraReset() {
   return cameraView();
 }
 
+// Frame a rectangle of BOARD units — the units of #board's viewBox, which is
+// what SVGGraphicsElement.getBBox() already returns, so the common caller is
+// `cameraFocus(someShape.getBBox())` and no coordinate conversion happens
+// outside this file.
+//
+// `pad` is a multiplier on the box, not a pixel margin: the point of framing a
+// country is to see the country AND the ring of neutral cities around it, and
+// that ring scales with the country. Russia's box is most of the map and comes
+// back at ~1x; Austria's is small and zooms hard. That difference is the map
+// telling the truth about the two powers, so it is deliberately not normalised
+// away — only capped, because past ~3x the labels start colliding.
+//
+// Everything goes through _camSet, so the size clamp (CAM_MIN/MAX_SCALE) and
+// the position clamp (stay inside the fit rect) are the same ones every other
+// camera move obeys. Returns the resulting view, or null if unwired.
+function cameraFocus(box, pad, maxScale) {
+  _camCheckSize();
+  var f = CAM.fit;
+  if (!f || !box) return null;
+  var bw = Number(box.width), bh = Number(box.height);
+  var bx = Number(box.x), by = Number(box.y);
+  if (!isFinite(bw) || !isFinite(bh) || !isFinite(bx) || !isFinite(by)) return null;
+  if (!(bw > 0) || !(bh > 0)) return null;
+
+  var m = (isFinite(pad) && pad > 0) ? pad : 1.6;
+  var cap = (isFinite(maxScale) && maxScale > 0) ? maxScale : 3;
+
+  // Fit BOTH axes: take whichever of the padded width and the padded height
+  // needs the wider view, or a tall thin country would be cropped top and
+  // bottom while its box "fitted" horizontally.
+  var wantW = Math.max(bw * m, (bh * m) * f.aspect);
+  var minW = f.w / Math.min(cap, CAM_MAX_SCALE);
+  if (wantW < minW) wantW = minW;
+
+  var cx = bx + bw / 2, cy = by + bh / 2;
+  var h = wantW / f.aspect;
+  _camSet({ x: cx - wantW / 2, y: cy - h / 2, w: wantW, h: h });
+  return cameraView();
+}
+
 // Current view, for tests and the console. A copy — the camera owns its state
 // and nothing outside this file may write it.
 function cameraView() {
@@ -719,6 +774,7 @@ function onCameraChange(fn) {
 
 window.initCamera = initCamera;
 window.cameraReset = cameraReset;
+window.cameraFocus = cameraFocus;
 window.cameraView = cameraView;
 window.cameraScale = cameraScale;
 window.cameraSymbolScale = cameraSymbolScale;

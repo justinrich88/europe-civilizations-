@@ -28,6 +28,14 @@
 // of aut / fra / gbr / ger / ita / ott / rus without an edit. An unknown code
 // falls back rather than throwing, for the same reason readSeed() does: a
 // mistyped query string should still give you a game.
+//
+// It is now also the SKIP for the empire picker (render/start.js): a build
+// handed to a tester as "?player=fra" must land in the game as France, not in
+// a screen asking which France they meant. Only a *valid* code counts as a
+// choice — a typo falls back to ger and still gets the picker, because the
+// query string then said nothing about what the player wanted.
+window.PLAYER_EXPLICIT = false;
+
 window.PLAYER = (function () {
   var m = /[?&]player=([a-z]{3})/.exec(String(location.search));
   var pid = m ? m[1] : 'ger';
@@ -35,6 +43,7 @@ window.PLAYER = (function () {
     console.warn('[app/main] unknown player "' + pid + '", falling back to ger');
     return 'ger';
   }
+  window.PLAYER_EXPLICIT = !!m;
   return pid;
 })();
 
@@ -46,13 +55,18 @@ const DEFAULT_SEED = 19140628;
 
 // ── send fraction ───────────────────────────────────────────────────────
 //
-// 00-vision.md §8: "A persistent 25 / 50 / 75 / All setting applies to the
-// whole volley; default 75%, and it's a tuning constant. Set once, not per
-// attack." So this is app-level UI state, not game state — it is a preference
-// about how commands are built, and it is deliberately NOT in window.GAME
-// (state stays small and diffable, 01-data-schema.md).
+// App-level UI state, not game state — a preference about how commands are
+// built, deliberately NOT in window.GAME (state stays small and diffable,
+// 01-data-schema.md).
+//
+// §8 called this "a persistent 25/50/75/All setting… set once, not per attack".
+// IT IS NO LONGER PERSISTENT. On the player's instruction it is a one-shot that
+// relaxes to 25% after every volley, selected with the digits 1-4 — see
+// BAL.SEND_FRACTION_DEFAULT for the argument, which is that a sticky 75% turns
+// one absent-minded click into an emptied city. The reset itself lives in
+// render/select.js next to the commit, because that is the event that spends it.
 
-var _sendFraction = 0.75;
+var _sendFraction = (typeof BAL !== 'undefined' && BAL) ? BAL.SEND_FRACTION_DEFAULT : 0.25;
 
 function sendFraction() {
   return _sendFraction;
@@ -61,16 +75,29 @@ function sendFraction() {
 function setSendFraction(f) {
   var v = Number(f);
   if (!isFinite(v) || v <= 0 || v > 1) return _sendFraction;
+  if (v === _sendFraction) return v;
   _sendFraction = v;
   syncFractionButtons(v);
+  // The preview under the cursor is a promise about the amount, so it has to be
+  // repainted the instant the amount changes — the player picks the target
+  // first and the size second, and a preview that still reads "12 inf" while
+  // the bar says All is the exact shape of known-issue #18.
+  if (typeof selOnFractionChange === 'function') selOnFractionChange();
   return v;
 }
 
-// The fraction above is now a DEFAULT rather than the whole answer. The amount
-// can also be decided at the moment of the click — shift = all, alt = half —
-// which is per-commit and leaves nothing behind. That override lives entirely in
-// render/select.js, beside the click that consumes it, because it is not a
-// setting: there is no state here to hold it.
+// Back to the timid default. Called by render/select.js after a volley fires.
+function resetSendFraction() {
+  return setSendFraction((typeof BAL !== 'undefined' && BAL) ? BAL.SEND_FRACTION_DEFAULT : 0.25);
+}
+
+// The shift = all / alt = half commit-time modifiers are DELETED. They existed
+// because the fraction was a sticky setting in the corner of the screen and the
+// amount needed a way to be decided at the moment of the click; 1-4 does that
+// job better, with one hand, no timing and no key held while aiming. Shift was
+// also already the additive-selection modifier on the same pointer, so one of
+// its two meanings had to go. Cmd = keep the group survives — that is not an
+// amount, and nothing else expresses it.
 //
 // The INF / ART / ARM type filter that used to live here (`_sendTypes`,
 // `sendTypes()`, `sendTypeEnabled()`, `toggleSendType()`, `syncTypeButtons()`)
@@ -140,10 +167,18 @@ function wireSendControls() {
   });
 }
 
-// Keyboard: space toggles pause, 1/2/4 set speed. Deliberately tiny — 00-vision
-// §8 says selecting nodes and clicking targets is the only verb, so keys here
-// cover the clock and nothing else. Selection keys (Ctrl+A, shift) belong to
-// render/select.js and are not touched.
+// Keyboard: space toggles pause, and the digits 1-4 pick the send fraction.
+//
+// THE DIGITS USED TO BE SPEED (1/2/4 → 1x/2x/4x) and the player reassigned them
+// to the amount, which is the right trade by a wide margin: the amount is set
+// several times a minute and the clock perhaps twice a game. With 1x gone there
+// are only two speeds left anyway, so they lose nothing but a shortcut to a
+// button that is two centimetres from the cursor. Space still pauses, which is
+// the only clock control that is ever urgent.
+//
+// The ladder comes from BAL.SEND_FRACTIONS by index, so the digit a button
+// advertises in index.html and the digit that works cannot drift apart.
+// Selection keys (Ctrl+A, Escape, H/R/D) belong to render/select.js.
 function wireKeys() {
   document.addEventListener('keydown', function (ev) {
     // Never steal keys from a text field, if one ever appears.
@@ -156,9 +191,12 @@ function wireKeys() {
       togglePause();
       return;
     }
-    if (ev.key === '1' || ev.key === '2' || ev.key === '4') {
+
+    const ladder = (typeof BAL !== 'undefined' && BAL && BAL.SEND_FRACTIONS) || [];
+    const slot = Number(ev.key) - 1;
+    if (ev.key.length === 1 && slot >= 0 && slot < ladder.length) {
       ev.preventDefault();
-      setSpeed(Number(ev.key));
+      setSendFraction(ladder[slot]);
     }
   });
 }
@@ -210,13 +248,15 @@ function boot() {
 
   const seed = readSeed();
   window.GAME = newGame(seed);
+  console.log('[app/main] new game, seed ' + seed);
 
-  // Hand the AI the one power it must NOT drive. ai/ai.js skips state.human;
-  // absent (headless tests, tools/balance.js) means every power is AI-driven,
-  // which is what a batch wants. Without this the player watches their own
-  // cities launch attacks they never ordered.
-  window.GAME.human = window.PLAYER;
-  console.log('[app/main] new game, seed ' + seed + ', player ' + window.PLAYER);
+  // NOTE WHAT IS NOT HERE: `GAME.human`. The state exists so the board can be
+  // drawn from it, and nothing else has been wired — no selection listeners, no
+  // loop — so the board is inert until bootPlay() runs. That is the whole
+  // mechanism by which the picker is "in front of" a game that cannot be
+  // played: the absence of listeners, not a shield painted over them. An
+  // overlay that accepts pointer events is how this project has repeatedly
+  // eaten the click that commits an attack.
 
   // Static layers first: renderBoard() is the expensive full rebuild and is
   // called once and only once (01-data-schema.md).
@@ -229,11 +269,54 @@ function boot() {
   if (typeof renderBoard === 'function') tryStep('renderBoard', renderBoard);
   else console.error('[app/main] render/map.js has not loaded — no renderBoard()');
 
+  // ── the pick ──────────────────────────────────────────────────────────
+  //
+  // The board is drawn and nothing is live, which is exactly the moment
+  // render/start.js wants: it paints the seven homelands over the real map and
+  // waits. bootPlay() is its callback and does the rest of this function.
+  //
+  // Skipped for ?player=xxx, which exists so a specific build can be handed to
+  // a tester, and skipped if the picker cannot build itself (it returns false)
+  // — a player must never be left looking at a board that never starts.
+  if (!window.PLAYER_EXPLICIT && typeof startScreenShow === 'function') {
+    if (startScreenShow(bootPlay)) return true;
+  }
+
+  return bootPlay(window.PLAYER);
+}
+
+// Everything from "a power has been named" onwards. Split out of boot() so the
+// empire picker can sit between the two halves; called exactly once either way.
+function bootPlay(pid) {
+  if (pid) window.PLAYER = pid;
+
+  // Hand the AI the one power it must NOT drive. ai/ai.js skips state.human;
+  // absent (headless tests, tools/balance.js) means every power is AI-driven,
+  // which is what a batch wants. Without this the player watches their own
+  // cities launch attacks they never ordered.
+  window.GAME.human = window.PLAYER;
+  console.log('[app/main] playing ' + window.PLAYER);
+
   // Written by another agent in parallel; may not exist yet.
   if (typeof initSelection === 'function') tryStep('initSelection', initSelection);
 
   // Zoom/pan (render/camera.js). After renderBoard() — it measures the board.
   if (typeof initCamera === 'function') tryStep('initCamera', initCamera);
+
+  // Open framed on the homeland you just chose. You start holding exactly one
+  // city out of 108, and at 1x that city is a small disc somewhere in Europe —
+  // the first thing the player has to do is find themselves. Here rather than
+  // in render/start.js's confirm handler because this is the one place a game
+  // begins: ?player=fra skips the picker entirely and gets the same opening.
+  //
+  // Must come AFTER initCamera(), which measures #board — the rail and the HUD
+  // have only just come back, so a view set before that would be computed
+  // against the picking layout and then recomputed away. Silent if either half
+  // is missing; the game then opens on the whole board, which is the old
+  // behaviour and never wrong, only wider.
+  if (typeof cameraFocus === 'function' && typeof startHomeBox === 'function') {
+    tryStep('cameraFocus', function () { cameraFocus(startHomeBox(window.PLAYER)); });
+  }
 
   // AI decision log (render/ailog.js) — hidden until `L`. Optional like the AI
   // it inspects, so it is guarded the same way.
@@ -271,8 +354,10 @@ function boot() {
 // Global exports — no modules anywhere in this project.
 window.sendFraction = sendFraction;
 window.setSendFraction = setSendFraction;
+window.resetSendFraction = resetSendFraction;
 window.syncSpeedButtons = syncSpeedButtons;
 window.syncFractionButtons = syncFractionButtons;
 window.boot = boot;
+window.bootPlay = bootPlay;
 
 document.addEventListener('DOMContentLoaded', boot);

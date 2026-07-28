@@ -539,3 +539,74 @@ and painted an invisible bar across a white arrow. Found by
 `getComputedStyle(bar).fill` returning `rgb(255,255,255)`, i.e. #15's two-line
 diagnostic, not by looking at the screen. At 7.8 on-screen pixels, "I can't see
 it" and "it isn't there" look identical.
+
+---
+
+## 19. A predictor that models ONE command cannot predict a SEQUENCE of them
+
+Known-issue #18 was a readout answering a different question from the sweep. The
+supply-line rewrite produced its sibling, and it is subtler because the readout
+and the sweep were by then *the same function*.
+
+A city may now supply several destinations, so one sweep issues several
+`applyCommand` calls **from the same source**. Each one is sized as a FRACTION of
+that station's garrison, and each one takes units out of it — so the second call
+is a fraction of a smaller number than the first. A planner that sized every edge
+against the garrison it read once, at the top, over-promises on every edge after
+the first, and the error grows with how many lines the player has drawn.
+
+Nothing about it looks wrong. Each edge's arithmetic is individually correct, the
+totals are plausible, and with a single destination — which is every fixture
+inherited from the previous design — the two are identical.
+
+The fix is that the plan carries the state it is predicting *through* the
+sequence: `_ordPlanPower` tracks `factor`, the share of the original garrison
+still standing as each successive send is issued, and sizes each edge against
+`splitUnits(units, factor)`. It is exact rather than approximate because
+`splitUnits` scales all three unit types by one number, so a single scalar
+reproduces the bundle.
+
+**The rule that generalises: if a readout predicts N commands, it must simulate N
+commands.** Predicting the first one N times is a different calculation and it is always
+optimistic. The test that catches it compares the plan's PER-DESTINATION share
+against the wave that actually went to that destination — a per-source total
+would have hidden it, because the total is right whenever the shares are wrong in
+compensating directions.
+
+---
+
+## 20. A bootstrap path only runs when something else has already failed — so nobody runs it
+
+`renderBoard()` draws from `window.GAME` if there is one and from
+`setupPseudoState(D)` if there is not, so the board is viewable before
+`app/main.js` has made a game. That second path had been dead for some time:
+the pseudo-state gave each station an `owner` and nothing else, while
+`liveStations()` — which `drawStations()` deliberately calls to paint the
+turn-zero snapshot through the same code every later frame uses — reads
+`st.units.infantry`.
+
+```
+renderBoard()  →  liveStations(D, setupPseudoState(D))
+               →  TypeError: Cannot read properties of undefined (reading 'infantry')
+```
+
+`renderBoard()` died part-way through and took `drawTerritoryLabels` and
+`drawPowerLegend` with it. **No test saw it** (`test/node.js` loads no `render/`
+file) and **no session saw it**, because every entry point in the running game
+creates `GAME` before it draws.
+
+Two lessons:
+
+1. **"One renderer, no static mode" is the right design and it widens the
+   contract.** Handing a state-shaped object to `territoryControl()` needs
+   `owner`. Handing the same object to `liveStations()` needs every field the
+   live path reads — and that set grows every time the renderer learns a new
+   one, silently, in a file that has no reason to mention the pseudo-state.
+   The pseudo-state now carries `units`, `connected`, `growthMul` and
+   `supplyTo`, and says so.
+2. **A fallback that is only reached when the primary is missing is exercised by
+   nobody.** If it is worth having, something has to run it on purpose; if
+   nothing does, it will be broken by the third unrelated change and the
+   discovery will be a stack trace at the worst possible moment. Seeding it from
+   `SETUP` rather than with zeroes at least makes a wrong answer visible as a
+   wrong board.

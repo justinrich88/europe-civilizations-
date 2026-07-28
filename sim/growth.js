@@ -255,7 +255,11 @@ function growthType(sid) {
 function growthTick(state) {
   computeConnectivity(state);
 
-  var cap0 = BAL.GROWTH_CAP_EPSILON;
+  // BAL.GROWTH_CAP_EPSILON used to gate growth here, opening a dead band just
+  // below capacity so the logistic asymptote could not leave a station
+  // wobbling at 99.7% forever. The room floor solves that properly — growth
+  // near full is now a real rate rather than a vanishing one — so the gate is
+  // gone and the constant is no longer read by this file.
 
   for (var i = 0; i < STATION_IDS.length; i++) {
     var sid = STATION_IDS[i];
@@ -290,12 +294,20 @@ function growthTick(state) {
         if (BAL.DISCONNECT_GROWTH > 0) {
           _applyGrowth(state, sid, st, d, total, BAL.DISCONNECT_GROWTH);
         }
-      } else if (total > d.capacity) {
-        // Reinforced past the ceiling: bleed the excess back down. Growth is
-        // off up here by definition.
-        var excess = total - d.capacity;
+      } else if (total > d.capacity * BAL.GROWTH_OVERFLOW_CEIL) {
+        // Past the HARD ceiling — only reinforcement can put a station here,
+        // since growth tapers to zero exactly at it. Bleed the excess back
+        // down toward the ceiling, which is the highest number growth itself
+        // is allowed to reach; bleeding toward `capacity` instead would leave
+        // decay and growth pulling on the same units in opposite directions
+        // for the whole band between the two.
+        var excess = total - d.capacity * BAL.GROWTH_OVERFLOW_CEIL;
         _scaleUnits(units, (total - excess * BAL.OVERSTACK_DECAY) / total);
-      } else if (total < d.capacity * cap0) {
+      } else {
+        // Everything below the hard ceiling grows, including a station at or
+        // over capacity. The rate is decided inside _applyGrowth by the room
+        // factor, which no longer reaches zero at capacity — see the header
+        // there and BAL.GROWTH_OVERFLOW_RATE.
         _applyGrowth(state, sid, st, d, total, 1);
       }
     }
@@ -308,10 +320,49 @@ function growthTick(state) {
   }
 }
 
-// growth = GROWTH_BASE * rate * growthMul * capturePenalty * units * (1 - units/capacity)
+// growth = GROWTH_BASE * rate * growthMul * capturePenalty * units * room(units)
 //
 // `units` is floored at GROWTH_SEED so a scoured station crawls back instead
 // of being multiplicatively dead at exactly zero.
+//
+// `room` used to be the bare logistic term `(1 - units/capacity)`, which is
+// zero at capacity — a full city produced nothing at all. It now has a FLOOR
+// and a TAIL (BAL.GROWTH_OVERFLOW_RATE / _CEIL, 2026-07, on the player's
+// instruction):
+//
+//     room = max(1 - units/cap, FLOOR)              below capacity
+//     room = FLOOR * (1 - (units-cap)/(ceil-cap))   above it, to zero at ceil
+//
+// so growth falls as a city fills, stops falling at FLOOR, holds that rate
+// across the capacity line, and only then tapers away. Monotonic the whole
+// way: there is no point at which filling a city further makes it grow FASTER,
+// which a naive "half rate once full" rule does produce — at capacity it would
+// have been twice the half-full rate, exactly inverting the logistic feel.
+//
+// FLOOR is 0.25 * RATE, and the 0.25 is derived rather than tuned: the peak of
+// `units * (1 - units/cap)` is `cap/4`, at half full. At `units = cap` the same
+// growth therefore needs `room = RATE/4`. That is what makes "50%" mean 50% of
+// this station's own best rate, which is the only reading a player can check
+// against the number on the rail.
+function _growthRoom(total, cap) {
+  var rate = BAL.GROWTH_OVERFLOW_RATE;
+  if (!(rate > 0)) {                       // OFF: the pre-2026-07 sim, exactly
+    var bare = 1 - total / cap;
+    return bare > 0 ? bare : 0;
+  }
+
+  var floor = 0.25 * rate;
+  if (total <= cap) {
+    var room = 1 - total / cap;
+    return room > floor ? room : floor;
+  }
+
+  var span = cap * (BAL.GROWTH_OVERFLOW_CEIL - 1);
+  if (!(span > 0)) return 0;               // CEIL 1 = no overflow band at all
+  var tail = floor * (1 - (total - cap) / span);
+  return tail > 0 ? tail : 0;
+}
+
 function _applyGrowth(state, sid, st, d, total, extraMul) {
   var cap = d.capacity;
   if (cap <= 0) return;
@@ -329,7 +380,7 @@ function _applyGrowth(state, sid, st, d, total, extraMul) {
   }
 
   var seed = total < BAL.GROWTH_SEED ? BAL.GROWTH_SEED : total;
-  var g = BAL.GROWTH_BASE * d.rate * mul * capture * extraMul * seed * (1 - total / cap);
+  var g = BAL.GROWTH_BASE * d.rate * mul * capture * extraMul * seed * _growthRoom(total, cap);
   if (g <= 0) return;
   st.units[growthType(sid)] += g;
 }

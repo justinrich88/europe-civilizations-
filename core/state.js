@@ -75,7 +75,12 @@ function newGame(seed) {
 
   var s = {
     tick: 0,
-    speed: 1,
+    // 1x no longer exists — BAL.SPEEDS is [2, 4] (see its comment in
+    // data/tuning.js). Sourced from BAL rather than written as a literal so the
+    // ladder and its default cannot drift apart; defaulted so a state can still
+    // be built before data/tuning.js has loaded, which is the same defensive
+    // read every other BAL access in this file makes.
+    speed: (typeof BAL !== 'undefined' && BAL && BAL.SPEED_DEFAULT) || 2,
     paused: true,
     rng: seed >>> 0,
     winner: null,
@@ -148,11 +153,23 @@ function newGame(seed) {
       },
       connected: true,   // recomputed each tick from the capital, sim/movement.js
       growthMul: 1,      // recomputed from multiplier stations in range
-      // Standing order — MUTABLE PLAYER INTENT, which is why it lives here and
-      // not in data/stations.js (that file is static geometry). 'hold' is the
-      // off switch and the default, so a board nobody has touched behaves
-      // exactly as it did before this mechanic existed.
-      order: 'hold',     // 'hold' | 'rally' | 'feed'
+      // SUPPLY LINES — MUTABLE PLAYER INTENT, which is why they live here and
+      // not in data/stations.js (that file is static geometry). The cities this
+      // one streams surplus to, sorted. EMPTY IS THE DEFAULT AND THE OFF
+      // SWITCH, so a board nobody has touched behaves exactly as it did before
+      // this mechanic existed.
+      //
+      // THE EDGES ARE THE WHOLE SCHEMA. There used to be a verb here as well —
+      // hold/rally/feed, then hold/reinforce/defend — and every version of it
+      // made the sim decide something the player could not see: which rally a
+      // feeder served, or whether a city counted as "threatened". A wrong guess
+      // was invisible, which is the failure this design keeps arriving back at.
+      // A list of stated destinations cannot guess. It is also the only shape
+      // that lets one city supply several, which one target per source made
+      // impossible.
+      //
+      // setStationSupply is the only supported way to write it — see below.
+      supplyTo: [],
     };
   });
 
@@ -183,51 +200,131 @@ function setStationOwner(state, sid, owner) {
   if (st.owner === owner) return false;
   st.owner = owner;
   state.ownerEpoch = (state.ownerEpoch || 0) + 1;
-  // A STANDING ORDER DOES NOT SURVIVE A CAPTURE. It is one player's intent
-  // about their own board, and the power that just took the city never
-  // expressed it. Left in place, a captured 'feed' would immediately start
-  // draining the freshly-taken front-line city its new owner most needs to
-  // hold — an automated mechanic quietly working against the player, which is
-  // the failure mode the whole scoping rule exists to prevent. A captured
-  // 'rally' is milder but no more legitimate.
+  // SUPPLY LINES DO NOT SURVIVE A CAPTURE. They are one player's intent about
+  // their own board, and the power that just took the city never expressed it.
+  // Left in place, a captured source would immediately start draining the
+  // freshly-taken front-line city its new owner most needs to hold — an
+  // automated mechanic quietly working against the player, which is the failure
+  // mode the whole scoping rule exists to prevent.
   //
   // Reset happens HERE rather than in the capture paths so no caller can
   // forget: setStationOwner is already the only supported way ownership
   // changes, so it is the only place this can leak from.
-  st.order = 'hold';
+  //
+  // This clears the lines OUT of the captured city. The lines INTO it — held by
+  // other cities that were supplying this one — are dropped edge by edge on the
+  // next standing-order sweep, because they are somebody else's state and this
+  // function does not know who. See the LOST DESTINATION block in
+  // sim/movement.js for why the sweep owns that half.
+  //
+  // A fresh array, never `length = 0`: a caller holding the old one (a snapshot
+  // helper, a renderer that cached it) must not have it emptied underneath them.
+  st.supplyTo = [];
   return true;
 }
 
 // ---------------------------------------------------------------------------
-// Standing order — the other half of the same discipline.
+// Supply lines — the other half of the same discipline.
 //
-// The only supported way to change a station's order. Validates the value, so
-// a typo cannot put an unknown string in state where the orders phase would
-// silently ignore it forever. Player and AI reach this through
-// applyCommand({type:'order', ...}); nothing in render/ or app/ may call it
-// directly, for the same reason nothing there may write units.
+// The only supported way to change where a station streams its surplus. Player
+// and AI reach it through applyCommand({type:'order', ...}); nothing in render/
+// or app/ may call it directly, for the same reason nothing there may write
+// units — a second path by which the board changes would cost the whole
+// replay/headless-testing property this project rests on.
+//
+// ONE VERB, N DESTINATIONS. There is no order type any more. A city either has
+// supply lines or it does not, and each line is a stated destination. Every
+// version of this mechanic that carried a verb also carried an inference the
+// player could not see — which rally a feeder served, or whether a city counted
+// as "threatened" — and an inference that is wrong is invisible. A list of
+// destinations has nothing left to infer.
+//
+// SORTED AND DEDUPED HERE, once, so nothing downstream has to remember to. The
+// orders phase iterates this array and issues a command per entry, so its order
+// is part of the sim's determinism: two runs of one seed must produce the same
+// commands in the same sequence or wave ids diverge.
 // ---------------------------------------------------------------------------
 
-var STATION_ORDERS = ['feed', 'hold', 'rally'];   // sorted; 'hold' is the default
-
-function isStationOrder(order) {
-  return STATION_ORDERS.indexOf(order) >= 0;
-}
-
-function setStationOrder(state, sid, order) {
+// Returns true when the stored list actually changed.
+//
+// `targets` is whatever the caller has: an array, or null/undefined to clear.
+// Entries that cannot be supplied are dropped rather than refusing the whole
+// list, because a caller assembling a group edit should not lose nine good
+// edges to one stale id:
+//
+//   not a string / unknown station   there is nothing at the far end
+//   the station itself               a city cannot supply itself, and letting
+//                                    it would put a zero-hop send in the sweep
+//
+// NOT CHECKED HERE: whether each target is still owned by this station's owner.
+// That is a fact about the board rather than about the intent, it can stop
+// being true seconds after a perfectly legal line was drawn, and something has
+// to describe the gap rather than silently swallowing it. Lost edges are
+// dropped one at a time by the next standing-order sweep — see the LOST
+// DESTINATION block in sim/movement.js for why the sweep owns it and not this
+// function.
+function setStationSupply(state, sid, targets) {
   var st = state && state.stations ? state.stations[sid] : null;
   if (!st) return false;
-  if (!isStationOrder(order)) return false;
-  if (st.order === order) return false;
-  st.order = order;
+
+  var seen = {}, out = [];
+  var list = Array.isArray(targets) ? targets : [];
+  for (var i = 0; i < list.length; i++) {
+    var to = list[i];
+    if (typeof to !== 'string' || to === sid || seen[to]) continue;
+    if (!state.stations[to]) continue;
+    seen[to] = true;
+    out.push(to);
+  }
+  out.sort();
+
+  var was = st.supplyTo || [];
+  if (was.length === out.length) {
+    var same = true;
+    for (var j = 0; j < out.length; j++) if (was[j] !== out[j]) { same = false; break; }
+    if (same) return false;
+  }
+  st.supplyTo = out;
   return true;
 }
 
-// A station's standing order, defaulting to 'hold' for a state built before
-// this field existed (a saved snapshot, or a hand-built test fixture).
-function stationOrder(state, sid) {
+// The cities a station supplies, sorted. Always an array, never null — a state
+// built before this field existed (a saved snapshot, or a hand-built test
+// fixture) reads as "no supply lines" rather than throwing.
+//
+// The returned array IS the stored one, not a copy: it is read every frame by
+// two renderers and copying it per station per frame would be pure waste. Do
+// not mutate it; go through setStationSupply.
+function stationSupply(state, sid) {
   var st = state && state.stations ? state.stations[sid] : null;
-  return (st && st.order) || 'hold';
+  return (st && st.supplyTo) || [];
+}
+
+// THE REVERSE LOOKUP: which of `sid`'s owner's cities supply it, sorted.
+//
+// O(stations) — there is no index, and there deliberately is not one. An index
+// would be a second copy of the same fact, invalidated by every capture and
+// every order edit, which is exactly the drift docs/testing/known-issues.md #9
+// is about. 108 array lookups is microseconds; the honest cost is stated here
+// so a caller can decide, rather than hidden behind a cache that can be wrong.
+//
+// SAFE FOR ONE STATION PER FRAME (the hovered city). NOT safe in a loop over
+// the board — that is O(n^2) and there is no accessor that makes it cheaper.
+//
+// Scoped to the target's OWN owner: a line only ever runs between two cities
+// one power holds, so a source under another flag is a stale edge the next
+// sweep will drop and must not be reported as live.
+function stationSuppliedBy(state, sid) {
+  var st = state && state.stations ? state.stations[sid] : null;
+  if (!st) return [];
+  var out = [];
+  for (var i = 0; i < STATION_IDS.length; i++) {
+    var from = state.stations[STATION_IDS[i]];
+    if (!from || from.owner !== st.owner) continue;
+    var to = from.supplyTo;
+    if (to && to.indexOf(sid) >= 0) out.push(STATION_IDS[i]);
+  }
+  return out;                       // sorted: STATION_IDS is
 }
 
 // ---------------------------------------------------------------------------

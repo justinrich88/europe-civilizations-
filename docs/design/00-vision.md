@@ -51,13 +51,34 @@ Time runs continuously: pause, 1x, 2x, 4x. Orders can be issued while paused.
 
 A station is a node at a real city's position. It has a **type**, a **capacity**, a **garrison** (counts per unit type), and links to other stations.
 
-Growth is logistic — fast when a station is half full, stalling as it approaches capacity:
+Growth is logistic — fast when a station is half full, slowing as it approaches capacity:
 
 ```
-growth = rate × units × (1 − units / capacity)
+growth = rate × units × room(units)
 ```
 
-Which produces the Virus Wars feel exactly: an emptied station recovers slowly, a full one is a fortress of numbers that has stopped paying dividends. **Full stations should be spent.**
+Which produces the Virus Wars feel exactly: an emptied station recovers slowly, a full one has stopped paying dividends. **Full stations should be spent.**
+
+### Capacity is where growth gets slow, not where it stops
+
+`room` was the bare logistic term `(1 − units / capacity)`, which is exactly **zero** at capacity. That made a full city dead ground — the single best thing you owned contributed nothing until you gambled it, and a defensive power could hold a full board and watch its economy stop. On the player's instruction (2026-07): *"rather than making production stop when a city is full, just slow the production speed by 50% until the city has capacity again"*, and, asked where the surplus goes, **over capacity, up to a hard ceiling**.
+
+So `room` now has a **floor** and a **tail**:
+
+```
+room = max(1 − units/capacity, FLOOR)                       below capacity
+room = FLOOR × (1 − (units − cap) / (ceil − cap))           above it, to zero at the ceiling
+```
+
+with `FLOOR = 0.25 × GROWTH_OVERFLOW_RATE` and `ceil = capacity × GROWTH_OVERFLOW_CEIL` (0.5 and 1.5 as shipped). Growth falls as a city fills, **stops falling at the floor**, holds that rate across the capacity line, and only then tapers away — reaching zero at the hard ceiling, which is therefore the highest number growth alone can ever produce. Above the ceiling (reachable only by reinforcement) `OVERSTACK_DECAY` bleeds back down *toward the ceiling*, not toward capacity.
+
+Three things about that shape are load-bearing:
+
+- **The 0.25 is derived, not tuned.** The peak of `units × (1 − units/cap)` is `cap/4`, at half full, so at `units = cap` the same growth needs `room = RATE/4`. That is what makes "50%" mean *50% of this station's own best rate* — the only reading a player can check against the number on the rail.
+- **It is monotonic the whole way.** There is no point at which filling a city further makes it grow *faster*, which a naive "half rate once full" rule does produce: at capacity it would be twice the half-full rate, exactly inverting the logistic feel.
+- **`RATE 0` with `CEIL 1` is an exact off switch**, reproducing the pre-2026-07 sim, which is how the change was proved not to have perturbed anything else.
+
+Deliberately accepted: capacity now reads as *"where it gets slow"* rather than *"where it stops"*, and the biggest stack on the board can get bigger. Two consequences elsewhere in the codebase follow from that and are not optional — the AI sizes a staging march against the defender it will **meet** (a garrison below the ceiling grows for the whole of a thousand-tick march, so measuring the present under-orders every march), and the supply-line phase reads the **ceiling** as a destination's headroom, since a destination past 99.5% of capacity is now routine rather than exceptional.
 
 ### The four types
 
@@ -251,17 +272,27 @@ The core offensive gesture is **select several of your stations, then click one 
 
 - **Selecting sources** — drag a marquee across your own stations, shift-click to add or remove, double-click a territory to select all its stations. `Ctrl+A` selects everything you own.
 - **Committing** — one click on the target. Every selected source sends its proportion at once, and selection clears. `⌘`-click commits and *keeps* the group, so one massed force can be thrown at several targets without reselecting.
-- **Proportion** — each source sends a share of the units currently sitting in it. A persistent 25 / 50 / 75 / All setting applies to the whole volley; default 75%, and it's a tuning constant. Set once, not per attack — then overridden at the click when you need it: `⇧` sends everything, `⌥` sends half. The modifier is read off the committing event, so the amount is decided by the click that fires the volley and nothing else.
+- **Proportion** — each source sends a share of the units currently sitting in it. A 25 / 50 / 75 / All setting applies to the whole volley, chosen with `1 2 3 4`, and it is **one-shot**: it relaxes back to 25% after every volley, so a big commitment is always a deliberate one and can never be left switched on by accident. The default is a tuning constant (`BAL.SEND_FRACTION_DEFAULT`).
+
+  *Revised 2026-07 on the player's instruction.* It was a persistent 75% overridden at the click by `⇧` (all) and `⌥` (half). Both modifiers are gone: the digits do the same job with one hand and no timing, and `⇧` was already additive-select on the same pointer. `⌘` survives, because keeping the group is not an amount.
+
+- **All never means all.** `4` leaves `BAL.SEND_KEEP_UNITS` behind — one unit. Growth is `rate × units × (1 − units/capacity)`, which is *proportional to units*, so a station emptied to exactly zero is dead ground forever and can only be repopulated by marching men back into it. Leaving one turns that into a slow recovery: a Berlin stripped to 1 climbs back past 38 over a thousand ticks. Nothing else in the game depends on the difference between 0 and 1, so this costs nothing and removes a trap the player cannot see coming.
 - Selected stations and the target are joined by preview lines while you hover, carrying **both an ETA and the payload** (`54 inf`, `1.5 inf · 11 art`), so a volley is legible *before* you commit it.
 - **One-shot.** An *attack* fires a single wave and is done — nothing to cancel. Every attack is a deliberate decision about what to spend right now.
 
 > **Amendment (Milestone 5.6): logistics can be automated; commitment cannot.**
 >
-> This section originally said there are no standing supply lines and the board never plays itself. That is now true of *attacks only*. Cities carry a standing order — **Hold** (default), **Rally** (a sink, pulling a small constant stream from neighbours), **Feed** (a source, pushing its surplus toward the front) — set with `H`/`R`/`F` on any selection.
+> This section originally said there are no standing supply lines and the board never plays itself. That is now true of *attacks only*. A city carries **supply lines**: a list of the cities it streams its surplus to. Select sources, press `R`, click a destination and the line is drawn to all of them; press `R` and click the same city again and it is gone. `H` clears the lines on the selection. There is no order *type* — a city either supplies somewhere or it does not.
+>
+> Every sweep (25 ticks) a source ships a small share of its surplus above a keep floor, **split evenly** across the destinations that still have room. A destination at capacity is skipped and its share goes to the others.
 >
 > The line the amendment does not cross: **a standing wave never attacks and never fights.** It may only move between stations its owner already holds, and a stream whose destination flips mid-transit *stands down* at the last held city on its path rather than arriving into a battle. Automating a trickle into a contested city would be committing defeat in detail (§5, §8) on the player's behalf — the exact mistake this game is built to punish. So the automation carries units to the front and stops there; what to spend, and when, stays a decision.
 >
-> Two consequences worth stating. Orders **reset to Hold on capture**, since a captured Feed city would drain the front its new owner just paid for. And a Feed city dropping off the logistic ceiling starts growing again — §2's "full stations should be spent" falling out of the mechanic for free.
+> **Nothing here is inferred.** This is the amendment's second rule and it is what the design cost two rewrites to learn. The first version had the player label the two *ends* — Rally and Feed — and let the sim match them up by nearest-seed search; the second replaced that with a named destination but added a **Defend** order that fired only when the sim judged the target "threatened". Both put a decision inside the sim that was nowhere on the board, and a decision the player cannot see is one they cannot tell is wrong. A list of stated destinations has nothing left to guess, and — the thing one target per source made impossible — it lets one city supply several.
+>
+> **Defend was cut and not replaced, because the capacity ceiling already is the trigger.** A quiet front is full, so it takes nothing and the cities behind it bank their surplus at home; a front that is losing units has headroom and pulls. That is the same behaviour, expressed as a fact about the board rather than as a judgement made off screen.
+>
+> Two consequences worth stating. Supply lines **do not survive a capture**, since a captured source would drain the front its new owner just paid for, and an edge whose *destination* changes hands is dropped on the next sweep — an order pointing at a city the enemy now holds must never become a way to send troops at the enemy. And a source dropping off the logistic ceiling starts growing again — §2's "full stations should be spent" falling out of the mechanic for free.
 
 **Stacks arrive staggered, not synchronised.** Each travels at its own speed and fights on arrival. Combined with square-law combat (§5), this makes *defeat in detail* the defining mistake of the game: throw five distant cities at one target and they'll be destroyed one at a time, while five nearby cities landing together will overwhelm it. Massing near a front before committing becomes the central skill, and distance genuinely matters rather than being flavour.
 
@@ -273,8 +304,19 @@ Single-station orders are the same gesture with one source selected, and **drag 
 
 - Multi-hop is allowed — target a distant station and stacks route along links.
 - **Units in transit are visible** as markers moving along links, strength and ETA legible at a glance.
-- **Click a station** for a small readout: type, garrison by unit type, capacity, growth rate and what's modifying it.
+- **Click a station** for a small readout: type, garrison by unit type, capacity, growth rate and what's modifying it — plus the two numbers a fight is decided by, defending power and what the same troops are worth attacking out.
 - Multiplier coverage is **shown on the map** — hold a farm and see the territories it's boosting light up.
+
+> **Amendment (rail rewrite): the readout is not a second copy of the map.**
+>
+> That bullet grew into a 284px column of ~35 rows of labelled text — a five-row growth breakdown, four farm rows, an eight-row strength block, a six-row march block. Every number in it was true. Most of them did not change a decision, and several were a thing already *drawn* rendered again as words: the logistic term is the capacity bar, the base rate is the station's type, farm coverage is the overlay two bullets down, the control tier is the territory's own tint.
+>
+> The rail is now **200px and icon-led**, which is not a cosmetic change — the player's window is 800px, so it hands the board back 84px it should never have taken. The rule that shrank it: **a row earns its place by changing what the player is about to do.** Everything else belongs on the map, where it is seen rather than read.
+>
+> Two invariants survive the cut, both bought with real bugs and neither negotiable:
+>
+> - **Station defense is additive and must never be drawn as a multiplier.** It is flat power added to the defence (`DEFENSE_BONUS_POWER`), so it is written `+12.0 power` with its working in `lvl`, never `×3.2`. A `×` anywhere in that block is a lie about the one number an assault turns on.
+> - **A readout answers the question on screen, or it says nothing.** Any predicted quantity comes from the function that makes the decision — never from a parallel calculation that happens to agree today (`docs/testing/known-issues.md` #18).
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -294,6 +336,12 @@ Single-station orders are the same gesture with one source selected, and **drag 
 ```
 
 Deliberately **not** present: build queue, resource bar, posting sliders, production menu, diplomacy inbox. All cut.
+
+### Choosing a power — the one screen before the board
+
+The game opens on an empire picker (`render/start.js`), because which power you are is the single largest decision in a match and it used to be a query string. **The map is the picker**: the seven homelands are painted in their colours on the real board, everything else is washed back, and clicking a country chooses it — clicking it a second time starts the game. A panel beside the board carries the same seven as cards, each with the §2 character line ("must win fast", "hard to digest") and the numbers that produce it — opening garrison, homeland stations, producers — read out of `data/` rather than typed. Hovering either side lights the other.
+
+Two properties are load-bearing rather than cosmetic. The panel is a **flex sibling of the board, not an overlay**, for the same reason the rail is (§8's whole gesture dies silently under a layer that accepts pointer events), and it is **removed from the document** on confirm rather than faded. And the pick happens **before `GAME.human` is set** — the board is drawn but nothing is wired, so "not playable yet" is the absence of listeners rather than a shield over them. `?player=fra` skips the screen, which is what that parameter is now for.
 
 ---
 

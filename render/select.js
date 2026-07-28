@@ -126,6 +126,8 @@ const SEL_STATE = {
   hoverTarget: null,      // station id currently being previewed against
   drag: null,             // { x0, y0, x1, y1, additive, moved }
   rdrag: null,            // { cx, cy, station, moved } — right button, in client px
+  armed: null,            // 'reinforce' | 'defend' — a standing order awaiting its
+                          // destination click. See _selArmOrder.
   wired: false,
   warnedNoPlayer: false,
 };
@@ -162,40 +164,42 @@ function selPlayer() {
   return null;
 }
 
-// Persistent 25/50/75/All setting (§8: "Set once, not per attack"). Owned by
+// The 25/50/75/All send amount, picked with the digits 1-4. Owned by
 // app/main.js; the tuning default stands in until then.
+//
+// ONE-SHOT: selCommit() calls resetSendFraction() after every volley, so this
+// reads 25% again by the next click. §8 called it "persistent… set once, not
+// per attack" and the player overruled that — see BAL.SEND_FRACTION_DEFAULT.
 function selFraction() {
   if (typeof sendFraction === 'function') return sendFraction();
   if (typeof window.sendFraction === 'function') return window.sendFraction();
   return (typeof BAL !== 'undefined' && BAL) ? BAL.SEND_FRACTION_DEFAULT : 0.75;
 }
 
-// ── the commit-time amount override ─────────────────────────────────────
+// ── the commit-time modifier ────────────────────────────────────────────
 //
-// Live modifier state. Kept as state rather than read only from the committing
-// event because the PREVIEW has to answer "what will this send" while the player
-// is merely holding a key with the mouse still — so it is refreshed from every
-// mousemove, keydown and keyup, and read again off the click itself so the
-// number that fires is the one the click carried, not the one a stale keyup
-// left behind.
-const SEL_MOD = { shift: false, alt: false, meta: false };
+// Live modifier state, refreshed from every mousemove, keydown and keyup and
+// read again off the click itself, so the decision that fires is the one the
+// click carried and not the one a stale keyup left behind.
+//
+// ONLY CMD REMAINS. Shift = all and Alt = half are deleted: the digits 1-4 set
+// the amount with one hand and no key held while aiming, and shift already
+// meant additive-select on the same pointer. `meta` is not an amount — it is
+// "the group survives this volley" — so nothing replaces it.
+const SEL_MOD = { meta: false };
 
 // Fold an event's modifier flags into SEL_MOD. Returns true if anything changed,
 // so callers can skip a redraw on the ~60 no-op mousemoves a second.
 function _selSyncMods(evt) {
-  const s = !!(evt && evt.shiftKey);
-  const a = !!(evt && evt.altKey);
   const m = !!(evt && evt.metaKey);
-  if (s === SEL_MOD.shift && a === SEL_MOD.alt && m === SEL_MOD.meta) return false;
-  SEL_MOD.shift = s; SEL_MOD.alt = a; SEL_MOD.meta = m;
+  if (m === SEL_MOD.meta) return false;
+  SEL_MOD.meta = m;
   return true;
 }
 
-// What this volley would actually use. The persistent setting is the default;
-// shift and alt override it for one click only.
+// What this volley would actually use. One number, from the button row, and no
+// longer overridable at the click — the amount is chosen before you aim.
 function selEffectiveFraction() {
-  if (SEL_MOD.shift) return 1;
-  if (SEL_MOD.alt) return 0.5;
   return selFraction();
 }
 
@@ -203,9 +207,23 @@ function selEffectiveFraction() {
 // applyCommand() will build from `fraction`, because it drives the preview ETA
 // (a stack travels at the speed of its slowest kind), the refusal test, and the
 // payload label — a preview that disagrees with the commit is worse than none.
+//
+// sendPayload() rather than splitUnits(): sim/commands.js holds a unit back so a
+// city can never be emptied to zero and left unable to regrow, and the preview
+// must show the number that will actually leave. Calling splitUnits() here would
+// be the two-expressions-that-happen-to-agree arrangement known-issue #18 is
+// about — it agreed for a year, and then it did not.
 function _selPayload(units) {
-  if (!units || typeof splitUnits !== 'function') return null;
-  return splitUnits(units, selEffectiveFraction());
+  if (!units) return null;
+  if (typeof sendPayload === 'function') return sendPayload(units, selEffectiveFraction());
+  if (typeof splitUnits === 'function') return splitUnits(units, selEffectiveFraction());
+  return null;
+}
+
+// The amount changed under a stationary cursor (app/main.js calls this from
+// setSendFraction). Only the preview depends on it, and only when there is one.
+function selOnFractionChange() {
+  if (SEL_STATE && SEL_STATE.hoverTarget) selRedraw();
 }
 
 // ── payload label (00-vision.md §8, "the number is the interface") ──────
@@ -1019,6 +1037,16 @@ function selCommit(target) {
   // outlive the gesture that asked for it. Firing one massed army at four
   // targets in sequence is then four clicks, not four clicks plus three
   // reselections.
+  // THE AMOUNT RELAXES. Whatever digit was pressed bought exactly this one
+  // volley; the next click is 25% again unless the player says otherwise. This
+  // is the whole of the one-shot rule and it lives here, on the event that
+  // spends it, rather than in app/main.js where the value lives — a setting
+  // cannot know when it has been used.
+  //
+  // Before the selection is cleared, so a redraw triggered by the reset paints
+  // against the group that still exists.
+  if (typeof resetSendFraction === 'function') resetSendFraction();
+
   if (!keep) {
     clearSelection();
     return res;
@@ -1179,6 +1207,11 @@ function selOnMouseUp(evt) {
   // --- a click ---
   const sid = selStationAt(evt);
 
+  // AN ARMED ORDER EATS THE CLICK, before the gesture table below runs. It has
+  // to be first: every branch under it either changes the selection or launches
+  // troops, and the whole point of arming is that this one click means neither.
+  if (_selCommitArmed(sid)) return;
+
   if (!sid) {
     // Empty ground. Shift-click on nothing is a miss, not a clear.
     if (!evt.shiftKey) clearSelection();
@@ -1256,6 +1289,11 @@ function selOnKeyDown(evt) {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
   if (evt.key === 'Escape') {
+    // Escape backs out one step at a time. An armed order is the more recent
+    // and more surprising state to be in, so it is what Escape reaches first —
+    // and the group survives, because you almost certainly want to give it a
+    // different order rather than rebuild it.
+    if (_selDisarm()) return;
     clearSelection();
     return;
   }
@@ -1268,42 +1306,252 @@ function selOnKeyDown(evt) {
     return;
   }
 
-  // H / R / F — the standing order of every selected station, in one command.
+  // R / H — the supply lines of every selected station.
   //
   // BARE KEYS ONLY. Every modifier on this board already means something at the
-  // moment of a click (shift = all, alt = half, cmd = keep the group, ctrl+A =
-  // select everything), and a key that fires while one of them is held would
-  // fire in the middle of somebody aiming a volley. So the guard is all four,
-  // not just the two that currently collide.
+  // moment of a click (cmd = keep the group, shift = add to the selection,
+  // ctrl+A = select everything), and a key that fired while one of them was held
+  // would fire in the middle of somebody aiming a volley. The guard is all four
+  // rather than only the ones that currently collide, because the next modifier
+  // to acquire a meaning should not silently break this.
   if (!evt.shiftKey && !evt.altKey && !evt.metaKey && !evt.ctrlKey) {
-    const order = SEL_ORDER_KEYS[evt.key];
-    if (order) {
+    const verb = SEL_ORDER_KEYS[evt.key];
+    if (verb) {
       evt.preventDefault();
-      _selApplyOrder(order);
+      // R names a city, so it only ARMS — the click that follows is the order.
+      // H needs no destination and fires now.
+      //
+      // H WITH NOTHING SELECTED DOES NOTHING, deliberately. The obvious
+      // alternative — make it clear the whole empire — puts "delete every supply
+      // line I have built, with no undo" one stray keystroke away from a board
+      // where H is pressed constantly. Ctrl+A then H is the same thing in two
+      // keys and cannot be done by accident, and it is visible in the selection
+      // before it happens.
+      if (verb === 'supply') _selArmOrder();
+      else { _selDisarm(); _selApplyOrder(null); }
     }
   }
 }
 
 // ── standing orders (01-data-schema.md, "Standing orders") ──────────────
 //
-// One pipe with two ends and an off switch, set per station: `hold` (the
-// default and the off switch), `rally` (a sink) and `feed` (a source). The sim
-// half lives in sim/movement.js; this is the whole of setting one.
+// A SUPPLY LINE: sources, and a named destination.
 //
-// WHY A KEY AND NOT A BUTTON. The complaint that produced the commit-time
-// modifiers applies here word for word — *"it needs to be something that can
-// happen very quickly as the player is making many moves in parallel."* An
-// order is set on a GROUP: marquee the rear provinces, press F, marquee the
-// front, press R. A per-station panel control would make that twenty round
-// trips to the rail, and the player would simply not use the mechanic.
+//     select the rear cities  →  press R  →  click the city they feed
+//
+// TWO VERBS BECAME ONE. The shape before this was `reinforce` / `defend`, and
+// the player cut the second: *"it's the same action in the inverse."* The reason
+// that is right, and the reason it matters more here than it looks: `defend`
+// only shipped when the SIM judged the destination "threatened", which is the
+// same hidden guess that `feed`/`rally` made when it matched each feeder to its
+// nearest sink, and getting rid of that guess is the entire point of this
+// rewrite. The capacity ceiling already does defend's job out of a number the
+// player can see — a full destination accepts nothing, so a quiet front banks
+// force at home by itself.
+//
+// R arms; the next click on your own ground names the city. H needs no
+// destination — it is the off switch and applies the moment it is pressed.
+//
+// R IS A TOGGLE, which is where cancel comes from. Press R and click a city the
+// whole group already feeds and the line is removed. No second key, no mode, and
+// the same gesture reads both ways.
+//
+// WHY KEYS AND NOT BUTTONS. Word for word the complaint that produced the digit
+// keys: *"it needs to be something that can happen very quickly as the player is
+// making many moves in parallel."* A line is set on a GROUP — marquee the rear
+// provinces, press R, click the front — and a per-station panel control would
+// make that twenty round trips to the rail.
 //
 // Lowercase and uppercase both, because caps lock is not a mode anyone here
-// opted into. Shift+F is NOT this key — see the modifier guard above.
+// opted into. Shift+R is NOT this key — see the modifier guard above.
 const SEL_ORDER_KEYS = {
-  h: 'hold', H: 'hold',
-  r: 'rally', R: 'rally',
-  f: 'feed', F: 'feed',
+  h: 'clear', H: 'clear',
+  r: 'supply', R: 'supply',
 };
+
+// Arm a directed order. The verb is chosen now; the destination is the next
+// left-click on ground the player holds.
+//
+// ARMING IS NOT A MODE, and the difference matters. It is consumed by exactly
+// one click, cancelled by Escape, by H, by a click on anything that is not your
+// own city, and by the selection going empty — there is no state anywhere that
+// keeps it alive past the gesture that asked for it, which is the same rule the
+// Cmd-held volley follows. A mode you can forget you are in, on a board where
+// the next click otherwise launches an attack, is exactly the accident the
+// left-click gesture table was rewritten to remove.
+function _selArmOrder() {
+  // Nothing selected: silently do nothing rather than arm an order that has no
+  // sources, which would leave the player's next click mysteriously inert.
+  if (!selectedSources().filter(selIsMine).length) return null;
+  SEL_STATE.armed = 'supply';
+  _selPaintArmed();
+  return 'supply';
+}
+
+function _selDisarm() {
+  if (!SEL_STATE.armed) return false;
+  SEL_STATE.armed = null;
+  _selPaintArmed();
+  return true;
+}
+
+// The armed state is the one piece of UI in this file that lives outside the
+// SVG, because it is a statement about what the NEXT click will do and it has to
+// be visible while the cursor is anywhere on the board — including over the
+// rail, over the HUD, and over empty sea. A caret on the nodes could not say it.
+//
+// Written to #send-armed in index.html; absent element is not an error, since
+// the board has to work with any chrome missing (the same rule renderBoard
+// follows).
+// One armed state, so one string — and it names the toggle rather than only the
+// add, because the same gesture is how a line is removed and a banner that only
+// said "click the city to supply" would make cancelling feel like a bug.
+const SEL_ARMED_TEXT = 'SUPPLY — click a city to add or remove it';
+
+// ── the confirmation ────────────────────────────────────────────────────
+//
+// Added 2026-07 on the player's instruction: "the confirmation on
+// reinforcements being sent is unclear. there needs to be a better visible
+// confirmation that the click went through".
+//
+// The failure was real and specific. Arming put a banner on screen; committing
+// took it away and put NOTHING in its place. The only evidence the click had
+// landed was a small marker appearing on a station somewhere on a 108-node
+// board — quite possibly not the node under the cursor, and quite possibly
+// scrolled off. A gesture whose success and whose failure look identical is a
+// gesture the player stops trusting, and then stops using.
+//
+// It reuses #send-armed rather than adding an element. That is not laziness:
+// that banner is already `position: fixed` with `pointer-events: none`, and
+// both properties were paid for. Fixed because putting it in the bottom bar's
+// FLOW grew the bar by 14px and shifted the whole board up 15px under a cursor
+// that was one click from naming a city. And pointer-events:none because
+// anything over the board that accepts them silently eats the click that
+// commits an attack, with no error at all — this project has been bitten by
+// that five times. A second banner would have to re-earn both.
+const SEL_CONFIRM_MS = 2200;
+let SEL_CONFIRM_TIMER = null;
+
+function _selStationName(sid) {
+  return (typeof STATIONS !== 'undefined' && STATIONS[sid] && STATIONS[sid].name) || sid;
+}
+
+// Names the DESTINATION and counts the SOURCES, because those are the two
+// things the player cannot verify by looking. Which cities were selected has
+// just scrolled out of their head; which city they clicked is under the cursor
+// but the click is what is in doubt.
+function _selConfirmText(res, target) {
+  if (!res) return '';
+
+  if (!res.ok) {
+    const why = res.reason === 'target-not-owned' ? 'that city is not yours'
+              : res.reason === 'unknown-target'   ? 'no city there'
+              : 'order refused';
+    return 'CANNOT SUPPLY — ' + why;
+  }
+
+  const acc = res.accepted || [];
+  const sources = [];
+  const moved = [];
+  for (let i = 0; i < acc.length; i++) {
+    if (sources.indexOf(acc[i].station) < 0) sources.push(acc[i].station);
+    if (acc[i].changed && moved.indexOf(acc[i].station) < 0) moved.push(acc[i].station);
+  }
+  const count = (list) => (list.length === 1
+    ? _selStationName(list[0])
+    : list.length + ' cities');
+
+  // CLEAR counts what actually changed. "Cleared 3 cities" when none of the
+  // three had a line is the false confirmation this banner exists to stop.
+  if (target === null) {
+    return moved.length
+      ? 'SUPPLY LINES CLEARED — ' + count(moved)
+      : 'NO SUPPLY LINES TO CLEAR';
+  }
+
+  // A TOGGLE counts the whole group, deliberately. "Supplying Leipzig — 3
+  // cities" is a statement about the state the board is now in, and all three
+  // do supply Leipzig, including the one that already did before the click.
+  if (!sources.length) return 'NOTHING CHANGED';
+  const many = count(sources);
+
+  // `added` is decided ONCE for the whole group in _cmdApplyOrder, so reading
+  // it off the first entry is reading the group's verdict, not one station's.
+  return (acc[0].added ? 'SUPPLYING ' : 'NO LONGER SUPPLYING ') +
+         String(_selStationName(target)).toUpperCase() + ' — ' + many;
+}
+
+function _selClearConfirm() {
+  if (SEL_CONFIRM_TIMER === null) return;
+  clearTimeout(SEL_CONFIRM_TIMER);
+  SEL_CONFIRM_TIMER = null;
+}
+
+function _selConfirm(res, target) {
+  const el = (typeof byId === 'function') ? byId('send-armed') : null;
+  if (!el) return;
+  const text = _selConfirmText(res, target);
+  if (!text) return;
+
+  _selClearConfirm();
+  el.textContent = text;
+  el.hidden = false;
+
+  const refused = !(res && res.ok);
+  el.classList.toggle('is-refused', refused);
+  el.classList.toggle('is-confirm', !refused);
+
+  // The power colour as an inline style, not a class: there are seven of them
+  // and they live in data/scenario.js, not the palette. A stylesheet rule
+  // silently outranks an SVG presentation attribute (known-issues #15), which
+  // is why every per-instance colour on this project is written as a style.
+  const me = selPlayer();
+  const power = (typeof POWERS !== 'undefined' && me) ? POWERS[me] : null;
+  el.style.background = (!refused && power && power.color) ? power.color : '';
+
+  SEL_CONFIRM_TIMER = setTimeout(function () {
+    SEL_CONFIRM_TIMER = null;
+    // Re-read the armed state rather than blanking unconditionally: the player
+    // may well have pressed R again inside the two seconds, and a timer from
+    // the previous order must never wipe the banner for the current one.
+    _selPaintArmed();
+  }, SEL_CONFIRM_MS);
+}
+
+function _selPaintArmed() {
+  const el = (typeof byId === 'function') ? byId('send-armed') : null;
+  if (!el) return;
+  const verb = SEL_STATE.armed;
+  // Arming supersedes a confirmation still on screen — "what the next click
+  // will do" always outranks "what the last click did".
+  _selClearConfirm();
+  el.classList.remove('is-confirm');
+  el.classList.remove('is-refused');
+  el.style.background = '';
+  el.textContent = verb ? SEL_ARMED_TEXT : '';
+  el.hidden = !verb;
+  // A class rather than inline style so style.css owns the look — and on the
+  // board wrapper, not the element, because the cursor is the other half of the
+  // signal and it has to change over the map.
+  const app = document.querySelector('.app');
+  if (app) app.classList.toggle('is-arming', !!verb);
+}
+
+// The destination click. Returns true if the click was CONSUMED, which is what
+// stops it also being read as a selection toggle or a volley.
+function _selCommitArmed(sid) {
+  if (!SEL_STATE.armed) return false;
+
+  // Cancel on anything that is not your own city — an enemy node, empty sea,
+  // a station lost since the key was pressed. Consumed either way: a click that
+  // both cancelled the arming AND fired a volley at the enemy under the cursor
+  // would be the worst possible reading of an ambiguous gesture.
+  if (!sid || !selIsMine(sid)) { _selDisarm(); return true; }
+
+  _selDisarm();
+  _selApplyOrder(sid);
+  return true;
+}
 
 // THE SELECTION SURVIVES. This is the one deliberate difference from selCommit,
 // and it is not an oversight:
@@ -1311,19 +1559,21 @@ const SEL_ORDER_KEYS = {
 //   * A volley is SPENT. Its sources have just emptied themselves at a target,
 //     so keeping them selected would offer up a group that no longer exists in
 //     any useful form — hence §8's "selection clears".
-//   * An order costs nothing and CHANGES nothing about the group. Setting one
-//     is almost always followed by setting another (feed the rear, then rally
-//     the front), and every intermediate state is a legitimate thing to want:
-//     press F, look at the map, press H because that was the wrong group.
-//     Clearing here would mean re-marqueeing the same cities to correct a
-//     one-key mistake.
+//   * A supply line costs nothing and CHANGES nothing about the group. Setting
+//     one is almost always followed by setting another — the same rear cities
+//     feeding two or three points of the front is now the normal case, and it is
+//     three presses of R with the same group still selected. Clearing here would
+//     mean re-marqueeing those cities between every one of them.
 //
 // ONE applyCommand FOR THE WHOLE GROUP, not one per station. `{type:'order'}`
 // already takes a list and already validates per station — an unowned entry is
 // rejected on its own and the rest still apply (01-data-schema.md) — so a loop
 // here would be N commands doing what one does, and would report N results the
-// caller then has to merge.
-function _selApplyOrder(order) {
+// caller then has to merge. It also matters for correctness now and not just
+// tidiness: the add-or-remove verdict is decided ONCE for the whole list (see
+// _cmdApplyOrder), and N separate commands would each decide it alone and flip
+// half the group the wrong way.
+function _selApplyOrder(target) {
   const g = selGame();
   const me = selPlayer();
   if (!g || !me) return null;
@@ -1345,12 +1595,21 @@ function _selApplyOrder(order) {
     type: 'order',
     owner: me,
     stations: stations,
-    order: order,
+    // A station id TOGGLES that supply line for the group; null CLEARS every
+    // line the group has. Two meanings, one field, because they are the same
+    // question — "which destinations do these cities serve" — answered with
+    // one entry or with none.
+    target: target || null,
   });
 
   if (!res || !res.ok) {
     console.warn('[render/select] order rejected:', res && res.reason, res && res.rejected);
   }
+
+  // Say what happened, every time, including when nothing happened. See
+  // _selConfirm — the old silence made a refused order and a successful one
+  // look exactly alike.
+  _selConfirm(res, target || null);
   // No selRedraw(). Nothing this file DRAWS depends on an order — the marker is
   // render/map.js's, on the station node, repainted by renderLive every frame
   // (which runs while paused, see app/loop.js), and the rail reads the order
@@ -1369,6 +1628,9 @@ function selectedSources() {
 }
 
 function clearSelection() {
+  // An armed order with no sources is an order that cannot be given, so it goes
+  // with the group rather than lying in wait to eat the next click.
+  _selDisarm();
   SEL_STATE.selected.clear();
   SEL_STATE.hoverTarget = null;
   selClearNode(selLayer('sel-carets', 'sel-carets'));

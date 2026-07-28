@@ -18,9 +18,12 @@
     </div>
 
     <div class="hud-group speed" id="speed-controls">
-      <button type="button" class="btn speed-btn is-active" data-speed="0" id="speed-pause" title="Pause">&#9208;</button>
-      <button type="button" class="btn speed-btn" data-speed="1">1x</button>
-      <button type="button" class="btn speed-btn" data-speed="2">2x</button>
+      <!-- 1x deleted 2026-07 on the player's instruction; 2x is the default and
+           the slow speed now. See BAL.SPEEDS for why this costs nothing: the
+           loop scales time CONSUMED, never the timestep, so the sim at 2x is
+           the same sim. Pause is still how you stop to read the board. -->
+      <button type="button" class="btn speed-btn" data-speed="0" id="speed-pause" title="Pause (space)">&#9208;</button>
+      <button type="button" class="btn speed-btn is-active" data-speed="2">2x</button>
       <button type="button" class="btn speed-btn" data-speed="4">4x</button>
     </div>
 
@@ -86,10 +89,22 @@
   <footer class="bottombar">
     <div class="send-control" id="send-control">
       <span class="hud-label">send</span>
-      <button type="button" class="btn send-btn" data-fraction="0.25">25</button>
-      <button type="button" class="btn send-btn" data-fraction="0.5">50</button>
-      <button type="button" class="btn send-btn is-active" data-fraction="0.75">75</button>
-      <button type="button" class="btn send-btn" data-fraction="1">All</button>
+      <!-- ONE-SHOT, and the digit that selects each one is on its face. The
+           active button relaxes back to 25 after every volley (render/select.js,
+           selCommit) — see BAL.SEND_FRACTION_DEFAULT for the player's reasoning.
+           data-key is read by nothing; it is a label, and the binding itself is
+           derived from BAL.SEND_FRACTIONS so the two cannot drift. -->
+      <button type="button" class="btn send-btn is-active" data-fraction="0.25"><b>1</b>25</button>
+      <button type="button" class="btn send-btn" data-fraction="0.5"><b>2</b>50</button>
+      <button type="button" class="btn send-btn" data-fraction="0.75"><b>3</b>75</button>
+      <button type="button" class="btn send-btn" data-fraction="1"><b>4</b>All</button>
+
+      <!-- What the NEXT click will do, while a supply line is armed by R
+           (render/select.js, _selPaintArmed). Rendered as a fixed banner at the
+           top of the board, not here — see the `.send-armed` rule, which
+           explains why it must not sit in this bar's flow. It lives in this
+           element only because the send box is where it conceptually belongs. -->
+      <span class="send-armed" id="send-armed" hidden aria-live="polite"></span>
 
       <!-- The INF · ART · ARM type toggles used to sit here. Deleted 2026-07 on
            the player's instruction ("Delete them."). Choosing SOURCES already
@@ -113,17 +128,25 @@
     <p class="send-hint" id="send-hint">
       <span class="send-hint-item is-basic"><b>click</b> yours = select</span>
       <span class="send-hint-item is-basic"><b>click</b> enemy = attack</span>
-      <span class="send-hint-item"><b>right-click</b> = reinforce</span>
-      <span class="send-hint-item"><b>&#8679;</b>click = all</span>
-      <span class="send-hint-item"><b>&#8997;</b>click = half</span>
+      <span class="send-hint-item is-basic"><b>1&#8202;2&#8202;3&#8202;4</b> = 25&#8202;&#183;&#8202;50&#8202;&#183;&#8202;75&#8202;&#183;&#8202;all</span>
+      <!-- "move", not "reinforce". R is now the standing REINFORCE order, and
+           two different gestures both called reinforce — one a single march, one
+           a permanent supply line — is the kind of collision that makes a hint
+           line worse than no hint line. -->
+      <span class="send-hint-item"><b>right-click</b> = move</span>
       <span class="send-hint-item"><b>&#8984;</b>click = keep group</span>
       <!-- Standing orders (render/select.js, _selApplyOrder). Not `.is-basic`:
            a key that acts on the current selection is invisible to anyone who
            does not already know it exists, which is precisely the tier this
-           line is for. Written as three bare letters because that is what the
-           player types — no modifier, which is itself the thing to know, since
-           every other accelerator on this bar needs one. -->
-      <span class="send-hint-item"><b>H R F</b> = hold&#183;rally&#183;feed</span>
+           line is for. Written as a two-step because that is what it is now —
+           the key ARMS, the next click on your own ground names the destination.
+           The old bare `H R F` needed no target and so needed no arrow.
+
+           The shift = all / alt = half commit modifiers that used to sit on
+           this line are gone: 1-4 does the same job with one hand and no timing,
+           and shift was already overloaded as additive-select on the same
+           pointer. Cmd stays — keeping the group is not an amount. -->
+      <span class="send-hint-item"><b>R</b>&#8202;&#8594;&#8202;click = supply on/off, <b>H</b> = clear</span>
     </p>
 
     <div class="powers" id="powers-strip"></div>
@@ -173,6 +196,11 @@
 <script src="render/readout.js"></script>
 <script src="render/victory.js"></script>
 <script src="render/camera.js"></script>
+<!-- The empire picker. After the other render/ files because it calls map.js's
+     shapePoints/pointsAttr to draw the homelands from the same geometry the
+     board is drawn from, and before app/loop.js because app/main.js's boot()
+     hands it the board and waits for a power before there is a game to run. -->
+<script src="render/start.js"></script>
 
 <script src="app/loop.js"></script>
 <script src="app/main.js"></script>

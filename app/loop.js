@@ -69,8 +69,14 @@ var _loopRunning = false;    // rAF chain is live
 var _loopRafId = 0;
 var _loopLastMs = 0;         // performance.now() of the previous frame
 var _loopAccumMs = 0;        // unconsumed sim time, in *sim* milliseconds
-var _loopSpeed = 1;          // 0 = paused; otherwise a SPEEDS entry
-var _loopPrevSpeed = 1;      // what unpausing restores (BAL.SPEEDS comment)
+// 1x no longer exists (BAL.SPEEDS), so the fallback for "some speed, any
+// speed" is the slowest one still offered. Read from BAL rather than written as
+// a literal, because a default that disagreed with the button row would show an
+// active state on a button that was not what the loop was doing.
+var LOOP_DEFAULT_SPEED = (typeof BAL !== 'undefined' && BAL && BAL.SPEED_DEFAULT) || 2;
+
+var _loopSpeed = LOOP_DEFAULT_SPEED;      // 0 = paused; otherwise a SPEEDS entry
+var _loopPrevSpeed = LOOP_DEFAULT_SPEED;  // what unpausing restores
 
 // Diagnostics. Cheap, and the difference between "the loop is wedged" and "the
 // sim is wedged" is otherwise invisible from the console.
@@ -93,7 +99,7 @@ var LOOP_STATS = {
 // should say what the player was actually looking at.
 function setSpeed(n) {
   var v = Number(n);
-  if (!isFinite(v) || v < 0) v = 1;
+  if (!isFinite(v) || v < 0) v = LOOP_DEFAULT_SPEED;
 
   if (v > 0) _loopPrevSpeed = v;
   _loopSpeed = v;
@@ -116,7 +122,7 @@ function setSpeed(n) {
 
 // Space-bar behaviour: pause, or resume at whatever speed was last chosen.
 function togglePause() {
-  return setSpeed(_loopSpeed === 0 ? (_loopPrevSpeed || 1) : 0);
+  return setSpeed(_loopSpeed === 0 ? (_loopPrevSpeed || LOOP_DEFAULT_SPEED) : 0);
 }
 
 function currentSpeed() {

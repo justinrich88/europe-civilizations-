@@ -45,6 +45,10 @@ function resetLiveIndex() {
   LIVE.stat = Object.create(null);
   LIVE.terr = Object.create(null);
   LIVE.label = [];
+  // Every supply-route chevron on the board, flat. Rebuilt by mapChevIndex()
+  // whenever a route is added or dropped; read by mapApplySymbolScale to hold
+  // them at a constant on-screen size, exactly as LIVE.label does for captions.
+  LIVE.chev = [];
   LIVE.symK = null;
   LIVE.writes = 0;
 }
@@ -89,6 +93,13 @@ function mapApplySymbolScale(force) {
   }
   for (const rec of LIVE.label) {
     setAttr(rec.node, 'transform', mapSymbolTransform(rec.x, rec.y, k));
+  }
+  // Supply-route chevrons. Their POSITION is board space and never changes with
+  // the camera; only their size does, which is the same bargain every symbol on
+  // this map makes. Zero-length on a board with no supply lines, so this loop
+  // costs nothing until somebody draws one.
+  for (const rec of (LIVE.chev || [])) {
+    setAttr(rec.node, 'transform', mapOrientTransform(rec.x, rec.y, k, rec.deg));
   }
   return LIVE.writes - before;
 }
@@ -200,14 +211,44 @@ function controlOf(state, territoryId) {
 // so the turn-zero snapshot can be handed to it as a state-shaped object. That
 // is how renderBoard() tints the board before app/main.js has made a GAME —
 // same function, same rule, no second implementation.
+//
+// IT IS HANDED TO liveStations() TOO, and that is a bigger contract than
+// territoryControl's. drawStations() finishes by painting the turn-zero
+// snapshot through the same path every later frame uses — which is the right
+// design, one renderer and no "static mode" — but it means this object has to
+// satisfy every read liveStations makes, not just `owner`. It did not: with no
+// `units` bag, `const u = st.units; u.infantry` threw, renderBoard() died
+// part-way through, and the shell that is supposed to be viewable before
+// app/main.js exists took drawTerritoryLabels and drawPowerLegend down with it.
+//
+// Nothing in the running game noticed, because the start screen creates GAME
+// before it calls renderBoard(). A bootstrap path that only runs when something
+// else has failed is exactly the path nobody exercises, so it is filled in from
+// SETUP rather than zeroed: the pre-game board then shows the real opening
+// garrisons, which makes "did the data load?" answerable by looking at it.
+//
+// EVERY FIELD liveStations READS lives here, `supplyTo` included. A pseudo-state
+// that is missing one is not a smaller state, it is a state that throws.
 function setupPseudoState(D) {
   const stations = Object.create(null);
   if (D.STATIONS) {
     for (const sid in D.STATIONS) {
-      stations[sid] = { owner: stationOwner(D, sid) || 'neutral' };
+      const setup = (D.SETUP && D.SETUP[sid]) || null;
+      const u = (setup && setup.units) || null;
+      stations[sid] = {
+        owner: stationOwner(D, sid) || 'neutral',
+        units: {
+          infantry: (u && u.infantry) || 0,
+          artillery: (u && u.artillery) || 0,
+          armour: (u && u.armour) || 0,
+        },
+        connected: true,
+        growthMul: 1,
+        supplyTo: [],
+      };
     }
   }
-  return { stations: stations };
+  return { stations: stations, tick: 0, waves: [], battles: {}, powers: {} };
 }
 
 // ── geometry helpers ────────────────────────────────────────────────────
@@ -429,121 +470,77 @@ function mapAlertReach(power) {
   return clamp(Math.round(2 + 4.5 * Math.log10(1 + p)), MAP_ALERT_MIN, MAP_ALERT_MAX);
 }
 
-// ── standing-order marker ───────────────────────────────────────────────
+// ── supply routes ───────────────────────────────────────────────────────
 //
-// 01-data-schema.md, "Standing orders": one pipe with two ends and an off
-// switch. The player needs to see their logistics network as a NETWORK —
-// which cities are draining and which are collecting — without clicking each
-// one, or the mechanic is set once and then forgotten about.
+// 01-data-schema.md, "Standing orders": a city carries `supplyTo`, the list of
+// cities it streams surplus to. Each entry is drawn as THE ROUTE THE UNITS WILL
+// ACTUALLY WALK — a solid polyline in the owner's power colour, with chevrons
+// repeated along it showing which way the supply flows.
 //
-// NOTHING IS DRAWN FOR 'hold'. It is the default and, on any real board, it is
-// what ~all 108 stations carry. Drawing it would put a mark on every node to
-// say "no instruction", which is not information; drawing only the deliberate
-// orders means the marks on the map ARE the player's intent, and the count of
-// them is the size of their logistics network. It also makes the whole feature
-// free on a board where nobody has used it: the DOM below is built lazily, on a
-// station's first non-hold order, exactly like the battle group above — so a
-// board with no orders renders byte-identically to one built before this
-// existed, which is checkable rather than asserted.
+// IT USED TO BE AN ARROW ON THE NODE and that was not enough. A 15-unit glyph
+// in the slot under the source said "this city supplies somebody, roughly that
+// way"; it did not say WHICH somebody, it did not say by what path, and it was
+// nearly invisible on a 108-station board. Worse, measured on the live board at
+// the 800px window this game is played at: Berlin's lines to Leipzig Works and
+// Frankfurt are 6.4 degrees apart, which put their two arrows 2.8 SCREEN PIXELS
+// apart while each was 9.8 pixels long. They drew on top of each other, and one
+// of them was barred. Neighbouring cities cluster on a real map, so that is the
+// normal case rather than a corner. The route is tens of pixels long, cannot be
+// occluded by its own sibling, and answers all three questions at once.
 //
-// WHICH CHANNEL. Every obvious one on this board is taken and each is taken by
-// something more important:
+// THE ROUTE, NOT THE CROW-FLIES SEGMENT. routeFor() is the same
+// ownership-aware search applyCommand uses to build the wave, so the line on
+// the board is the path the units take, hop by hop. Drawing a straight segment
+// where the stream will actually go three hops around a mountain would be a
+// readout answering a different question from the one on screen —
+// known-issues #18, which this project has already paid for once. Nothing here
+// reimplements routing; it asks the one authority.
 //
-//   colour            = ownership, seven power hues (§8, non-negotiable)
-//   node silhouette   = station type, four shapes (§8)
-//   caret ABOVE       = selection (render/select.js)
-//   expanding rings   = a fight is happening here (.station-alert)
-//   amber float label = multiplier ×N (.station-modifier, upper right)
-//   broken-link glyph = cut off from the capital (.station-cut, upper right)
-//   achromatic arc    = how full this station is (.station-fill)
+// COLOUR IS OWNERSHIP, which is why it is allowed. §8 reserves colour for who
+// holds what, and these lines are exactly that: whose supply this is. With
+// three powers running networks across the same ground it is the only channel
+// that separates them. Solid, never dashed — a dash already means a sea
+// crossing on this board (`.link.is-sea`) and overloading it would make a
+// supply line read as water.
 //
-// So this takes a POSITION nothing else claims plus a DIRECTION, and no hue at
-// all. The slot is directly BELOW the node and below the station's name — at
-// the same radius the attacker's number uses, which is the only other thing
-// down there and which only exists during a fight (the marker stands down while
-// `.is-fighting`, since a battle is the more time-critical reading and the two
-// would otherwise sit on each other).
+// WHAT IS DRAWN FOR A CITY THAT SUPPLIES NOWHERE: nothing at all. That is the
+// default and, on any real board, what ~all 108 stations carry. The DOM below
+// is built lazily on a station's first supply line, so a board nobody has
+// ordered renders byte-identically to one built before this existed — checkable
+// rather than asserted — and a PAUSED board recomputes nothing, because the two
+// things that invalidate a route (the list, and state.ownerEpoch) are both
+// state and neither moves while the game is stopped.
 //
-// Direction carries which end of the pipe this is, and it is not arbitrary:
-// the marker hangs below the node, so an arrow pointing UP points INTO the city
-// (rally, a sink) and an arrow pointing DOWN points OUT of it (feed, a source).
-// Nobody has to be told which way round that is.
-//
-// Monochrome, so it cannot be read as a second ownership channel — the same
-// escape the fullness ring and the combat ripples take.
-// Drop below the momentum ring, in the station's own local space. The slot has
-// two neighbours and the number is set by clearing both:
-//
-//   the station NAME  y = r + 9 baseline, 8px, descending to about r + 11.
-//   the ATTACKER'S    y = rec.attY (momR + 9), dominant-baseline central and
-//   number            up to 16 units tall, so it spans roughly momR ± 8.
-//
-// 14 puts the glyph's top edge (7.6 units up from its centre) at about r + 12.4
-// — clear of the name by 1.4 units — and it still collides with the attacker's
-// number, which is why the marker stands down while `.is-fighting`. In a battle
-// the fight is the reading; the order has not gone anywhere.
-const MAP_ORDER_DROP = 14;
+// POINTER-EVENTS ARE OFF IN THE STYLESHEET, on the group and on every child.
+// These lines cross the whole board and pass over dozens of stations. Anything
+// painted over the board that accepts pointer events swallows the click that
+// commits an attack, with no error at all; that has happened five times on this
+// project and this is the largest hit area anything in render/map.js has ever
+// added. It is checked on the live board by sampling elementFromPoint along a
+// route, not by reading the stylesheet.
 
-// SIZE IS MEASURED, NOT CHOSEN. The first pass authored a 9.4-unit glyph, which
-// on the 800px window this game is actually played at renders 4.9 SCREEN PIXELS
-// tall — against a garrison number of 8.8px on the same node. Screenshotted, it
-// could not be found on the board at all, which is the whole feature failing:
-// the marker exists so the logistics network is legible WITHOUT clicking each
-// city. 15.2 units comes out at 7.8px, comfortably readable and still visibly
-// secondary to the number §8 calls the interface. (Both figures are on-screen
-// constants — the marker lives inside the station <g>, which map.js already
-// counter-scales by cameraSymbolScale(), so it holds that size at every zoom
-// with no extra transform of its own.)
-//
-// Both glyphs are STATIC path data, authored once here and never rewritten.
-// Which of the two is visible is a class on the group, exactly as .is-cut and
-// .is-fighting already work on the station <g> — a discrete state, not a
-// per-frame computed value, so there is no presentation attribute for a
-// stylesheet rule to silently outrank (known-issues #15). The only per-frame
-// decision is a diff-gated classList toggle.
-const MAP_ORDER_FEED_D =
-  'M-2.2,-7.6 L2.2,-7.6 L2.2,0.6 L6.2,0.6 L0,7.6 L-6.2,0.6 L-2.2,0.6 Z';
-const MAP_ORDER_RALLY_D =
-  'M-2.2,7.6 L2.2,7.6 L2.2,-0.6 L6.2,-0.6 L0,-7.6 L-6.2,-0.6 L-2.2,-0.6 Z';
+// Chevron pointing along +X, filled, ~10.8 units long. Counter-scaled by
+// cameraSymbolScale() like every other symbol on this map, so it holds ~7
+// screen pixels at 1x through 4x (known-issues #17: a length authored in board
+// units and divided by cameraScale() alone is constant under zoom and NOT under
+// window size — nothing here divides by anything, the counter-scale does it).
+const MAP_ORDER_CHEV_D = 'M-4.8,-6.3 L3.3,0 L-4.8,6.3 L-7.5,3.9 L-2.1,0 L-7.5,-3.9 Z';
 
-// ── A FEED CITY THAT SHIPS NOTHING ──────────────────────────────────────
-//
-// A feed city pointed at a full rally ships zero units forever and, until this,
-// looked identical on the board to one running perfectly. The rail says so once
-// you hover it; the whole point of the marker is that you should not have to.
-//
-// NO NEW CHANNEL WAS AVAILABLE and none was invented. Every channel listed above
-// MAP_ORDER_DROP is still taken by the thing that took it — colour is ownership,
-// silhouette is station type, the caret above is selection, the white rings are
-// combat, the amber label is a multiplier, and the slot below the node is this
-// marker. So the blocked state is a MODULATION OF THE ORDER CHANNEL ITSELF
-// rather than a new mark: the same glyph, in the same place, with a bar struck
-// through it. A barred arrow is a closed pipe and needs no legend.
-//
-// The bar is drawn in the HALO colour, not in ink. That makes it subtractive —
-// it cuts the white arrow into two stubs instead of adding a third mark to a
-// corner of the node that is already carrying five — and it is legible at the
-// size that matters: 3.6 of the glyph's 15.2 units, which is 1.85 screen pixels
-// at the 800px-wide window this game is played at, cutting a shape that is
-// 7.8px tall. Measured on screen, not chosen; the same discipline the glyph's
-// own size was set by.
-//
-// Static path data, display toggled by a CLASS, exactly like the two arrows.
-// Nothing here computes a presentation attribute per frame, so there is no
-// stylesheet rule for known-issues #15 to silently outrank.
-const MAP_ORDER_BLOCK_D = 'M-7.6,-1.8 L7.6,-1.8 L7.6,1.8 L-7.6,1.8 Z';
+// A bar ACROSS the route, for a line that cannot deliver right now. Authored
+// perpendicular to +X and rotated with the segment it sits on, so it reads as a
+// bar across the pipe at every bearing rather than a stroke along it.
+const MAP_ORDER_BLOCK_D = 'M-1.9,-7.0 L1.9,-7.0 L1.9,7.0 L-1.9,7.0 Z';
 
-// Sim ticks between blocked-feeder recomputes. The plan is the one read on the
-// board that is not O(1) — ~80 microseconds on the live 108-station board,
-// measured — so it is throttled on SIM TICKS rather than on frames: a PAUSED
-// board recomputes never, and a board with no feed cities pays nothing at all
-// because the branch below is never entered. 5 ticks against
-// BAL.ORDERS.INTERVAL's 25 means the marks can never be more than a fifth of a
-// sweep stale, and a freshly-issued order refreshes immediately regardless (see
-// `justOrdered` in liveStations).
+// Sim ticks between order-plan recomputes. The plan is the one read on the
+// board that is not O(1), so it is throttled on SIM TICKS rather than on
+// frames: a PAUSED board recomputes never, and a board with no supply lines
+// pays nothing at all because the branch below is never entered. 5 ticks
+// against BAL.ORDERS.INTERVAL's 25 means the marks can never be more than a
+// fifth of a sweep stale, and a freshly-drawn line refreshes immediately
+// regardless (see `justOrdered` in liveStations).
 //
 // ONE PLAN PER POWER PER FRAME, not one per station: standingOrderPlan answers
-// for every feed city a power holds in a single search, so forty feeders cost
+// for every supplying city a power holds in one pass, so forty sources cost
 // what one costs. `_mapOrdPlans` is built lazily inside a frame and dropped at
 // the top of the next one — a cache that cannot outlive the state it was
 // computed from, which is the only kind this file is allowed to keep.
@@ -560,19 +557,147 @@ function mapOrderPlan(state, pid) {
   return p;
 }
 
-// Built on a station's FIRST non-hold order and reused forever after. One
-// insert per station per game, at most.
-function mapOrderNodes(rec) {
-  if (rec.ord) return rec.ord;
-  const g = el('g', 'station-ordergroup', {
-    transform: 'translate(0,' + rec.ordY + ')',
+// translate + counter-scale + rotate, for a symbol that has a bearing.
+// mapSymbolTransform's sibling; kept separate rather than given an optional
+// argument because every other caller writes the two-part form and a rounded
+// `rotate(0)` on 138 station groups would be 138 pointless bytes per frame.
+function mapOrientTransform(x, y, k, deg) {
+  return 'translate(' + x + ',' + y + ') scale(' + (Math.round(k * 100000) / 100000) +
+         ') rotate(' + deg + ')';
+}
+
+function mapSegDeg(a, b) {
+  return Math.round(Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI * 10) / 10;
+}
+
+// Every chevron on the board, flat, so mapApplySymbolScale can hold them all at
+// a constant on-screen size in one pass — the same list-and-rewrite the
+// territory captions use. Rebuilt whenever a route is added or dropped, which
+// happens on a player edit or a capture and never per frame.
+function mapChevIndex() {
+  LIVE.chev = [];
+  for (const sid in LIVE.stat) {
+    const routes = LIVE.stat[sid].ordRoute;
+    for (const to in routes) {
+      const marks = routes[to].marks;
+      for (let i = 0; i < marks.length; i++) LIVE.chev.push(marks[i]);
+    }
+  }
+}
+
+// Build or rebuild one route: source -> destination, over the path the sweep's
+// own routing says the units will walk.
+//
+// UNREACHABLE STILL DRAWS. routeFor returns null when every path runs through
+// ground this power does not hold, and the honest thing on screen is not
+// silence — the player asked for this line and it is real, it just cannot
+// deliver. So the crow-flies segment is drawn and the caller marks it blocked,
+// which is exactly what the planner reports ('unreachable'). A line that
+// vanishes when a corridor is cut looks identical to one the player never drew.
+function mapOrderRoute(D, state, rec, sid, to) {
+  const layer = byId('g-links');
+  const dst = D.STATIONS && D.STATIONS[to];
+  if (!layer || !dst || !dst.pos) return null;
+
+  const path = (typeof routeFor === 'function')
+    ? routeFor(state, state.stations[sid].owner, sid, to) : null;
+  const pts = (path && path.length >= 2)
+    ? path.map(function (h) { return D.STATIONS[h].pos; })
+    : [rec.pos, dst.pos];
+
+  const g = el('g', 'station-orderroute');
+  const color = powerColor(D, state.stations[sid].owner) || '#ffffff';
+  const line = el('polyline', 'station-orderline', {
+    points: pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' '),
   });
-  g.appendChild(el('path', 'station-order station-order-feed', { d: MAP_ORDER_FEED_D }));
-  g.appendChild(el('path', 'station-order station-order-rally', { d: MAP_ORDER_RALLY_D }));
-  g.appendChild(el('path', 'station-order station-order-block', { d: MAP_ORDER_BLOCK_D }));
-  rec.g.appendChild(g);
-  rec.ord = g;
-  return g;
+  // Written as a STYLE, not an attribute. The colour is computed by this
+  // renderer from live state, and a presentation attribute sits at the bottom
+  // of the cascade where any stray class rule outranks it silently —
+  // known-issues #15, which has recurred twice on this project, both times on a
+  // stroke or a fill-opacity exactly like this one.
+  line.style.stroke = color;
+  g.appendChild(line);
+
+  // One chevron per HOP, at its midpoint. Position in board space (so it never
+  // needs recomputing as the camera moves) and size counter-scaled (so it holds
+  // its screen size at every zoom). Spacing therefore comes from the map's own
+  // geography: a long multi-hop route gets several, a single hop gets one,
+  // and nothing has to measure a length in pixels to decide.
+  const k = mapSymbolScale();
+  const marks = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const deg = mapSegDeg(a, b);
+    const node = el('path', 'station-orderchev', {
+      d: MAP_ORDER_CHEV_D, transform: mapOrientTransform(mx, my, k, deg),
+    });
+    node.style.fill = color;
+    g.appendChild(node);
+    marks.push({ node: node, x: mx, y: my, deg: deg });
+  }
+
+  // The bar, on the middle hop, shown only while the route is blocked.
+  const mid = pts.length > 2 ? Math.floor((pts.length - 1) / 2) : 0;
+  const a0 = pts[mid], b0 = pts[mid + 1];
+  const bx = (a0[0] + b0[0]) / 2, by = (a0[1] + b0[1]) / 2;
+  const bdeg = mapSegDeg(a0, b0);
+  const bar = el('path', 'station-orderbar', {
+    d: MAP_ORDER_BLOCK_D, transform: mapOrientTransform(bx, by, k, bdeg),
+  });
+  g.appendChild(bar);
+  marks.push({ node: bar, x: bx, y: by, deg: bdeg });
+
+  layer.appendChild(g);
+  return { g: g, marks: marks, epoch: state.ownerEpoch || 0 };
+}
+
+function mapOrderDrop(rec, to) {
+  const r = rec.ordRoute[to];
+  if (r && r.g && r.g.parentNode) r.g.parentNode.removeChild(r.g);
+  delete rec.ordRoute[to];
+  delete rec.ordBlocked[to];
+}
+
+// Reconcile this station's drawn routes against the list in state. Called only
+// when that list changed, or when a capture moved state.ownerEpoch and the
+// routes may therefore run somewhere else — never per frame.
+function mapOrderAim(D, state, rec, sid, targets, epoch) {
+  const want = Object.create(null);
+  for (let i = 0; i < targets.length; i++) {
+    const to = targets[i];
+    want[to] = true;
+    const have = rec.ordRoute[to];
+    if (have && have.epoch === epoch) continue;      // still the same path
+    if (have) mapOrderDrop(rec, to);
+    const built = mapOrderRoute(D, state, rec, sid, to);
+    if (built) rec.ordRoute[to] = built;
+    LIVE.writes++;
+  }
+  for (const to in rec.ordRoute) if (!want[to]) mapOrderDrop(rec, to);
+}
+
+// Mark the routes that are shipping nothing. `plan.edges` is the sim's
+// per-destination answer, so this file decides nothing — it draws what
+// _ordPlanPower already worked out, which is what makes the board and any panel
+// structurally unable to disagree (known-issues #18).
+//
+// The chevrons ARE the flow, so a blocked route simply stops having any: no
+// arrows moving down it, plus a bar across it and the line itself dimmed. That
+// needs no legend and no second colour.
+function mapOrderFlow(rec, next) {
+  const edges = (next && next.edges) || [];
+  const blocked = Object.create(null);
+  for (let i = 0; i < edges.length; i++) {
+    if (!(edges[i].units > 0)) blocked[edges[i].target] = true;
+  }
+  for (const to in rec.ordRoute) {
+    const stuck = !!blocked[to];
+    if (stuck === (rec.ordBlocked[to] === true)) continue;
+    rec.ordBlocked[to] = stuck;
+    rec.ordRoute[to].g.classList.toggle('is-blocked', stuck);
+    LIVE.writes++;
+  }
 }
 
 function mapUnitTotal(u) {
@@ -806,11 +931,16 @@ function drawStations(D, layer, state) {
       capacity: Number(st.capacity) || 0,
       owner: undefined, garrison: undefined, cut: undefined, fight: undefined,
       fillBucket: undefined,
-      // Standing order: geometry now, DOM on this station's first non-hold
-      // order. `undefined` rather than 'hold' on purpose — the first frame then
-      // writes 'hold' into it and takes the build branch exactly never, so an
-      // untouched board pays nothing.
-      order: undefined, ord: null, ordY: momR + MAP_ORDER_DROP, ordBlocked: false,
+      // Supply routes: DOM on this station's first supply line and not before.
+      // `ordKey` is the joined destination list as last DRAWN — the empty
+      // string on an untouched board, which is what every station's empty
+      // `supplyTo` joins to, so the build branch is taken exactly never and an
+      // untouched board pays nothing. Comparing a joined string rather than the
+      // array is what makes "did this list change?" one compare instead of a
+      // walk, on 108 stations every frame.
+      ordKey: '', ordEpoch: -1,
+      ordRoute: Object.create(null),    // destination -> { g, marks, epoch }
+      ordBlocked: Object.create(null),  // destination -> last drawn bar state
       // battle readout: geometry now, DOM on this station's first fight
       ring: battleRing,
       momR: momR,
@@ -1175,58 +1305,62 @@ function liveStations(D, state) {
       }
     }
 
-    // Standing order. Read through core's accessor, never off the raw field:
-    // stationOrder() defaults a state built before the field existed, and this
-    // renderer must not be the second place that rule is written down.
+    // Supply lines. Read through core's accessor, never off the raw field:
+    // stationSupply() defaults a state built before the field existed and is
+    // the one place "no supply lines" is spelled, and this renderer must not be
+    // the second place that rule is written down.
     //
-    // NEVER CACHED ACROSS A CAPTURE. setStationOwner() resets `order` to 'hold'
-    // (01-data-schema.md: "An order does not survive a capture"), so a captured
-    // feed city's marker has to vanish on its own — which it does, because the
-    // value compared here is re-read from state every frame and the only thing
-    // remembered is what was last WRITTEN to the DOM. There is no path by which
-    // this file can keep showing an order the sim has already cleared.
-    const order = (typeof stationOrder === 'function')
-      ? stationOrder(state, sid)
-      : ((st.order) || 'hold');
+    // NEVER CACHED ACROSS A CAPTURE. setStationOwner() empties `supplyTo`
+    // (01-data-schema.md: "an order does not survive a capture"), and the sweep
+    // drops individual edges whose destination has changed hands — so a
+    // captured city's routes have to vanish on their own, which they do,
+    // because the list compared here is re-read from state every frame and the
+    // only thing remembered is what was last DRAWN. There is no path by which
+    // this file can keep showing a line the sim has already cleared.
+    //
+    // TWO THINGS INVALIDATE A ROUTE, and ownerEpoch is the second. The list can
+    // be unchanged while the PATH between the same two cities is not: routeFor
+    // is ownership-aware, so a capture three provinces away can reroute a stream
+    // around a corridor that just closed. Redrawing only on a list change would
+    // leave the board showing a path the units have stopped taking — the same
+    // class of quiet lie as a stale number, and harder to notice because a line
+    // that is merely in the wrong place still looks like a line.
+    //
+    // Both are STATE, so a paused board recomputes neither: two integer/string
+    // compares per station per frame, which is the whole cost of this feature
+    // until somebody draws a line.
+    const supply = (typeof stationSupply === 'function')
+      ? stationSupply(state, sid)
+      : (st.supplyTo || []);
+    const key = supply.join(',');
+    const epoch = state.ownerEpoch || 0;
     let justOrdered = false;
-    if (order !== rec.order) {
-      const first = rec.order === undefined;
-      rec.order = order;
+    if (key !== rec.ordKey || epoch !== rec.ordEpoch) {
+      const listChanged = key !== rec.ordKey;
+      rec.ordKey = key;
+      rec.ordEpoch = epoch;
       justOrdered = true;
-      // Nothing is drawn for 'hold', and on the first frame every station is on
-      // 'hold' — so the group is built only when an order actually arrives, and
-      // a board nobody has given an order to has no order DOM at all.
-      if (order !== 'hold' || !first) {
-        const g = mapOrderNodes(rec);
-        g.classList.toggle('is-feed', order === 'feed');
-        g.classList.toggle('is-rally', order === 'rally');
+      // Nothing is drawn for a city that supplies nowhere, and on an untouched
+      // board that is every city — so DOM is built only when a line actually
+      // arrives, and a board nobody has ordered has no order DOM at all.
+      // mapOrderAim adds and removes per destination, so an edit that changes
+      // one line of four leaves the other three alone.
+      if (supply.length || listChanged) {
+        mapOrderAim(D, state, rec, sid, supply, epoch);
+        mapChevIndex();
         LIVE.writes++;
       }
     }
 
-    // Is this feed city actually shipping? See MAP_ORDER_BLOCK_D. Only feed
-    // cities pay anything here: a board on `hold` — which is every board until
-    // the player presses F — never enters this branch at all, and a station
-    // whose answer has not changed costs one boolean compare and zero DOM
-    // writes. `justOrdered` overrides the tick throttle so pressing F while the
-    // game is PAUSED still shows the answer on the next frame rather than at
-    // the next tick that never comes.
-    if (order === 'feed') {
-      if (_mapOrdDue || justOrdered) {
-        const nx = mapOrderPlan(state, st.owner)[sid];
-        const stuck = !(nx && nx.units > 0);
-        if (stuck !== rec.ordBlocked) {
-          rec.ordBlocked = stuck;
-          mapOrderNodes(rec).classList.toggle('is-blocked', stuck);
-          LIVE.writes++;
-        }
-      }
-    } else if (rec.ordBlocked) {
-      // Dropped back to hold, promoted to rally, or captured — an order does
-      // not survive a change of owner (01-data-schema.md), so this is also the
-      // path that clears the bar off a city that has just changed hands.
-      rec.ordBlocked = false;
-      if (rec.ord) { rec.ord.classList.toggle('is-blocked', false); LIVE.writes++; }
+    // Which of those pipes is actually flowing? See MAP_ORDER_BLOCK_D. Only
+    // supplying cities pay anything here: a board with no lines — which is every
+    // board until the player draws one — never enters this branch at all, and a
+    // station whose answer has not changed costs one boolean compare per line
+    // and zero DOM writes. `justOrdered` overrides the tick throttle so drawing
+    // a line while the game is PAUSED still shows the answer on the next frame
+    // rather than at the next tick that never comes.
+    if (supply.length && (_mapOrdDue || justOrdered)) {
+      mapOrderFlow(rec, mapOrderPlan(state, st.owner)[sid]);
     }
 
     // Cut off from its capital: not growing, actively decaying (§5).
