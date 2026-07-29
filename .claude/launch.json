@@ -4,7 +4,7 @@
     {
       "name": "concert-dev",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8761", "--directory", "/Users/justinrich/Downloads/concert-of-europe"],
+      "runtimeArgs": ["/Users/justinrich/Downloads/concert-of-europe/tools/serve.py", "8761"],
       "port": 8761
     }
   ]
