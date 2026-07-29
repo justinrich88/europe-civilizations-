@@ -278,6 +278,9 @@ function runAllTests() {
   // Supply routes under command — test/scenarios-routes.js.
   if (typeof suiteRoutes === 'function') suiteRoutes(d);
 
+  // Why a lone route goes quiet — test/scenarios-routeflow.js.
+  if (typeof suiteRouteFlow === 'function') suiteRouteFlow(d);
+
   if (typeof suiteStandings === 'function') suiteStandings(d);
 
   // Selection gestures — test/select-tests.js. This one is NOT reached by
@@ -994,7 +997,7 @@ function suiteSetup(d) {
     var bad = [];
     Object.keys(SU).sort().forEach(function (sid) {
       if (!S[sid] || !SU[sid].units) return;
-      var tot = SU[sid].units.infantry + SU[sid].units.artillery + SU[sid].units.armour;
+      var tot = totalUnits(SU[sid].units);
       if (tot > S[sid].capacity + 1e-9) {
         bad.push(sid + ' starts with ' + tot + ' but capacity is ' + S[sid].capacity);
       }
@@ -1340,13 +1343,13 @@ function suiteSimCombat(d) {
 
   test('a 2:1 attacker survives with ~87% (§5)', function () {
     var r = fight(200, 100);
-    var left = r.station.units.infantry + r.station.units.artillery + r.station.units.armour;
+    var left = totalUnits(r.station.units);
     assertClose(left / 200, 0.866, 0.08, 'survivor fraction after a 2:1 assault');
   });
 
   test('a 1.05:1 attacker does not win intact (§11)', function () {
     var r = fight(105, 100);
-    var left = r.station.units.infantry + r.station.units.artillery + r.station.units.armour;
+    var left = totalUnits(r.station.units);
     assert(left / 105 < 0.5, 'trickling in at 1.05:1 kept ' + Math.round(left / 1.05) + '%');
   });
 
@@ -4388,8 +4391,13 @@ function dataSummary() {
       var o = d.SETUP[sid].owner;
       if (counts[o] === undefined) { counts[o] = 0; forces[o] = 0; terrs[o] = 0; }
       counts[o]++;
-      var u = d.SETUP[sid].units || {};
-      forces[o] += (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
+      // A SETUP entry with no bundle at all is a legitimate zero and stays one.
+      // The per-property `|| 0`s that used to stand in for that test were not:
+      // they turned a bundle of the WRONG SHAPE into a serene zero too, and
+      // this is the "50 units / 63 units" column of the board summary — the one
+      // table anybody reads to check the scenario loaded at all.
+      var u = d.SETUP[sid].units;
+      forces[o] += u ? totalUnits(u) : 0;
     });
     if (d.TERRITORIES && d.STATIONS) {
       Object.keys(d.TERRITORIES).forEach(function (tid) {

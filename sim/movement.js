@@ -862,6 +862,42 @@ function _ordHeadroom(state, sid, inbound) {
   return cap * _ordCeilingMul() - totalUnits(st.units) - (inbound[sid] || 0);
 }
 
+// ---------------------------------------------------------------------------
+// THE FLOOR THE PLANNER GATES ON — and why it is not BAL.ORDERS.MIN_SEND flat.
+//
+// The plan is executed through applyCommand, which has its OWN floor:
+// BAL.MIN_SEND_UNITS (0.5), the smallest stack anybody may put on the map. A
+// send under it is rejected as 'too-few-units' and nothing moves. So the two
+// numbers are not independent — if ORDERS.MIN_SEND is ever set below
+// MIN_SEND_UNITS, the planner promises streams the command layer refuses, and
+// the readout that shares this planner promises them to the player. That is
+// exactly the failure known-issues #18 is about, arriving through a constant
+// rather than through a duplicated formula.
+//
+// MEASURED, on `mec` (capacity 13) with one supply line into a drained
+// destination, AI off, 40,000 ticks:
+//
+//     ORDERS.MIN_SEND   plan says      applyCommand ships
+//     1.00              0.058/sweep    0.058/sweep     agree
+//     0.50              0.109/sweep    0.115/sweep     agree
+//     0.25              0.483/sweep    0.115/sweep     OFF BY 4x
+//
+// At 0.25 every sweep planned a 0.48-unit send, every one of them was rejected,
+// and the board was byte-identical to the 0.50 run while the rail would have
+// advertised four times the traffic. Nothing failed; nothing could.
+//
+// The block comment in _ordSweepPower asserts this invariant in prose ("MIN_SEND
+// (2.0) is above MIN_SEND_UNITS (0.5)") and that prose is already stale by one
+// retune. Taking the max makes it structural instead: the plan is now incapable
+// of promising a send applyCommand will refuse, whatever the two constants are
+// set to. INERT at today's values (1.0 > 0.5), so no board moves.
+// ---------------------------------------------------------------------------
+function _ordMinSend() {
+  var m = (BAL.ORDERS && isFinite(BAL.ORDERS.MIN_SEND)) ? BAL.ORDERS.MIN_SEND : 0;
+  var floor = isFinite(BAL.MIN_SEND_UNITS) ? BAL.MIN_SEND_UNITS : 0;
+  return m > floor ? m : floor;
+}
+
 // Units that would leave `sid` on the next sweep, ignoring whether anywhere it
 // supplies can take them. Pure.
 //
@@ -880,7 +916,7 @@ function standingOrderSend(state, sid) {
   var st = state.stations[sid];
   if (!st || !st.supplyTo || !st.supplyTo.length) return 0;
   var amount = totalUnits(st.units) * _ordAllowedFraction(state, sid);
-  return amount >= BAL.ORDERS.MIN_SEND ? amount : 0;
+  return amount >= _ordMinSend() ? amount : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,10 +1041,64 @@ function _ordClearLost(state, pid) {
 //
 // The reasons are checked in the sweep's own control-flow order, so the one
 // reported is the one that actually stopped the send.
+//
+// ── SHORTFALL — "it is saving up", as a number ─────────────────────────────
+//
+// `below-min-send` is by far the most common dark state on a healthy board and
+// it covers TWO situations a player would act on differently. The word does not
+// separate them and the number does:
+//
+//   shortfall > 0   the SOURCE cannot yet pay for a single stream. It is
+//                   accumulating, and this is how many more units it needs
+//                   before ANY of its lines run.
+//   shortfall == 0  the source can pay; this particular line is WAITING ITS
+//                   TURN in the rotation (see TAKE TURNS below), or its share
+//                   was trimmed under the floor by the destination's room.
+//
+// WHY THE SIM OWNS THIS NUMBER RATHER THAN THE RAIL. It is the inverse of
+// _ordAllowedFraction — the garrison at which `have x fraction` first reaches
+// the floor:
+//
+//     need = KEEP_FLOOR x capacity + MIN_SEND / SEND_FRACTION
+//
+// A renderer computing that for itself would be a second implementation of the
+// keep-floor rule living in another file, which is precisely known-issues #9,
+// and it would drift the first time either constant moved. It is one
+// subtraction inside the loop that already has both numbers.
+//
+// WHY IT IS NOT A COUNTDOWN IN TICKS. An ETA needs the source's growth rate,
+// which is sim/growth.js's logistic — a second copy of THAT is the same issue
+// one file over, and this file has no honest access to it. Units are also the
+// better readout: the garrison is drawn on the station, so "4.1 more units" is
+// a claim the player can check against the board, and it stays true when the
+// source is being spent (the shortfall grows) where a countdown would lie.
+//
+// MEASURED, so the readout knows what it is describing. A lone uncontested
+// route ships on `production per sweep / MIN_SEND` of its sweeps and is dark on
+// the rest — AI off, destination drained, 40,000 ticks, ground truth from
+// orderStats:
+//
+//     source  capacity   ships on   longest dark run
+//     mec     13          6% of sweeps   17 sweeps = 425 ticks
+//     bea     14         10%             20 sweeps = 500 ticks
+//     inn     20         23%              8 sweeps = 200 ticks
+//     brn     30         58%              2 sweeps
+//     ber     72        100%              0
+//
+// and across every one of those the source garrison is STATIONARY to within a
+// unit over 32,000 ticks: 100% of what a feed city produces leaves down the
+// line. The dark sweeps are not lost throughput, they are a city that has not
+// yet produced one shippable batch. That is the sentence the shortfall exists
+// to let the board say.
 // ---------------------------------------------------------------------------
 
-function _ordBlocked(target, why) {
-  return { target: target, units: 0, fraction: 0, blocked: why };
+// `shortfall` defaults to 0 — the reasons raised in pass 1 are facts about the
+// DESTINATION and say nothing about what the source can afford.
+function _ordBlocked(target, why, shortfall) {
+  return {
+    target: target, units: 0, fraction: 0, blocked: why,
+    shortfall: (shortfall > 0) ? shortfall : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,7 +1151,7 @@ function _ordRotation(state, n) {
 //
 //   units    total leaving this city on the next sweep, summed over its edges
 //   edges    one record per destination, in sorted destination order, each
-//            { target, units, fraction, blocked }
+//            { target, units, fraction, blocked, shortfall }
 //   blocked  null when units > 0; otherwise the reason the FIRST edge gives, or
 //            'no-order' when there are no edges at all
 //   target   the destination `blocked` is about, so a panel with room for one
@@ -1102,6 +1192,7 @@ function _ordPlanPower(state, pid) {
   }
 
   var inbound = _ordInbound(state, pid);
+  var minSend = _ordMinSend();
 
   for (i = 0; i < sources.length; i++) {
     var from = sources[i];
@@ -1128,7 +1219,7 @@ function _ordPlanPower(state, pid) {
       if (!routeFor(state, pid, from, to)) { edges.push(_ordBlocked(to, 'unreachable')); live.push(null); continue; }
       edges.push(null);
       live.push(to);
-      if (_ordHeadroom(state, to, inbound) >= BAL.ORDERS.MIN_SEND) open++;
+      if (_ordHeadroom(state, to, inbound) >= minSend) open++;
     }
 
     // The source-wide gate. Checked after pass 1 rather than before it so the
@@ -1137,6 +1228,21 @@ function _ordPlanPower(state, pid) {
     var fraction = _ordAllowedFraction(state, from);
     var have = totalUnits(st.units);
     var share = (open > 0 && fraction > 0) ? (have * fraction) / open : 0;
+
+    // How far this SOURCE is from being able to pay for one whole stream — the
+    // inverse of _ordAllowedFraction, and exactly the condition under which the
+    // whole city goes dark. `have x fraction` is SEND_FRACTION x (have -
+    // KEEP_FLOOR x cap) whenever the fraction is positive, so
+    //
+    //     have x fraction >= minSend   <=>   have >= need
+    //
+    // holds identically rather than approximately, and the same number is
+    // correct below the keep floor (where the fraction is 0 and the reason is
+    // `at-keep-floor`). See the SHORTFALL block above _ordBlocked.
+    var srcCap = (typeof STATIONS !== 'undefined' && STATIONS[from]) ? STATIONS[from].capacity : 0;
+    var need = BAL.ORDERS.KEEP_FLOOR * srcCap + minSend / BAL.ORDERS.SEND_FRACTION;
+    var shortBy = need - have;
+    if (!(shortBy > 0)) shortBy = 0;
 
     // -----------------------------------------------------------------------
     // TAKE TURNS RATHER THAN STARVE EVERY LINE AT ONCE.
@@ -1206,7 +1312,7 @@ function _ordPlanPower(state, pid) {
     // -----------------------------------------------------------------------
     var whole = (fraction > 0) ? have * fraction : 0;
     var lead = -1;                    // index AMONG THE OPEN EDGES that leads
-    if (open > 1 && share < BAL.ORDERS.MIN_SEND && whole >= BAL.ORDERS.MIN_SEND) {
+    if (open > 1 && share < minSend && whole >= minSend) {
       share = whole;
       lead = _ordRotation(state, open);
     }
@@ -1223,10 +1329,10 @@ function _ordPlanPower(state, pid) {
     for (j = 0; j < list.length; j++) {
       if (edges[j]) continue;                       // already blocked in pass 1
       var t = live[j];
-      if (fraction <= 0) { edges[j] = _ordBlocked(t, 'at-keep-floor'); continue; }
+      if (fraction <= 0) { edges[j] = _ordBlocked(t, 'at-keep-floor', shortBy); continue; }
 
       var room = _ordHeadroom(state, t, inbound);
-      if (room < BAL.ORDERS.MIN_SEND) { edges[j] = _ordBlocked(t, 'destination-full'); continue; }
+      if (room < minSend) { edges[j] = _ordBlocked(t, 'destination-full'); continue; }
 
       // Counted on exactly the edges pass 1 counted in `open`: same predicate,
       // same order, and `inbound` cannot have moved for THIS destination in
@@ -1235,11 +1341,11 @@ function _ordPlanPower(state, pid) {
       // computed against — if the two ever drift, the rotation silently skips a
       // line instead of alternating and no total would look wrong.
       openSeen++;
-      if (lead >= 0 && openSeen !== lead) { edges[j] = _ordBlocked(t, 'below-min-send'); continue; }
+      if (lead >= 0 && openSeen !== lead) { edges[j] = _ordBlocked(t, 'below-min-send', shortBy); continue; }
 
       var cur = splitUnits(st.units, factor);
       var curTotal = totalUnits(cur);
-      if (!(curTotal > 0)) { edges[j] = _ordBlocked(t, 'at-keep-floor'); continue; }
+      if (!(curTotal > 0)) { edges[j] = _ordBlocked(t, 'at-keep-floor', shortBy); continue; }
 
       var want = share > room ? room : share;
       var f = want / curTotal;
@@ -1257,16 +1363,16 @@ function _ordPlanPower(state, pid) {
         ? totalUnits(sendPayload(cur, f))
         : curTotal * f;
 
-      if (amount < BAL.ORDERS.MIN_SEND) {
+      if (amount < minSend) {
         // Which end came up short is the whole message. If the destination's
         // remaining room is what cut the stream under the minimum it is the
         // destination that needs attention; otherwise the source is simply not
         // big enough yet — for this many lines — and will ship as it grows.
-        edges[j] = _ordBlocked(t, room < share ? 'destination-full' : 'below-min-send');
+        edges[j] = _ordBlocked(t, room < share ? 'destination-full' : 'below-min-send', shortBy);
         continue;
       }
 
-      edges[j] = { target: t, units: amount, fraction: f, blocked: null };
+      edges[j] = { target: t, units: amount, fraction: f, blocked: null, shortfall: 0 };
       // Booked immediately, against both ends: the next edge must see the room
       // this one just spent AND the units it just took out of this city.
       inbound[t] = (inbound[t] || 0) + amount;
@@ -1285,9 +1391,11 @@ function _ordPlanPower(state, pid) {
 //
 //   units    what would really be shipped in total, 0 whenever everything is
 //            blocked. NOT what the source is willing to part with.
-//   edges    [{ target, units, blocked }], in sorted destination order — the
-//            per-line answer, which is what a map marker with one arrow per
-//            destination draws from.
+//   edges    [{ target, units, blocked, shortfall }], in sorted destination
+//            order — the per-line answer, which is what a map marker with one
+//            arrow per destination draws from. `shortfall` is units the SOURCE
+//            still needs before any of its lines run, 0 when it is not the
+//            source that is short; see the SHORTFALL block above _ordBlocked.
 //   blocked  null when units > 0; otherwise the first edge's reason, or
 //            'no-order' when this city supplies nowhere.
 //   target   the city `blocked` is about. null when there are no edges.
@@ -1328,7 +1436,9 @@ function standingOrderNext(state, sid) {
 
 // THE SAME ANSWER FOR EVERY SUPPLYING CITY ONE POWER HOLDS, in one call:
 // `{ sid: { units, target, blocked, edges } }`, empty when the power supplies
-// nowhere.
+// nowhere. Edge records carry `shortfall` alongside `blocked`, so a map that
+// draws one pipe per edge can say "saving up, 4.1 units to go" without
+// reimplementing the keep-floor rule (known-issues #9).
 //
 // Not a convenience. standingOrderNext() plans the whole power's sweep to answer
 // about one station, so asking it about seven stations repeats the entire plan
@@ -1354,7 +1464,7 @@ function standingOrderPlan(state, pid) {
     var edges = [];
     for (var j = 0; j < p.edges.length; j++) {
       var e = p.edges[j];
-      edges.push({ target: e.target, units: e.units, blocked: e.blocked });
+      edges.push({ target: e.target, units: e.units, blocked: e.blocked, shortfall: e.shortfall });
     }
     out[sid] = { units: p.units, target: p.target, blocked: p.blocked, edges: edges };
   }
@@ -1390,8 +1500,11 @@ function _ordSweepPower(state, pid) {
       // and `rejected` is this phase's feedback channel just as it is the AI's.
       //
       // The plan is sized so that none of applyCommand's rejections can fire:
-      // the target is ground `pid` holds (checked in the plan), MIN_SEND (2.0)
-      // is above MIN_SEND_UNITS (0.5), the route exists because the plan asked
+      // the target is ground `pid` holds (checked in the plan), the send clears
+      // MIN_SEND_UNITS because _ordMinSend() gates on the MAX of the two floors
+      // rather than trusting ORDERS.MIN_SEND to stay above it (it did not, at
+      // one point, and nothing said so — see that function), the route exists
+      // because the plan asked
       // routeFor for it, source and target differ because core/state.js will not
       // store an edge otherwise, and 0 < fraction <= 1 by construction. The
       // guard stays anyway — a plan that is silently not executed must not be
