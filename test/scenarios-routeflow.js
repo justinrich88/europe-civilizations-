@@ -643,7 +643,7 @@ if (typeof require === 'function' && typeof module !== 'undefined' && require.ma
     var fs = require('fs'), vm = require('vm'), path = require('path');
     var root = path.join(__dirname, '..');
     var SCRIPTS = [
-      'core/rng.js', 'core/util.js', 'core/state.js', 'core/vision.js',
+      'core/rng.js', 'core/exact.js', 'core/util.js', 'core/state.js', 'core/vision.js',
       'data/tuning.js', 'data/map.js', 'data/stations.js', 'data/scenario.js',
       'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
       'sim/relations.js', 'sim/victory.js', 'sim/step.js',

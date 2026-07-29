@@ -239,6 +239,12 @@ function runAllTests() {
   resetTests();
   var d = collectData();
 
+  // The deterministic transcendentals — test/exact-tests.js. FIRST, before any
+  // suite that ticks the sim: every one of those depends on core/exact.js being
+  // both present and correct, and a failure here explains a hundred failures
+  // below it. The sim family reads as a mystery in the other order.
+  if (typeof suiteExact === 'function') suiteExact();
+
   suiteTuning(d);
   suiteCombatModel(d);
   suiteVerts(d);

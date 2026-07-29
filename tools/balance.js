@@ -37,7 +37,7 @@ const root = path.join(__dirname, '..');
 // Same list as test/node.js, minus the test harness itself. Missing files are
 // skipped so this runs while later milestones are still being written.
 const SCRIPTS = [
-  'core/rng.js', 'core/util.js', 'core/state.js', 'core/vision.js',
+  'core/rng.js', 'core/exact.js', 'core/util.js', 'core/state.js', 'core/vision.js',
   'data/tuning.js',
   'data/map.js', 'data/stations.js', 'data/scenario.js',
   'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',

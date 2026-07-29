@@ -33,18 +33,26 @@ now sit between here and Milestone 6. It runs **once**, at the end.
 Everything here is cheap, unblocks something, and gets more expensive the
 longer it waits.
 
-### A1. Ship it
+### ~~A1. Ship it~~ — DONE. The repo is public and Pages is on.
 
-GitHub Pages serves this repo directly with no build step. **The only blocker
-is that the repo is private** — Pages on a private repo needs a paid plan;
-public is free. That is a decision, not a task.
+GitHub Pages serves this repo directly with no build step. ~~The only blocker
+is that the repo is private~~ — the decision was taken:
+`justinrich88/europe-civilizations-` reports `visibility: public` and
+`has_pages: true`, so the zero-build page is served as-is at
+`https://justinrich88.github.io/europe-civilizations-/`.
 
-Once live, every later phase gets played by someone other than its author,
-which is the only test this project does not currently have.
+**Verified through the GitHub API, not by loading the page.** The sandbox this
+was checked from cannot reach `github.io` (the network policy answers 403 to the
+CONNECT), so "Pages is enabled" is confirmed and "the live page boots" is not.
+Somebody with a browser should open it once; it is a five-second check and it is
+the one thing here nobody has done.
 
-### A2. Deterministic arithmetic — the multiplayer prerequisite
+Now that it is live, every later phase gets played by someone other than its
+author, which is the only test this project did not have.
 
-Four call sites in the sim layer use functions **ECMAScript does not specify
+### ~~A2. Deterministic arithmetic~~ — SHIPPED 2026-07 as `core/exact.js`
+
+Four call sites in the sim layer used functions **ECMAScript does not specify
 to bit precision**:
 
 ```
@@ -60,16 +68,45 @@ becomes different survivors, then different captures, then two different
 games.
 
 **The existing determinism tests pass and cannot catch this** — they run in one
-engine. That is exactly why it must be fixed before more sim maths is written,
-and `06-movement-and-attrition.md` adds a whole attrition model.
+engine. That is exactly why it had to be fixed before more sim maths was
+written, and `06-movement-and-attrition.md` adds a whole attrition model.
 
-- `Math.pow(FALLOFF, hops)` has an **integer** exponent — a multiply loop is
-  exactly deterministic and likely faster.
-- `Math.sin` wobble → lookup table with fixed interpolation.
-- `Math.exp(-x)` → rational approximation.
-- `atanh` is computing a **constant** and should be precomputed outright.
+All four now go through `core/exact.js`: `exactSin`, `exactExp`, `exactLog`,
+`exactAtanh`, `exactPowInt`, built only from `+ - * /`, `Math.sqrt`,
+`Math.floor`/`round`, and the exactly-specified constants `Math.PI` / `Math.LN2`
+/ `Math.SQRT2`. Those ECMAScript *does* pin to the bit, which is the same
+argument that already made the RNG portable.
 
-Add a cross-engine test: hash `snapshot()` after N ticks and pin the value.
+**Two of the four prescriptions above were followed and two were overruled;
+both reversals are recorded at the head of `core/exact.js`.**
+
+- `Math.pow(FALLOFF, hops)` → multiply loop, as prescribed. At
+  `MULTIPLIER_REACH = 1` the exponent is 0 or 1, so this call site is
+  **bit-identical to what shipped** — it is a no-op today and stops being one
+  the moment REACH rises, which is the whole reason to have done it while free.
+- ~~`Math.sin` wobble → lookup table with fixed interpolation.~~ **A Taylor
+  polynomial after exact range reduction instead.** Same amount of code, and it
+  lands 4e-14 from `Math.sin` where a table lands ~1e-3 from it — the difference
+  between "the board plays the same" and "the wobble was silently retuned".
+- `Math.exp(-x)` → polynomial after an LN2-split reduction, not a rational
+  approximation; the argument is always a negative integer at the one call site.
+- ~~`atanh` is computing a **constant** and should be precomputed outright.~~
+  **It is not a constant** — it is `atanh(1/oddsFloor)`, and `oddsFloor` varies
+  per AI personality (turtle demands `MIN_ODDS × 1.35`). Precomputing it would
+  have frozen every personality onto the default's spread window.
+
+Cross-engine test: `test/exact-tests.js` pins `snapshot()` hashes at 2,000 ticks
+on seeds 100 and 101, and **scans `sim/` and `ai/` for any return of an
+implementation-approximated `Math` call.** The scan is the part that keeps
+working; read that file's header for what a green node run does and does not
+prove.
+
+**The balance hashes moved, and this is the explanation CLAUDE.md asks for.**
+Bit-identical was never available — the old numbers were whatever V8 returned.
+What was measured instead, at 12,000 ticks on seeds 100–103: **every city is held
+by the same power, every power holds the same territory count, worst relative
+drift across all 324 garrison floats is 1.9e-13, and 45–56% of them are still
+bit-identical.** The hashes changed; the wars did not.
 
 ### A3. Tick-scheduled commands
 
@@ -215,7 +252,13 @@ almost none of this — only letting the human power switch.
 
 ---
 
-## The one thing gating everything
+## ~~The one thing gating everything~~ — it is not gating anything any more
 
-**Is the repo public?** Phase A1 is blocked on it, and A1 is what turns every
-later phase from a design argument into a playtest.
+~~**Is the repo public?**~~ It is, and Pages is on. What A1 was protecting —
+"every later phase gets played by somebody other than its author" — is now
+available and simply has to be used: the next thing anyone changes in `render/`
+should be handed to a tester rather than reasoned about.
+
+**What gates the rest of Phase A now is A5**, and its own note says why: it is
+the only open item a player is actively losing games to, it is the cheapest, and
+A4 makes it worse, so it must not land after A4.

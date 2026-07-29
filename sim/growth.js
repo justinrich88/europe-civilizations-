@@ -24,6 +24,17 @@
 
 'use strict';
 
+// The multiplier falloff raises a constant to a HOP COUNT, so it uses
+// exactPowInt() rather than Math.pow — an integer exponent needs a multiply
+// loop, not an implementation-approximated library call (core/exact.js,
+// 07-roadmap.md A2). Load-order dependency, checked loudly at load, because a
+// ReferenceError out of _growthMultiplier() would kill the growth phase of
+// every tick and say nothing about script order (known-issue #22).
+if (typeof exactPowInt !== 'function') {
+  console.error('[sim/growth] no exactPowInt at load — core/exact.js must come ' +
+    'BEFORE sim/growth.js. Every multiplier bonus will throw.');
+}
+
 // ---------------------------------------------------------------------------
 // Static caches. Everything here depends only on data/, never on state, so it
 // is built once. Fixtures that swap the data files out call resetSimCaches().
@@ -226,7 +237,12 @@ function growthMultiplier(state, sid) {
     }
     if (weight <= 0) continue;
 
-    var bonus = (STATIONS[mid].multiplier - 1) * Math.pow(BAL.MULTIPLIER_FALLOFF, hops) * weight;
+    // `hops` is an integer out of territoryHops(), and the guard above rejected
+    // anything past MULTIPLIER_REACH. At REACH = 1 the exponent is 0 or 1 and
+    // exactPowInt returns bit-identical results to Math.pow — this call site
+    // moves no number on today's board. It stops being a no-op the moment REACH
+    // rises, which is the reason to fix it while it is free.
+    var bonus = (STATIONS[mid].multiplier - 1) * exactPowInt(BAL.MULTIPLIER_FALLOFF, hops) * weight;
     product *= (1 + bonus);
   }
 

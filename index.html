@@ -151,6 +151,10 @@
      and draws a placeholder if any global is still missing. -->
 
 <script src="core/rng.js"></script>
+<!-- Deterministic sin/exp/log/atanh/pow. FIRST alongside the RNG, and before
+     everything in sim/ and ai/: four files there check for it at load and say
+     so loudly if it is missing (07-roadmap.md A2, known-issue #22). -->
+<script src="core/exact.js"></script>
 <script src="core/util.js"></script>
 
 <script src="data/map.js"></script>

@@ -83,7 +83,17 @@
 // draft — ai/ai.js loads last, so its copies silently won and the scorer began
 // running against helpers it had never seen. Everything private to this file
 // is therefore `_aiAct…` (this is the half that acts).
+//
+// core/exact.js is a LOAD-ORDER dependency, for exactAtanh in the ETA spread
+// window. Checked loudly at load; the quiet failure is an AI that computes a
+// NaN window and silently calls every genuine volley defeat-in-detail
+// (known-issue #22).
 // ---------------------------------------------------------------------------
+
+if (typeof exactAtanh !== 'function') {
+  console.error('[ai/ai] no exactAtanh at load — core/exact.js must come ' +
+    'BEFORE ai/ai.js. The ETA spread window will throw.');
+}
 
 // Reasons a decision can carry. The schema lists the common ones; these are
 // the full set this file emits, kept in one place so the log is greppable.
@@ -209,9 +219,18 @@ function _aiActReasonDepth(reason) {
   return (d === undefined) ? -1 : d;
 }
 
+// The ETA spread window's atanh (see the derivation below).
+//
+// This used to be `Math.atanh` with a `Math.log` fallback for engines without
+// it. BOTH branches were implementation-approximated, and the fallback made it
+// worse than a single call: two engines could disagree on the same input by
+// taking different branches. exactAtanh is one branch, on every engine, and it
+// removes the ES5 feature test with it (core/exact.js, 07-roadmap.md A2).
+//
+// This one is not on the hot path — it is called once per AI action interval —
+// but a desync does not care how often the divergence happens, only that it can.
 function _aiActAtanh(x) {
-  if (typeof Math.atanh === 'function') return Math.atanh(x);
-  return 0.5 * Math.log((1 + x) / (1 - x));
+  return exactAtanh(x);
 }
 
 // ---------------------------------------------------------------------------

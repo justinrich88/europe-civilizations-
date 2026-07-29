@@ -305,6 +305,8 @@ Two consequences other files must honour:
 
 Nothing in `sim/` may touch `document`, call `Math.random`, or read `Date.now`. Randomness comes only from the seeded PRNG in `core/rng.js` threaded through `state.rng`.
 
+Nor may it call `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `atanh`, `hypot`, `cbrt`, or the `**` operator. Those are *implementation-approximated* — ES2024 21.3.2 permits each engine its own last bit, which is a lockstep desync (`07-roadmap.md` A2). Use `core/exact.js`: **`exactSin(x)`, `exactExp(x)`, `exactLog(v)`, `exactAtanh(y)`, `exactPowInt(base, n)`** — the last takes an **integer** exponent and returns NaN with a named `console.error` for anything else. `+ - * /`, `Math.sqrt`, `Math.floor` / `round` / `abs` / `min` / `max` / `imul`, and the constants `Math.PI` / `Math.LN2` / `Math.SQRT2` are exactly specified and carry no such risk. `test/exact-tests.js` enforces this by scanning the source of every file in `sim/` and `ai/`.
+
 **Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
 
 **`landing` — the beachhead remainder** (`02-visibility-and-sea.md` §3b). Present on a wave **only** while it is coming ashore, and only when its **final hop is a sea link**; a land arrival never carries one and is committed whole on the tick it lands. A sea arrival resolves on the tick it is seen as usual, but commits `1/BAL.LANDING_TICKS` of its strength per tick and stays on `state.waves` until empty.

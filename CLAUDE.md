@@ -27,6 +27,14 @@ balance harness exists.
 sorted, always — `POWER_IDS`, `STATION_IDS`, sorted destination ids. Two runs of
 one seed must produce the same wave ids in the same sequence.
 
+**And so are `Math.sin` / `cos` / `exp` / `log` / `pow` / `atanh` and `**`.** They
+are *implementation-approximated*: the spec lets V8, SpiderMonkey and
+JavaScriptCore each return a different last bit, which is a desync under
+lockstep. Use `core/exact.js` — `exactSin`, `exactExp`, `exactLog`, `exactAtanh`,
+`exactPowInt`. `+ - * /`, `Math.sqrt`, `Math.floor`/`round`/`abs` and the named
+constants `Math.PI` / `Math.LN2` / `Math.SQRT2` ARE exact and are fine.
+`test/exact-tests.js` scans `sim/` and `ai/` and goes red if one comes back.
+
 **All input — player and AI — goes through `applyCommand(state, cmd)`.** Nothing
 else may build a wave or mutate a station's owner. Command shapes are
 `{type:'send', owner, sources:[…], target, fraction, standing?}` and
@@ -38,7 +46,8 @@ and `owner` is required on both.
 ## Running things
 
 ```
-node test/node.js                  the sim suite — 270 tests, 30 suites, headless
+node test/node.js                  the sim suite — 289 tests, 31 suites, headless
+node test/exact-tests.js           the deterministic-maths suite standalone
 node test/scenarios-orderswhy.js   one suite standalone (a few do this)
 node tools/balance.js 200          Monte Carlo sweep
 node tools/verify-stations.js      map/station/link reconciliation
@@ -92,6 +101,13 @@ quoting it as reassurance.
 
 **Balance regressions** are caught by full-state SHA-256 after 12,000 ticks on
 seeds 100–103. Any sim change must leave those identical, or explain why not.
+
+**"Or explain why not" means measuring the board, not asserting good faith.**
+`core/exact.js` moved all four hashes and could not have avoided it. What made
+that reportable was a per-seed diff of the two boards at 12,000 ticks: same
+owner for every one of the 108 cities, same territory count for every power,
+worst relative drift 1.9e-13 across 324 garrison floats. A changed hash with no
+such measurement beside it is an unexplained regression.
 
 ---
 

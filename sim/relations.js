@@ -50,7 +50,16 @@
 // target IS RELATION_START, so once the grudge fades the Concert re-forms.
 //
 // Nothing here touches document, Math.random or Date.now.
+//
+// Nor Math.exp: core/exact.js is a LOAD-ORDER dependency of this file, checked
+// loudly at load rather than discovered as a ReferenceError from the middle of
+// the relations phase (known-issue #22).
 // ---------------------------------------------------------------------------
+
+if (typeof exactExp !== 'function') {
+  console.error('[sim/relations] no exactExp at load — core/exact.js must come ' +
+    'BEFORE sim/relations.js. Every grudge term will throw.');
+}
 
 // Memory lives inside state so a snapshot still fully determines the future.
 function _relMemo(state) {
@@ -151,10 +160,16 @@ function _relRecordAggression(state, memo) {
 
 // One flip is already most of a grudge; ten is not ten times worse. Saturating
 // so that a long war does not overflow past what LEADER_WEIGHT can express.
+//
+// exactExp, not Math.exp — implementation-approximated, and this feeds the
+// weightings that declare wars (core/exact.js, 07-roadmap.md A2). The argument
+// is always a negative integer here (a decayed flip COUNT), where exactExp lands
+// within 3e-16 relative of Math.exp; the divergence it removes is between
+// engines, not against the old numbers.
 function _relGrudgeTerm(memo, victim, attacker) {
   var row = memo.grudge[victim];
   if (!row || !row[attacker]) return 0;
-  return 1 - Math.exp(-row[attacker]);
+  return 1 - exactExp(-row[attacker]);
 }
 
 // ---------------------------------------------------------------------------

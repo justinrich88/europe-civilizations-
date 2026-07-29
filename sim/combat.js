@@ -28,6 +28,18 @@
 
 'use strict';
 
+// The wobble uses exactSin(), not Math.sin(), because Math.sin is
+// implementation-approximated and this multiplies EVERY battle on EVERY tick —
+// the single largest surface in the sim for a cross-engine desync
+// (core/exact.js, 07-roadmap.md A2). That makes core/exact.js a LOAD-ORDER
+// dependency of this file. Checked at load, loudly, because the alternative
+// failure is a ReferenceError thrown out of _swing() in the middle of a fight
+// (known-issue #22).
+if (typeof exactSin !== 'function') {
+  console.error('[sim/combat] no exactSin at load — core/exact.js must come ' +
+    'BEFORE sim/combat.js. Every battle will throw on its first tick.');
+}
+
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
@@ -215,9 +227,22 @@ function _openBattle(state, sid) {
 // The one fixed roll plus a slow sine so momentum swings are visible in a long
 // battle. Deterministic in ticks-since-start, so it does not break the
 // scale-invariance of battle duration.
+//
+// TWO THINGS ABOUT THE ARGUMENT, and both are about precision rather than about
+// the mechanic, which is unchanged:
+//
+//   * `t % PERIOD` before the scaling. The sine is periodic, so this is an
+//     identity — but it bounds the argument at 2*PI instead of letting it grow
+//     with the age of the battle. Without it a siege still going at tick
+//     1,000,000 gets its wobble from an argument near 100,000, where the
+//     spacing between representable doubles is itself larger than the phase
+//     step between two ticks. `t` is an integer and so is PERIOD, so the modulo
+//     is exact.
+//   * exactSin, not Math.sin. Same value to ~4e-14; the difference is that
+//     every engine agrees on it. See the note at the head of this file.
 function _swing(state, b) {
-  var t = state.tick - b.startedTick;
-  return 1 + b.variance + b.wobble * Math.sin((2 * Math.PI * t) / BAL.BATTLE_WOBBLE_PERIOD + b.phase);
+  var t = (state.tick - b.startedTick) % BAL.BATTLE_WOBBLE_PERIOD;
+  return 1 + b.variance + b.wobble * exactSin((2 * Math.PI * t) / BAL.BATTLE_WOBBLE_PERIOD + b.phase);
 }
 
 function _takeLosses(units, amount) {
