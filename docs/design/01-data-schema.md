@@ -307,6 +307,14 @@ Nothing in `sim/` may touch `document`, call `Math.random`, or read `Date.now`. 
 
 Nor may it call `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `atanh`, `hypot`, `cbrt`, or the `**` operator. Those are *implementation-approximated* — ES2024 21.3.2 permits each engine its own last bit, which is a lockstep desync (`07-roadmap.md` A2). Use `core/exact.js`: **`exactSin(x)`, `exactExp(x)`, `exactLog(v)`, `exactAtanh(y)`, `exactPowInt(base, n)`** — the last takes an **integer** exponent and returns NaN with a named `console.error` for anything else. `+ - * /`, `Math.sqrt`, `Math.floor` / `round` / `abs` / `min` / `max` / `imul`, and the constants `Math.PI` / `Math.LN2` / `Math.SQRT2` are exactly specified and carry no such risk. `test/exact-tests.js` enforces this by scanning the source of every file in `sim/` and `ai/`.
 
+**Scheduled commands.** `queueCommand(state, cmd, atTick)` appends `{ tick, seq, cmd }` to **`state.queued`** and returns `{ ok, tick, seq, reason }`, where `ok` means *accepted into the queue* and nothing more. `commandsTick(state)` — **phase 1 of the tick** — drains everything with `tick <= state.tick`, in `(tick, seq)` order, through `applyCommand`. Three parts of that are contract rather than implementation:
+
+- **`state.tick` names the tick ABOUT TO RUN.** `stepTick` increments it at the end. `atTick` therefore defaults to `state.tick`, not `state.tick + 1`: a caller between ticks (every player click) gets the drain at the head of the next `stepTick`. A caller *inside* the tick — `aiTick`, phase 0 — is already past nothing and would execute in the same tick, so anything there wanting next tick must pass `state.tick + 1` explicitly.
+- **`seq` is the total order**, from `state.nextCmdSeq`, never array position. Two commands due on one tick must apply in one sequence on every client.
+- **Shape is checked at queue time; the board is checked at drain time.** A command may be accepted and then rejected, because the board at drain time is the only board there is. `state.cmdStats` counts `queued` / `applied` / `rejected`.
+
+`state.queued` and `state.nextCmdSeq` are part of the state and therefore part of `snapshot()` — a command issued but not yet executed is part of the future the snapshot has to determine.
+
 **Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
 
 **`landing` — the beachhead remainder** (`02-visibility-and-sea.md` §3b). Present on a wave **only** while it is coming ashore, and only when its **final hop is a sea link**; a land arrival never carries one and is committed whole on the tick it lands. A sea arrival resolves on the tick it is seen as usual, but commits `1/BAL.LANDING_TICKS` of its strength per tick and stays on `state.waves` until empty.

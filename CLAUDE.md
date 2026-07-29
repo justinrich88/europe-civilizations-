@@ -41,13 +41,23 @@ else may build a wave or mutate a station's owner. Command shapes are
 `{type:'order', owner, stations:[…], target}` — note `stations`, not `sources`,
 and `owner` is required on both.
 
+**New commands are SCHEDULED, not applied.** `queueCommand(state, cmd, atTick)`
+puts a command in `state.queued`; `commandsTick` — **phase 1**, ahead of growth —
+drains it through `applyCommand`, which is still the sole mutator. `atTick`
+defaults to `state.tick`, and `state.tick` is **the tick about to run**
+(`stepTick` increments at the end). Shape is validated at queue time and
+everything else at drain time, so a command can be accepted and then legally
+rejected — that is not a bug. `send` and `order` from `render/select.js` are still
+immediate; see `07-roadmap.md` A3 for why and what it costs.
+
 ---
 
 ## Running things
 
 ```
-node test/node.js                  the sim suite — 289 tests, 31 suites, headless
+node test/node.js                  the sim suite — 304 tests, 32 suites, headless
 node test/exact-tests.js           the deterministic-maths suite standalone
+node test/queue-tests.js           scheduled commands standalone
 node test/scenarios-orderswhy.js   one suite standalone (a few do this)
 node tools/balance.js 200          Monte Carlo sweep
 node tools/verify-stations.js      map/station/link reconciliation

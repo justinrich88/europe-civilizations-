@@ -108,15 +108,46 @@ by the same power, every power holds the same territory count, worst relative
 drift across all 324 garrison floats is 1.9e-13, and 45–56% of them are still
 bit-identical.** The hashes changed; the wars did not.
 
-### A3. Tick-scheduled commands
+### A3. Tick-scheduled commands — MECHANISM SHIPPED 2026-07; two commands still to convert
 
-`applyCommand(state, cmd)` applies immediately. Lockstep needs commands to
+`applyCommand(state, cmd)` applied immediately. Lockstep needs commands to
 carry the tick they execute on, queued and drained at a fixed point in
 `stepTick`. Phase order is load-bearing (`sim/step.js`), so where they drain is
 part of the contract, not an implementation detail.
 
+Shipped:
+
+- `queueCommand(state, cmd, atTick)` puts a command in `state.queued` for a
+  named tick. `atTick` defaults to `state.tick` — which is **the tick about to
+  run**, because `stepTick` increments at the end — so a click between ticks
+  executes at the head of the next one. A tick in the past clamps forward; it is
+  never dropped and never run out of order.
+- **`commandsTick` is now phase 1**, ahead of `growthTick`, for the same reason
+  `aiTick` is phase 0: an order is issued against the numbers on screen, and
+  those are last tick's. Drain after growth and every volley is priced against a
+  board the player never saw — measured, not asserted: it comes out at 10.024
+  units where 10.000 was on screen.
+- `state.queued` and `nextCmdSeq` live **in state**, so `snapshot()` carries
+  commands in flight and reconnect-and-replay is right. Two commands due on the
+  same tick are ordered by `seq`, never by array position.
+- Validation is **split**: shape at queue time, everything else at drain time. A
+  command can be legal when queued and rejected when drained, because the board
+  at drain time is the only board there is. `state.cmdStats` counts both.
+
+**`applyCommand` stays the sole mutator** and the drain is one of its callers.
+
+**Still to do, and named rather than glossed:** `render/select.js` continues to
+call `applyCommand` directly for `send` and `order`, because it reads the result
+to draw its own confirmation and a queued command has no result yet. Converting
+those two is the retrofit — it needs the confirmation to come from the board a
+tick later, and it touches the eleven gesture tests in `test/select-tests.js`.
+Until then the game is **not** lockstep-ready; what has been bought is that no
+command written from now on needs retrofitting.
+
 **Do this before `04-development.md`**, which adds a `build` command. Written
 after, `build` is scheduled by construction; written before, it is a retrofit.
+— done in that order: `build` is the first verb that only ever goes through
+`queueCommand`.
 
 ### A4. Pause and speed leave the player UI
 

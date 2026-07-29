@@ -245,6 +245,11 @@ function runAllTests() {
   // below it. The sim family reads as a mystery in the other order.
   if (typeof suiteExact === 'function') suiteExact();
 
+  // Tick-scheduled commands — test/queue-tests.js. Immediately after, and before
+  // any suite that ticks: everything below assumes commandsTick is phase 1, and
+  // a failure there explains failures everywhere.
+  if (typeof suiteQueue === 'function') suiteQueue();
+
   suiteTuning(d);
   suiteCombatModel(d);
   suiteVerts(d);
@@ -3953,10 +3958,19 @@ function suiteStandingOrders(d) {
     // asserted rather than assumed — reorder SIM_PHASES and this fails loudly
     // instead of quietly measuring the wrong instant (known-issues #13).
     assertEqual(SIM_PHASES.join(','),
-      'growthTick,ordersTick,movementTick,combatTick,relationsTick,victoryTick',
+      'commandsTick,growthTick,ordersTick,movementTick,combatTick,relationsTick,victoryTick',
       'the tick phase order changed; this test drives the phases by hand');
 
     var b = _ordBoard(fns, d, 65, pid, 10);
+    // commandsTick is phase 1 and is deliberately NOT called in the by-hand loop
+    // below: this fixture issues no scheduled commands, so draining would be a
+    // no-op that only made the loop longer. That is an assumption about the
+    // fixture, so it is asserted rather than trusted — a future fixture that
+    // starts queueing would otherwise have its commands silently never applied,
+    // and the prediction would be measured against a board missing them.
+    assertEqual((b.s.queued || []).length, 0,
+      'the fixture now queues commands, so the by-hand loop must drain them — ' +
+      'add commandsTick(s) before growthTick(s)');
     var dest = d.POWERS[pid].capital;
     var others = b.own.filter(function (x) { return x !== dest; });
     var i;

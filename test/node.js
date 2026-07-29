@@ -24,7 +24,8 @@ const SCRIPTS = [
   // build(), and guards its railAddSection() registration — so it evaluates in
   // a context with no `document` and no `window`.
   'render/standings.js',
-  'test/asserts.js', 'test/exact-tests.js', 'test/ai-tests.js', 'test/fog-tests.js',
+  'test/asserts.js', 'test/exact-tests.js', 'test/queue-tests.js', 'test/ai-tests.js',
+  'test/fog-tests.js',
   'test/help-tests.js',
   'test/scenarios-standings.js', 'test/scenarios-routes.js',
   'test/scenarios-routeflow.js',

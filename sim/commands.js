@@ -574,3 +574,159 @@ function _cmdApplyOrder(state, cmd, result) {
   result.ok = true;
   return result;
 }
+
+// ===========================================================================
+// TICK-SCHEDULED COMMANDS — 07-roadmap.md A3
+// ===========================================================================
+//
+// applyCommand() above executes NOW. That is correct for the AI, which runs
+// inside the tick from a state every client shares, and it is wrong for input
+// that arrives from outside — a click, and later a packet. Lockstep needs every
+// command to carry the tick it executes on, so that two clients applying the
+// same commands in the same order reach the same board.
+//
+// So input is a two-step now:
+//
+//     queueCommand(state, cmd)     -> puts it in state.queued for a named tick
+//     commandsTick(state)          -> phase 1: drains everything now due
+//
+// applyCommand STAYS THE SOLE MUTATOR and the drain is one of its callers.
+// Splitting the mutation across two functions would be the two-implementations
+// defect this project has logged five times.
+//
+// WHY THE DRAIN IS PHASE 1, AHEAD OF growthTick
+//
+// It is the same argument sim/step.js already makes for putting aiTick at phase
+// 0: an order is issued against the numbers currently on screen, and those are
+// last tick's. Drain after growth and a queued send spends units the player
+// could not see when they clicked. The phase order is part of the contract, and
+// test/exact-tests.js's sibling in test/runner.js asserts this specific edge
+// rather than trusting the comment.
+//
+// WHAT IS VALIDATED WHEN, AND WHY THAT SPLIT IS THE WHOLE DESIGN
+//
+//   queue time   SHAPE ONLY. Is there a command, does it name a type this sim
+//                knows, does it name an owner. A typo must not sit in the queue
+//                for 400ms and then fail somewhere nobody is looking.
+//   drain time   EVERYTHING ELSE, by applyCommand, unchanged.
+//
+// A command CAN be legal when queued and rejected when drained — the target was
+// captured in between, the source garrison was raided below the floor. That is
+// not a bug and it must not be prevented: the board at drain time is the only
+// board that exists. It is why state.cmdStats.rejected is a counter and not an
+// alarm, and why anything wanting to know the outcome of a specific command has
+// to wait for the tick rather than read a return value.
+//
+// The consequence for the UI is real and is not paid here: render/select.js
+// still calls applyCommand directly for 'send' and 'order', because it reads the
+// result to draw its own confirmation. Converting those two is the retrofit the
+// roadmap named; what this section buys is that no command written FROM NOW ON
+// has to be retrofitted, and 'build' is the first one that is scheduled by
+// construction.
+
+// Command types this sim knows how to drain. Named explicitly rather than
+// probed, so a typo'd type is rejected at the point of issue instead of sitting
+// in the queue until it is drained and silently dropped.
+var CMD_TYPES = ['send', 'order', 'build'];
+
+// Schedule `cmd` for `atTick`, defaulting to the earliest tick that can still
+// run it.
+//
+// READ `state.tick` CAREFULLY: it is incremented at the END of stepTick, so it
+// names the tick ABOUT TO RUN, not one that has finished. So the default floor is
+// `state.tick` and not `state.tick + 1`:
+//
+//   the player, between ticks   state.tick = T, tick T has not run. Scheduling
+//                               for T means the drain at the head of the very
+//                               next stepTick. Minimum latency, one meaning.
+//   aiTick, inside phase 0      state.tick = T and tick T is HALF RUN — phase 1
+//                               is still ahead. Scheduling for T therefore
+//                               executes in the same tick, which is exactly what
+//                               the AI does today by calling applyCommand
+//                               directly. A caller inside the tick that wants
+//                               NEXT tick must say `state.tick + 1`; it is not
+//                               guessed here, because the two cases are
+//                               indistinguishable from inside this function and
+//                               a wrong guess is a one-tick desync.
+//
+// `+ 1` was tried first and it is wrong: it costs the player an entire extra
+// tick of latency for nothing, and it made the "applies on the next tick" test
+// need two stepTicks, which is the kind of off-by-one that ends up documented as
+// behaviour.
+//
+// Returns { ok, tick, seq, reason }. `ok` means ACCEPTED INTO THE QUEUE and
+// nothing more — see the validation note above. There is deliberately no way to
+// ask this function whether the command will succeed.
+//
+// A tick in the past is clamped FORWARD to the floor rather than dropped or
+// drained out of order. Dropping loses a player's click to a race they cannot
+// see; clamping is the only option where the same call on two clients produces
+// the same schedule.
+function queueCommand(state, cmd, atTick) {
+  if (!state || !cmd || typeof cmd !== 'object') return { ok: false, reason: 'no-command' };
+  if (!Array.isArray(state.queued)) state.queued = [];
+  if (typeof state.nextCmdSeq !== 'number') state.nextCmdSeq = 1;
+
+  if (CMD_TYPES.indexOf(cmd.type) < 0) return { ok: false, reason: 'unknown-type' };
+  // `owner` is required on every command shape (CLAUDE.md). Checked here as
+  // well as in applyCommand because an ownerless command in the queue is a
+  // command nobody can attribute when it fails four ticks later.
+  if (!cmd.owner || typeof cmd.owner !== 'string') return { ok: false, reason: 'no-owner' };
+  if (state.winner) return { ok: false, reason: 'game-over' };
+
+  var floor = state.tick;
+  var tick = (typeof atTick === 'number' && isFinite(atTick) && atTick > floor)
+    ? Math.floor(atTick) : floor;
+  var seq = state.nextCmdSeq++;
+
+  state.queued.push({ tick: tick, seq: seq, cmd: cmd });
+  if (state.cmdStats) state.cmdStats.queued++;
+  return { ok: true, tick: tick, seq: seq, reason: null };
+}
+
+// Everything scheduled for this tick or earlier, in (tick, seq) order.
+//
+// `tick <= state.tick` rather than `=== state.tick` on purpose: a state restored
+// from a snapshot taken before a pause, or advanced by a harness that skipped
+// ticks, must still execute what it owes rather than silently strand it.
+// Overdue is visible in the sort — earliest tick first — not swallowed.
+function _cmdDue(state) {
+  var due = [];
+  for (var i = 0; i < state.queued.length; i++) {
+    if (state.queued[i].tick <= state.tick) due.push(state.queued[i]);
+  }
+  due.sort(function (a, b) {
+    if (a.tick !== b.tick) return a.tick - b.tick;
+    return a.seq - b.seq;
+  });
+  return due;
+}
+
+// Phase 1 of the tick. Drains every due command through applyCommand.
+//
+// Results are counted, not returned: this is a phase, and phases return nothing
+// (sim/step.js calls them in a loop). Anything that needs a specific command's
+// outcome reads the board, which is the only honest answer anyway.
+function commandsTick(state) {
+  if (!state || !Array.isArray(state.queued) || !state.queued.length) return;
+
+  var due = _cmdDue(state);
+  if (!due.length) return;
+
+  // Remove the drained entries BEFORE applying any of them. A command whose
+  // application queues another command — nothing does this today, and the build
+  // verb makes it plausible — must not have its child drained in the same pass
+  // and must not resurrect its parent. Filtering after the loop would do both.
+  var keep = [];
+  for (var i = 0; i < state.queued.length; i++) {
+    if (state.queued[i].tick > state.tick) keep.push(state.queued[i]);
+  }
+  state.queued = keep;
+
+  for (var j = 0; j < due.length; j++) {
+    var res = applyCommand(state, due[j].cmd);
+    if (!state.cmdStats) continue;
+    if (res && res.ok) state.cmdStats.applied++;
+    else state.cmdStats.rejected++;
+  }
+}

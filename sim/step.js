@@ -14,12 +14,22 @@
 // PHASE ORDER IS LOAD-BEARING and is itself part of the contract
 // (01-data-schema.md, "Sim internals — phase functions"):
 //
-//   1. growthTick     logistic growth, multiplier reach, disconnection decay
-//   2. ordersTick     standing orders: a city ships surplus to each city it supplies
-//   3. movementTick   advance waves; resolve arrivals
-//   4. combatTick     square-law attrition; flip stations
-//   5. relationsTick  balance-of-power drift (throttled internally)
-//   6. victoryTick    capitulation and win detection
+//   1. commandsTick   drain commands scheduled for this tick
+//   2. growthTick     logistic growth, multiplier reach, disconnection decay
+//   3. ordersTick     standing orders: a city ships surplus to each city it supplies
+//   4. movementTick   advance waves; resolve arrivals
+//   5. combatTick     square-law attrition; flip stations
+//   6. relationsTick  balance-of-power drift (throttled internally)
+//   7. victoryTick    capitulation and win detection
+//
+// COMMANDS FIRST, AND AHEAD OF GROWTH, for the same reason aiTick is phase 0:
+// an order is issued against the numbers currently on screen, and those are last
+// tick's. Drain after growthTick and a queued send spends units the player could
+// not see when they clicked (07-roadmap.md A3, and the note at the foot of
+// sim/commands.js). It sits AFTER aiTick because the AI applies immediately and
+// in-tick — it is deterministic from the state every client shares, so it needs
+// no schedule — and an AI command queued for tick+1 must not be drained by the
+// same tick that produced it.
 //
 // Growth before movement so a send is based on units that already grew this
 // tick. Movement before combat so arrivals fight on the tick they land
@@ -40,7 +50,8 @@
 
 // The phases, in order. Resolved by name at CALL time rather than captured at
 // load time, so script order between the sim files does not matter.
-var SIM_PHASES = ['growthTick', 'ordersTick', 'movementTick', 'combatTick', 'relationsTick', 'victoryTick'];
+var SIM_PHASES = ['commandsTick', 'growthTick', 'ordersTick', 'movementTick', 'combatTick',
+  'relationsTick', 'victoryTick'];
 
 // Which phase functions are missing right now. Exported because the app and the
 // harness both want to say so out loud rather than run a crippled sim.
@@ -61,6 +72,7 @@ function _simPhaseFn(name) {
   var g = (typeof globalThis !== 'undefined') ? globalThis : null;
   if (g && typeof g[name] === 'function') return g[name];
   switch (name) {
+    case 'commandsTick':  return (typeof commandsTick  === 'function') ? commandsTick  : null;
     case 'growthTick':    return (typeof growthTick    === 'function') ? growthTick    : null;
     case 'ordersTick':    return (typeof ordersTick    === 'function') ? ordersTick    : null;
     case 'movementTick':  return (typeof movementTick  === 'function') ? movementTick  : null;
@@ -96,9 +108,9 @@ function stepTick(state) {
   if (missing.length) {
     throw new Error(
       'stepTick: missing sim phase function(s): ' + missing.join(', ') +
-      '. Check that sim/growth.js, sim/movement.js (which also supplies ' +
-      'ordersTick), sim/combat.js, sim/relations.js and sim/victory.js all ' +
-      'loaded.');
+      '. Check that sim/commands.js (which also supplies commandsTick), ' +
+      'sim/growth.js, sim/movement.js (which also supplies ordersTick), ' +
+      'sim/combat.js, sim/relations.js and sim/victory.js all loaded.');
   }
 
   // The game is over. Ticking on would keep decaying garrisons under a result

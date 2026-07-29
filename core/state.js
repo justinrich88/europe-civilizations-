@@ -125,6 +125,30 @@ function newGame(seed) {
     // deposited onto ground its owner does not hold it would have started a
     // battle nobody clicked for, which is the one thing this mechanic may not
     // do (00-vision.md §8, and data/tuning.js §11).
+    // SCHEDULED COMMANDS (sim/commands.js, 07-roadmap.md A3). Each entry is
+    // { tick, seq, cmd } and is applied by commandsTick() on the tick it names.
+    //
+    // In state, not beside it, for the reason everything else here is: a
+    // snapshot has to fully determine the future, and a command that has been
+    // issued but not yet executed is part of that future. Under lockstep it is
+    // the ONLY part that came from outside — every client must apply the same
+    // commands on the same tick or the boards diverge, and a queue the snapshot
+    // did not carry would make reconnect-and-replay wrong by exactly the
+    // commands in flight.
+    queued: [],
+    // Monotonic, never reused, never reset. Two commands scheduled for the same
+    // tick need a total order, and it may not come from the array's insertion
+    // order alone — a queue that is filtered or re-sorted anywhere would lose
+    // it silently. An integer in state, exactly like nextWaveId.
+    nextCmdSeq: 1,
+    // Drain accounting, same idea as orderStats below: counters rather than a
+    // log, so a headless batch can assert on them without instrumenting the sim.
+    cmdStats: {
+      queued: 0,       // commands accepted into the queue
+      applied: 0,      // drained and accepted by applyCommand
+      rejected: 0,     // drained and REJECTED by applyCommand — see the note in
+                       // commandsTick about why this is expected and not a bug
+    },
     orderStats: {
       sweeps: 0,       // standing-order phases that actually ran (throttled)
       sends: 0,        // waves created by a standing order
