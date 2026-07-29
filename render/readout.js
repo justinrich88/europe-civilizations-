@@ -2243,17 +2243,62 @@ function _rdoOrdersActionable(reason) {
 // degrade-safely-and-say-so contract render/map.js applies to an unclassified
 // reason, and test/scenarios-routeview.js already fails the day a sixth reason
 // lands unclassified.
-function _rdoOrdersWhy(reason, target) {
+// ── "UNDER MINIMUM" WAS A TRUE SENTENCE THAT TAUGHT THE WRONG THING ───────
+//
+// It described the ARITHMETIC — the share fell under MIN_SEND — and the player
+// read a VERDICT. Measured, AI off, one uncontested route: a feed city of
+// capacity 13 ships on 6% of its sweeps and reads "under minimum" on the other
+// 94%, with dark runs up to 17 sweeps (425 ticks); over 32,000 ticks its
+// garrison is stationary to within a unit, so 100% of what it produces leaves
+// down that line. Nothing is wrong, nothing is lost, and the rail said the same
+// words a genuinely broken line would say. That is what sent the player looking
+// for a bug twice.
+//
+// The number is what separates the two states, and the sim already computes it
+// (`shortBy`, sim/movement.js — the inverse of _ordAllowedFraction). It is
+// passed in on the EDGE rather than recomputed here, because a renderer deriving
+// the keep-floor rule for itself is known-issues #9 and this project has logged
+// that five times.
+//
+//   shortfall > 0   the source cannot yet pay for one stream. It is ACCUMULATING
+//                   and this is how many more units it needs. Units, not an ETA:
+//                   the garrison is drawn on the station, so the claim can be
+//                   checked against the board, and it stays true while the city
+//                   is being spent (the shortfall grows) where a countdown lies.
+//   shortfall === 0 the source can pay; this LINE did not get this sweep.
+//   no edge         an empire-header summary over many lines, which has no one
+//                   source and therefore no honest number.
+//
+// The shortfall===0 wording deliberately does not say "the other line is next".
+// The rotation is the usual cause but not the only one — a share trimmed by
+// SEND_KEEP_UNITS lands here too — so it states what is true in both cases and
+// claims nothing about what happens next.
+function _rdoOrdersWhy(reason, target, edge) {
   var dest = target ? _rdoStationName(target) : null;
+  var short = (edge && isFinite(edge.shortfall)) ? edge.shortfall : null;
   switch (reason) {
     case 'destination-full':
       return { tag: 'full', long: dest ? dest + ' is full' : 'every destination is full' };
     case 'target-lost':
       return { tag: 'not yours', long: dest ? dest + ' is not yours any more' : 'a destination was lost' };
     case 'at-keep-floor':
-      return { tag: 'keep floor', long: 'at the keep floor — a city never ships itself defenceless' };
+      // Always short by definition — the fraction is zero exactly while the
+      // garrison sits under KEEP_FLOOR x capacity — but the number is only
+      // printed when it was actually handed over.
+      return short > 0
+        ? { tag: 'saving up', whole: true, long: 'at the keep floor — ' + _rdoNum(short) +
+            ' more units before it can spare any' }
+        : { tag: 'keep floor', long: 'at the keep floor — a city never ships itself defenceless' };
     case 'below-min-send':
-      return { tag: 'under minimum', long: 'the share is under the ' + BAL.ORDERS.MIN_SEND + '-unit minimum' };
+      if (short > 0) {
+        return { tag: 'saving up', whole: true, long: 'saving up — ' + _rdoNum(short) +
+          ' more units at the source and it ships' };
+      }
+      if (short === 0) {
+        return { tag: 'waiting its turn', whole: true, long: 'the source can pay for ' +
+          'a stream; this line did not get this sweep' };
+      }
+      return { tag: 'saving up', long: 'no city has produced a shippable batch yet' };
     case 'unreachable':
       return { tag: 'no owned route', long: 'no route over ground you hold' };
     case 'no-order':
@@ -2265,8 +2310,8 @@ function _rdoOrdersWhy(reason, target) {
 
 // The long form, unchanged, for every caller that has room for a sentence — the
 // empire header's summary line and every destination line's `title`.
-function _rdoOrdersWhyShort(reason, target) {
-  return _rdoOrdersWhy(reason, target).long;
+function _rdoOrdersWhyShort(reason, target, edge) {
+  return _rdoOrdersWhy(reason, target, edge).long;
 }
 
 // ── ONE DESTINATION, THREE WORDS FOR IT ─────────────────────────────────
@@ -2372,13 +2417,18 @@ function _rdoOrdersLines(next, max) {
       rec.title = name + ' — ' + _rdoNum(e.units) + ' units on the next sweep, one ' +
         'sweep every ' + BAL.ORDERS.INTERVAL + ' ticks';
     } else {
-      var why = _rdoOrdersWhy(e.blocked, e.target);
+      var why = _rdoOrdersWhy(e.blocked, e.target, e);
       rec.text = RDO_ORDERS_GLYPH[st] + ' ' + name + ' — ' + why.tag;
       // The full sentence, plus what the STATE means — which is a fact about the
       // classification, not a second word for the reason.
+      // `whole` marks a sentence that already says what happens next — "…and it
+      // ships" needs no "…and the stream resumes" bolted onto it, and reading
+      // both is how a tooltip stops being read at all. A FLAG ON THE RECORD
+      // rather than a substring test here, so the phrase and the claim about the
+      // phrase are edited in one place.
       rec.title = why.long + (st === 'stuck'
         ? ' — this line needs you; nothing changes until you take ground or redraw it'
-        : ' — it clears itself, and the stream resumes');
+        : (why.whole ? '' : ' — it clears itself, and the stream resumes'));
     }
     out.push(rec);
   }

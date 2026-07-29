@@ -91,8 +91,15 @@ function _owyNext(edges) {
   return { units: 0, edges: edges, blocked: edges[0].blocked, target: edges[0].target };
 }
 
-function _owyEdge(target, units, blocked) {
-  return { target: target, units: units, fraction: 0, blocked: blocked || null };
+// `shortfall` is OPTIONAL and defaults to absent rather than to 0, because
+// absent and 0 are two different sentences in _rdoOrdersWhy — 0 means "the
+// source can pay, this line did not get the sweep" and absent means "nobody
+// handed me a number". A default of 0 here would have made every legacy fixture
+// silently assert the rotation wording.
+function _owyEdge(target, units, blocked, shortfall) {
+  var e = { target: target, units: units, fraction: 0, blocked: blocked || null };
+  if (isFinite(shortfall)) e.shortfall = shortfall;
+  return e;
 }
 
 // Two real station ids that are not the same station, taken off the live table
@@ -320,6 +327,73 @@ function suiteOrdersWhy(d) {
       assertEqual(RDO_ORDERS_STUCK_FALLBACK[r] === true, MAP_ORDER_STUCK[r] === true,
         'the fallback and the board disagree about ' + r);
     }
+  });
+
+  // ── saving up is not the same state as broken ──────────────────────────
+  //
+  // `below-min-send` is the most common dark state on a healthy board — a feed
+  // city of capacity 13 ships on 6% of its sweeps and is dark on the other 94%
+  // while losing nothing — and it covers two situations the player would act on
+  // differently. One word covered both, so the rail printed the same sentence
+  // over "this city is accumulating, leave it alone" and over "this line lost
+  // its sweep". The number the sim hands over on the edge is what separates
+  // them, and these assert that the number is USED rather than merely carried.
+
+  // MUTATION: drop the `edge` argument at the _rdoOrdersWhy call site in
+  // _rdoOrdersLines. Verified red — the line falls back to the empire wording
+  // and the count disappears with it, which is exactly the regression that
+  // reintroduces the original complaint.
+  test('a source that is accumulating says how much more it needs', function () {
+    var w = _rdoOrdersWhy('below-min-send', B, _owyEdge(B, 0, 'below-min-send', 0.6));
+    assert(w.long.indexOf('0.6') >= 0, 'the shortfall the sim measured is not in the ' +
+      'sentence: ' + w.long);
+    assert(w.long.indexOf('minimum') < 0, 'still describing the arithmetic rather than ' +
+      'the city: ' + w.long);
+
+    // Through the real path, not just the phrasebook — this is the string the
+    // rail actually paints.
+    var lines = _rdoOrdersLines(_owyNext([_owyEdge(B, 0, 'below-min-send', 0.6)]),
+      RDO_ORDERS_MAX_LINES);
+    assertEqual(lines.length, 1, 'one edge, one line');
+    assertEqual(lines[0].state, 'waiting', 'a city saving up was called ' +
+      lines[0].state + ' — it needs nothing from the player');
+    assert(lines[0].text.indexOf(w.tag) >= 0, 'the line does not carry the tag: ' +
+      lines[0].text);
+    assert(lines[0].title.indexOf('0.6') >= 0, 'the count is missing from the ' +
+      'tooltip: ' + lines[0].title);
+  });
+
+  // MUTATION: collapse the two branches to one. Verified red. A source that CAN
+  // pay is a different fact from a source that cannot, and printing "0 more
+  // units and it ships" at a player would be worse than the sentence it replaced.
+  test('a line that merely lost its sweep does not claim the source is short', function () {
+    var w = _rdoOrdersWhy('below-min-send', B, _owyEdge(B, 0, 'below-min-send', 0));
+    assert(w.long.indexOf('more units') < 0, 'a source that can pay was described as ' +
+      'saving up: ' + w.long);
+    assert(w.tag !== _rdoOrdersWhy('below-min-send', B, _owyEdge(B, 0, 'below-min-send', 4)).tag,
+      'the two shortfall states print the same tag, so the distinction the number ' +
+      'exists to draw is invisible on the 200px line');
+  });
+
+  // The empire header summarises MANY sources and so has no honest number. It
+  // must degrade to a sentence, never to "undefined more units".
+  test('the empire summary says no number it does not have', function () {
+    var s = _rdoOrdersWhyShort('below-min-send', null);
+    assert(s.indexOf('undefined') < 0 && s.indexOf('NaN') < 0, 'edge-less summary: ' + s);
+    assert(s.indexOf('more units') < 0, 'the summary invented a per-source count: ' + s);
+    assert(s.length > 0, 'the summary produced nothing at all');
+  });
+
+  // at-keep-floor carries a true shortfall too, and the keep floor is the one
+  // blocked reason whose old wording explained the RULE well. It only gives that
+  // up when a real number arrived.
+  test('the keep floor keeps its explanation when no number came with it', function () {
+    var bare = _rdoOrdersWhy('at-keep-floor', B, _owyEdge(B, 0, 'at-keep-floor'));
+    assert(bare.long.indexOf('defenceless') >= 0, 'the rule stopped being explained ' +
+      'even with no number to replace it: ' + bare.long);
+    var counted = _rdoOrdersWhy('at-keep-floor', B, _owyEdge(B, 0, 'at-keep-floor', 3.2));
+    assert(counted.long.indexOf('3.2') >= 0, 'the shortfall was carried and ignored: ' +
+      counted.long);
   });
 
   // ── the cap ────────────────────────────────────────────────────────────
