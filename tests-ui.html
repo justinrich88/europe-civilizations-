@@ -145,6 +145,51 @@ function waitForGame(win, doc, timeoutMs) {
   });
 }
 
+// CLOSE THE GUIDE, AND FAIL LOUDLY IF IT WILL NOT CLOSE.
+//
+// render/help.js auto-shows the guide ONCE PER BROWSER, keyed on a localStorage
+// flag. That makes this page's result depend on the history of whatever browser
+// opened it:
+//
+//   a browser that has seen the guide   the board is clear, 34 tests run
+//   a browser that has NOT              the guide's <p> is over every station,
+//                                       so _seltFixture's hit test misses every
+//                                       neighbour, and suiteSelect fires its one
+//                                       loud failure and returns — 11 of its 12
+//                                       tests never register at all
+//
+// Which is worse than a plain red: the page still prints a totals line, and the
+// totals line is smaller by eleven in a way nobody counts. It passed for the
+// author for weeks because his profile had the flag set, and went red the first
+// time it ran in a fresh profile.
+//
+// So the guide is closed here, through its own helpHide() rather than by writing
+// the localStorage key from this file — the key is render/help.js's business and
+// a copy of it here would drift silently the day it becomes v2 (known-issue #9).
+// This is the same job `?player=ger` on the iframe already does: put the SHIPPED
+// page into the state a player is in when they start giving orders.
+//
+// A guide that will not close is a hard error, not a warning. If something is
+// over the board and cannot be moved, every gesture assertion below is measuring
+// an overlay, and this page exists to say so out loud.
+function dismissGuide(win, doc) {
+  var open = win.HELP_STATE && win.HELP_STATE.open;
+  if (!open) return;                     // already seen in this browser
+  if (typeof win.helpHide !== 'function') {
+    throw new Error('the guide is open over the board and render/help.js exposes ' +
+      'no helpHide() — every gesture test below would hit-test the guide');
+  }
+  win.helpHide();
+  if (win.HELP_STATE && win.HELP_STATE.open) {
+    throw new Error('helpHide() ran and the guide is still open — the board is ' +
+      'covered and no gesture assertion on this page means anything');
+  }
+  if (doc.querySelector('.help-p')) {
+    throw new Error('the guide reports closed but its content is still in the ' +
+      'document — known-issue #15/#20 territory, and the hit test will still miss');
+  }
+}
+
 frame.addEventListener('load', function () {
   var win = frame.contentWindow;
   var doc = frame.contentDocument;
@@ -153,6 +198,7 @@ frame.addEventListener('load', function () {
 
   waitForGame(win, doc)
     .then(function () {
+      dismissGuide(win, doc);
       say('injecting suites…');
       return TEST_FILES.reduce(function (chain, src) {
         return chain.then(function () { return inject(doc, src); });

@@ -665,3 +665,57 @@ who has just broken the order will.
 `index.html` in an iframe instead of copying its script tags. A duplicated
 script list would have kept the old order and gone on passing while testing a
 page nobody ships — #9, in the form where the drift is invisible.
+
+---
+
+## 23. `tests-ui.html` passed or failed depending on whether the browser had ever opened the guide
+
+`render/help.js` auto-shows the guide **once per browser**, keyed on the
+localStorage flag `coe.help.seen.v1`. `tests-ui.html` loads the shipped
+`index.html?player=ger` in an iframe, so on a browser that had never opened the
+guide, the guide opened over the board — and `test/select-tests.js` hit-tests
+real screen coordinates.
+
+The result was not simply a red run:
+
+```
+a profile that had seen the guide     44 passed, 0 failed      4 suites
+a fresh profile                       33 passed, 1 failed      4 suites
+```
+
+`suiteSelect` is deliberately written to fire **one** loud failure and return
+when `_seltFixture` reports that nothing on the board answers a press — that
+design is correct and it is what turned this red instead of green. But the
+consequence is that **eleven of its twelve tests never registered**, and the
+page still printed a totals line. Nobody counts a totals line down by eleven.
+
+It passed for the author for weeks. His profile had the flag set the first time
+he ever loaded the game; every run after that was on a board with nothing over
+it. It went red the first time it ran in a fresh browser profile — which is also
+what every new tester and every CI runner is.
+
+**The lesson is not about the guide.** It is that `tests-ui.html`'s whole reason
+to exist is loading the page a player actually gets, and a player's browser
+carries state. `?player=ger` was already on the iframe for exactly this reason —
+skip the empire picker, put the page in the state a player is in when they start
+giving orders. The guide is the same job and was missed.
+
+**Fixed** by `dismissGuide()` in `tests-ui.html`, called after `waitForGame()` and
+before any suite is injected. Three properties worth keeping if it is ever
+rewritten:
+
+- It calls the iframe's own `helpHide()` rather than writing
+  `coe.help.seen.v1` from the harness. A copy of that key here is #9, and it
+  drifts silently the day the key becomes `v2`.
+- A guide that will not close is a **hard error**, not a warning and not a skip.
+  If something is over the board and cannot be moved, every gesture assertion on
+  the page is measuring an overlay.
+- It is a **no-op** when the guide is not open, so it does not mask the failure
+  `_seltFixture` was written to catch. A genuine pointer-eating overlay
+  (known-issue #5's family, five occurrences) still turns that suite red.
+
+**And a smaller thing found while mutation-testing the fix:** removing
+`window.helpHide = helpHide` from `render/help.js` changes nothing. `helpHide`
+is a top-level `function` declaration, so it is already a property of `window`
+(#3's other half). The explicit export line is documentation, not mechanism —
+the mutation that actually removes the function is renaming it.

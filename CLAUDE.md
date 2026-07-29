@@ -59,7 +59,9 @@ matters for anything under `render/`** — it loads `index.html` itself in an
 800×900 iframe and injects the test files, so it tests the shipped page rather
 than a copy of its script list. 44 tests there that `node test/node.js` cannot
 run. A **SKIP is a FAILURE** on that page, and so is a suite that records zero
-tests.
+tests — **and so is a suite that records FEWER tests than it has**, which is how
+#23 hid for weeks. `select / armed supply order` must read 11/11; at 0/1 or 1/1
+something is covering the board and the other ten never registered.
 
 Never serve this with `python3 -m http.server` — see #16.
 
@@ -113,7 +115,7 @@ such measurement beside it is an unexplained regression.
 
 ## Known issues — read `docs/testing/known-issues.md` before debugging
 
-22 numbered entries, five of which recurred after being written down. The ones
+23 numbered entries, five of which recurred after being written down. The ones
 that cost the most time:
 
 | # | The trap |
@@ -127,6 +129,7 @@ that cost the most time:
 | 17 | The game is played at **800px** (viewport 800×900). Thresholds that look screen-constant are not, under zoom (#21) |
 | 18 | A readout can answer a different question from the one on screen and never look wrong |
 | 22 | A load-time `railAddSection()` call is a load-order dependency; guard it, but make the else branch loud |
+| 23 | `tests-ui.html` result depended on browser localStorage — the guide covered the board on a fresh profile and eleven select tests silently never ran |
 
 **macOS only:** files under `~/Downloads` pick up a `com.apple.macl` ACL the
 preview server cannot read, giving silent 404s that look exactly like code bugs
