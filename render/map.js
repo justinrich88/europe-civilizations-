@@ -14,6 +14,18 @@
 
 'use strict';
 
+// Garrison numbers are summed by core/state.js's totalUnits(), never spelled
+// out here — see mapUnitTotal() below for why a local copy of that sum is a
+// liability. That makes core/state.js a LOAD-ORDER dependency of this file:
+// index.html must keep it above render/map.js. Checked here, at load, because
+// the alternative failure is a ReferenceError thrown mid-frame out of a helper
+// that says nothing about script order (known-issue #22: guard, but make the
+// else branch loud — a guard that returns quietly ships an invisible bug).
+if (typeof totalUnits !== 'function') {
+  console.error('[render/map] no totalUnits at load — core/state.js must come ' +
+    'BEFORE render/map.js in index.html. Every garrison on the board will throw.');
+}
+
 // Fallback ownership palette, used only if POWERS is missing a colour.
 const FALLBACK_POWER_COLORS = [
   '#5b7fbd', '#c25b52', '#6fae72', '#b4894a', '#8f6bb0', '#4fa5a8', '#b56a95',
@@ -1595,9 +1607,23 @@ function mapOrderFlow(rec, next, inFlight, sid, tick) {
   }
 }
 
+// The ONE place in this file that knows how to add up a unit bundle, and it
+// does not know: it defers to core/state.js.
+//
+// It used to spell the sum out inline as `(u.infantry || 0) + …`, and those
+// `|| 0`s were the most dangerous three characters in the renderer. The unit
+// bundle's SHAPE is about to change (three types collapsing to one scalar), and
+// under that spelling every missing property reads as zero and the whole board
+// draws a confident, silent "0" — no throw, no warning, and test/node.js loads
+// no render/ file so nothing would go red. Routed through totalUnits(), the
+// same mistake produces NaN on every node at once, which is impossible to miss.
+//
+// The `!u` guard is a different question and stays: it answers "is there a
+// bundle at all" (the pre-game pseudo-state and a station drawn before its
+// units exist), not "does this bundle have the properties I expect".
 function mapUnitTotal(u) {
   if (!u) return 0;
-  return (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
+  return totalUnits(u);
 }
 
 function mapRingFraction(units, capacity) {
@@ -2246,6 +2272,10 @@ function drawTerritoryLabels(D, layer) {
 // last written, and return early when they match. Comparison is a number or a
 // string; a DOM write is layout. Skipping is always the cheaper branch.
 
+// Latch for the assertion inside stationContested, below. One report per page
+// load; see the note at the `n !== n` branch for why it exists at all.
+let _mapContestLoud = false;
+
 // Is anyone actually fighting for this station right now? `attackers` is left
 // in place as an empty bag by sim/combat.js after a fight resolves, so the
 // presence of the key is not the question — the presence of units is.
@@ -2256,7 +2286,36 @@ function stationContested(state, sid) {
   for (const pid in a) {
     const u = a[pid];
     if (!u) continue;
-    if ((u.infantry || 0) + (u.artillery || 0) + (u.armour || 0) > 1e-6) return true;
+    const n = mapUnitTotal(u);
+    // Routing this through mapUnitTotal is NOT on its own enough, and the
+    // reason is worth writing down because it caught us out.
+    //
+    // Everywhere else a unit sum ends up being PRINTED, so a bundle of the
+    // wrong shape produces NaN and the screen says so. Here the sum ends up in
+    // a COMPARISON, and every comparison against NaN is false — exactly as
+    // `0 > 1e-6` was false under the old `(u.infantry || 0) + …` spelling. So
+    // swapping the sum bought nothing by itself: this function would go on
+    // answering "nobody is fighting anywhere", the battle ring would never
+    // render on any station, and a board mid-war would look like a quiet turn.
+    // Of every inline sum in the codebase this was the quietest, and it is
+    // quiet again the moment the result stops being a number.
+    //
+    // Hence the explicit NaN gate. Latched, in the idiom render/readout.js
+    // already uses for its own-only assertion — a renderer running at 60fps
+    // must say a thing like this once, not sixty times a second — and it
+    // returns TRUE so the failure reaches the SCREEN as a ring full of NaN and
+    // not only the console, which known-issue #22 notes nobody reads.
+    if (n !== n) {                       // NaN is the only value unequal to itself
+      if (!_mapContestLoud) {
+        _mapContestLoud = true;
+        console.error('[render/map] the attacker bundle at ' + sid + ' for ' + pid +
+          ' does not sum to a number. The unit bundle is not the shape ' +
+          'mapUnitTotal() expects — until that is fixed, every battle ring on ' +
+          'the board is unreliable.');
+      }
+      return true;
+    }
+    if (n > 1e-6) return true;
   }
   return false;
 }

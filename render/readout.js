@@ -563,13 +563,13 @@ function _rdoGrowthPerTick(state, sid, units, extraMul) {
     growthMul: st.growthMul,
     capturedTick: st.capturedTick,
   };
-  var total = units.infantry + units.artillery + units.armour;
+  var total = totalUnits(units);
   try {
     _applyGrowth({ tick: state.tick }, sid, probe, d, total, extraMul);
   } catch (e) {
     return null;
   }
-  return probe.units.infantry + probe.units.artillery + probe.units.armour;
+  return totalUnits(probe.units);
 }
 
 // Ticks for a station to reach `frac` of capacity, by stepping the sim's own
@@ -595,7 +595,7 @@ function _rdoTicksToFill(state, sid, frac) {
     probe.units.artillery = 0;
     probe.units.armour = 0;
     _applyGrowth(stub, sid, probe, d, u, 1);
-    var g = probe.units.infantry + probe.units.artillery + probe.units.armour;
+    var g = totalUnits(probe.units);
     if (!(g > 0)) return -1;
     u += g;
     if (u >= target) return i + 1;
@@ -1114,7 +1114,16 @@ function _rdoHeaderStats(state, pid) {
 
   var ids = (typeof powerStations === 'function') ? powerStations(state, pid) : [];
   var e = {
-    n: ids.length, inf: 0, art: 0, arm: 0, transit: 0, cap: 0,
+    // A REAL unit bundle, not three loose accumulators. The per-type split is
+    // load-bearing — the composition line ("42 inf · 9 art") is the only place
+    // in the panel that distinguishes the types, so it cannot be collapsed to a
+    // scalar ahead of the sim. But it does not follow that this file should
+    // spell the bundle out: as `inf/art/arm` the accumulation and its total
+    // were a fourth hand-rolled copy of core/state.js, and the day the bundle
+    // changes shape they would go on adding up three properties that no longer
+    // exist. Held as a bundle, addUnits()/totalUnits() carry it, and _rdoComp
+    // becomes the single site that has to answer what a composition means.
+    n: ids.length, units: emptyUnits(), transit: 0, cap: 0,
     perTick: 0, cut: 0, contested: 0, atCap: 0,
     // Standing supply. Counted on THIS walk rather than on one of their own:
     // the aggregate already visits every station this power holds, on a tick
@@ -1159,7 +1168,7 @@ function _rdoHeaderStats(state, pid) {
     }
     var d = STATIONS[sid];
     var u = st.units;
-    e.inf += u.infantry; e.art += u.artillery; e.arm += u.armour;
+    addUnits(e.units, u);
     e.cap += d.capacity || 0;
 
     // Counted BEFORE the growth branches below, every one of which `continue`s.
@@ -1190,7 +1199,7 @@ function _rdoHeaderStats(state, pid) {
       }
     }
 
-    var total = u.infantry + u.artillery + u.armour;
+    var total = totalUnits(u);
     var contested = (typeof stationAttackers === 'function') && stationAttackers(state, sid).length > 0;
     if (contested) { e.contested++; continue; }
     if (st.connected === false) {
@@ -1221,7 +1230,7 @@ function _rdoHeaderStats(state, pid) {
     if (waves[w].owner === pid) e.transit += totalUnits(waves[w].units);
   }
 
-  e.held = e.inf + e.art + e.arm;
+  e.held = totalUnits(e.units);
   _rdoHead = { tick: state.tick, pid: pid, data: e };
   return e;
 }
@@ -1292,7 +1301,7 @@ function _rdoHeaderUpdate(state, n) {
   // is the drift known-issues #9 is about.
   _rdoClass(n.barFill, 'hdrbar', 'is-full', fill >= _rdoFullAt());
 
-  var comp = _rdoComp({ infantry: e.inf, artillery: e.art, armour: e.arm });
+  var comp = _rdoComp(e.units);
   if (e.transit > 0) comp += (comp ? '  ·  ' : '') + _rdoNum(e.transit) + ' moving';
   if (e.atCap > 0) comp += (comp ? '  ·  ' : '') + e.atCap + ' full';
   _rdoSet(n.comp, 'hdrcomp', comp);

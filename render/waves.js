@@ -56,6 +56,15 @@
 
 'use strict';
 
+// Stack strength is summed by core/state.js's totalUnits() — see waveTotal()
+// below. That makes core/state.js a load-order dependency of this file, and
+// known-issue #22's rule applies: guard, but loudly. A quiet guard here would
+// mean every marker on the board reading a strength of nothing.
+if (typeof totalUnits !== 'function') {
+  console.error('[render/waves] no totalUnits at load — core/state.js must come ' +
+    'BEFORE render/waves.js in index.html. Every wave marker will throw.');
+}
+
 // wave id -> { g, trail, chip, num, last… }. Nodes are created when a wave
 // appears and removed when it lands; in between, only `transform` and the two
 // trail endpoints move. Rebuilding a marker every frame would be the same
@@ -205,9 +214,17 @@ function waveColor(ownerId) {
   return (p && p.color) ? p.color : '#c6d0dc';
 }
 
+// Strength of a stack in flight. Deferred to core/state.js rather than spelled
+// out, because this number is the marker's entire content — "strength legible
+// at a glance" is the rule this file exists to serve, and the per-property
+// `|| 0` guards that used to be here would render every stack on the map as a
+// confident "0" the moment the unit bundle changed shape. A NaN is ugly; a
+// plausible zero on a marching army is the failure nobody catches.
+//
+// `!units` stays: that is the missing-bundle question, not the wrong-shape one.
 function waveTotal(units) {
   if (!units) return 0;
-  return (units.infantry || 0) + (units.artillery || 0) + (units.armour || 0);
+  return totalUnits(units);
 }
 
 // Build one marker. Called once per wave, ever.

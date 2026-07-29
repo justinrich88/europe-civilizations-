@@ -167,6 +167,15 @@ for (const sid of Object.keys(SU).sort()) {
   if (!u) { note('garrison', sid + ' has no units block'); continue; }
   for (const t of ['infantry', 'artillery', 'armour'])
     if (typeof u[t] !== 'number' || u[t] < 0 || !isFinite(u[t])) note('garrison', sid + '.' + t + '=' + u[t]);
+  // Spelled out rather than routed through core/state.js's totalUnits(): this
+  // tool loads data/ ONLY (see FILES at the top), because a data reconciler
+  // that needs the sim to boot cannot be used on the day the sim is broken.
+  //
+  // Safe to leave inline only because the per-type loop directly above already
+  // rejects a bundle of the wrong shape and does it FIRST — without it this
+  // line would go quiet rather than loud when the shape changes, since
+  // `NaN > capacity` is false like every other comparison against NaN. If that
+  // loop is ever relaxed, this sum has to move.
   const tot = u.infantry + u.artillery + u.armour;
   if (tot > S[sid].capacity + 1e-9) note('garrison', sid + ' starts with ' + tot + ' but capacity is ' + S[sid].capacity);
 }

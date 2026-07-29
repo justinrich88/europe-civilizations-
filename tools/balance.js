@@ -107,9 +107,13 @@ const ADJ = (function buildAdj() {
   return m;
 })();
 
+// core/state.js is in SCRIPTS above and every file is evaluated into THIS
+// global context, so totalUnits() is as reachable here as it is in the browser.
+// Worth saying out loud because a `require` habit would suggest otherwise, and
+// the alternative — a local copy of the sum — is how the placeholder driver
+// would end up scoring the board by a different rule from the one the sim plays.
 function unitsAt(state, sid) {
-  const u = state.stations[sid].units;
-  return u.infantry + u.artillery + u.armour;
+  return totalUnits(state.stations[sid].units);
 }
 
 // One volley for one power. Deliberately shallow: find the cheapest hostile

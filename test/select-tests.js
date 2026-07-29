@@ -219,9 +219,13 @@ function _seltArm(fx) {
   _selArmOrder();
 }
 
+// Through core/state.js, not spelled out. These suites run INSIDE the iframe's
+// index.html, so totalUnits() is the same function the renderer under test is
+// using — which is the point: a helper that sums the bundle its own way can
+// agree with a broken renderer and pass. The `|| 0` guards this used to carry
+// would have made every assertion here read 0 against a rendered 0.
 function _seltUnits(fx, sid) {
-  var u = fx.game.stations[sid].units;
-  return (u.infantry || 0) + (u.artillery || 0) + (u.armour || 0);
+  return totalUnits(fx.game.stations[sid].units);
 }
 
 function _seltBanner() {

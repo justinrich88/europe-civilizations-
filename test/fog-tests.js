@@ -808,7 +808,7 @@ function _fogSuiteMemory(d) {
     observeTick(f.s);
     var rec = f.s.seen[pid][f.lost];
     assertEqual(rec.t, 200, 'the refreshed record should be stamped with the current tick');
-    assertClose(rec.u.infantry + rec.u.artillery + rec.u.armour,
+    assertClose(totalUnits(rec.u),
       totalUnits(f.s.stations[f.lost].units), 1e-9,
       'the refreshed record does not match the live garrison it just observed');
   });

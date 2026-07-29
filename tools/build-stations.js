@@ -950,8 +950,25 @@ for (const sid of order) {
   }
   for (const sid of Object.keys(SETUP)) {
     const u = SETUP[sid].units;
-    if (u.infantry + u.artillery + u.armour > STATIONS[sid].capacity)
+    const tot = u.infantry + u.artillery + u.armour;
+    // core/state.js's totalUnits() is the canonical way to add a bundle up and
+    // it is NOT reachable here: this script loads data/map.js into a sandbox
+    // and nothing else, deliberately — a generator that had to boot the sim to
+    // check its own output would be circular. So the sum stays spelled out, and
+    // the isFinite gate is what pays for that.
+    //
+    // It is not decoration. `NaN > capacity` is FALSE, like every comparison
+    // against NaN, so the moment the unit bundle changes shape this assertion
+    // stops firing rather than starting to — it would wave through a whole
+    // generated scenario of garrisons that add up to nothing. An unguarded sum
+    // is only loud where its result gets PRINTED; inside an `if`, it is silent.
+    if (!isFinite(tot)) {
+      problems.push(sid + ' garrison sums to ' + tot + ' — SETUP units are not the ' +
+        '{infantry, artillery, armour} shape this script emits, so the capacity ' +
+        'check below cannot run');
+    } else if (tot > STATIONS[sid].capacity) {
       problems.push(sid + ' starts over capacity');
+    }
   }
   if (problems.length) throw new Error('SETUP problems:\n  ' + problems.join('\n  '));
 }
