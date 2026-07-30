@@ -6,19 +6,58 @@ Virus Wars' interaction model, Risk's map, a Great War that went differently.
 
 ## Play
 
+Live, no install: **https://justinrich88.github.io/europe-civilizations-/**
+(GitHub Pages serves this repo directly — there is no build step, so the page is
+the repo.)
+
+Locally:
+
 ```
-python3 -m http.server 8761 --directory .
+python3 tools/serve.py            # port 8761, repo root; python3 is the only requirement
 ```
 
-Then open `http://127.0.0.1:8761/`. There is no build step — it's vanilla JS loaded by script tags.
+Then open `http://127.0.0.1:8761/`. It's vanilla JS loaded by script tags — no
+npm, no bundler, nothing to install.
+
+**Do not serve this with `python3 -m http.server`.** It sends `Last-Modified` and
+no `Cache-Control`, so a browser can hold a stale copy of a file that changed
+seconds ago — and `location.reload()` does not clear it. You then test the
+PREVIOUS build while every check reports a clean pass. It has already cost one
+full verification round here. `tools/serve.py` is the same thing with `no-store`
+on every response, and that is the only reason it exists
+(`docs/testing/known-issues.md` #16).
+
+Useful while testing:
+
+```
+http://127.0.0.1:8761/?player=ger      skip the empire picker, board live immediately
+```
+
+| | |
+|---|---|
+| **click your own city** | add / remove it from the selection — never commits |
+| **click an enemy city** | every selected city sends its share |
+| **right-click your own city** | march there |
+| **1 2 3 4** | send 25 / 50 / 75 / all — persistent, not a modifier |
+| **R** then click | set a supply line from the selection to that city |
+| **H** | clear the selection's supply lines |
+| **b** | build the next development tier in every selected city |
+| **space**, **2**, **4** | pause, and speed |
+| **?** | the guide |
+| **Esc** | back out one step; again to clear |
 
 ## Test
 
 ```
-node test/node.js          # headless: data integrity + balance
+node test/node.js          # headless: 329 tests, 33 suites. Needs no browser.
 ```
 
-Or open `tests.html` in the browser for the same suites plus a data summary.
+`tests.html` runs the same suites in a browser. **`tests-ui.html` is the one that
+matters for anything under `render/`** — it loads `index.html` itself in an
+800×900 iframe and injects the test files, so it tests the shipped page rather
+than a copy of its script list. 44 tests there that the headless harness cannot
+run. On that page a SKIP is a failure, and so is a suite reporting fewer tests
+than it has.
 
 ## Layout
 
