@@ -342,6 +342,72 @@ land before it, and it must run once.
 
 ---
 
+## 9b. WHAT SHIPPED — first prototype, 2026-07
+
+`sim/development.js`, a `build` command, the `b` key, a rail section and pips on
+the board. **Out of order on purpose**, and the reason is worth recording: §9 says
+collapse the unit types first, and that is still right — but a prototype that can
+be *played* answers "is this fun" in a way the sequencing argument cannot, and the
+spend is written through `splitUnits()` so the collapse costs it nothing.
+
+Built, and tested in `test/development-tests.js` (25 tests):
+
+- the whole loop — spend, tier, operating tier tracking garrison, capital-only
+  tier 3, one development per station that can never be changed
+- **capture deletes the build, a raid only degrades the tier.** The asymmetry §6
+  asks for, and it needed no damage model
+- the two arithmetic claims §3 rests on, checked rather than asserted: tier 1 from
+  a full station lands exactly on `cap/2`, and tier 3 **cannot** be paid at
+  capacity — only out of the overflow band, which leaves it operating at tier 2
+  until regarrisoned
+- **fortification has a real effect**, through `fortLevel(sid, state)` so it goes
+  through the existing scale-in and artillery-strip path. An unmanned fortification
+  adds nothing, and artillery still answers a built fort. Both tested.
+
+**Port and factory are buildable and INERT.** Tracked, tiered, capture-deleted —
+and they do nothing, because nothing implements them. `DEV_LIVE` in
+`sim/development.js` is the single source of truth for that, and the rail prints
+"no effect yet" / "(inert)" from it, so no screen claims an effect the sim does not
+have. The *choice* is what is worth playtesting now; the effects can follow.
+
+### §8's map question, measured rather than argued
+
+§8 said "decide this by measuring, not by opinion. Render both at 800px with a
+full board and look." Done, with pips:
+
+| | |
+|---|---|
+| pip diameter at 800px | **1.8 CSS px** |
+| type glyph | **2 × 3 px** |
+| encoding | one slot per BUILT tier, filled to OPERATING |
+| does it eat clicks | **no** — checked with `elementFromPoint`, and the mutation without `pointer-events: none` puts the pip on top, i.e. it would |
+
+**The encoding works and the size is the problem — exactly as §8 predicted.**
+Magnified 4× from the same 800px render, Berlin reads ●●● (3/3), Silesia ●○ (1/2,
+under-garrisoned) and Hamburg ○ (0/1) instantly. At true 800px they are a faint
+smudge under the node: you can tell something is there, not how many or whether
+filled. The glyph is worse and is close to invisible.
+
+So the fallback §8 names — **tier on the node outline** (weight or a doubled
+stroke, three steps), with the built-vs-operating gap moving into the readout — is
+now a live option rather than a hypothetical, and it is the player-facing owner's
+call. One mitigation found by accident: **fog cuts the density hard.** On a
+mid-game board with 42 developments, Germany could see 3 of them, because the pips
+are gated at belief level 2. The 108-stations-of-mush case does not arise.
+
+### Still open from this section's own list
+
+- **§10.1 effect magnitudes.** `FORT_POWER_PER_TIER` is 0.5, derived against
+  `DEFENSE_BONUS_POWER` (6.0) rather than picked — a tier-2 fort adds one full
+  point of fort level, a tier-3 capital 1.5, half a citadel. Untuned.
+- **§10.3 does the AI build? NO, AND THIS MATTERS MORE THAN IT LOOKS.** `aiTick`
+  is untouched, so development is currently a player-only mechanic. The visible
+  consequence: the balance hashes did not move at all, because nothing in a
+  headless run ever builds. Milestone 6 would measure a game the player is not
+  playing.
+
+---
+
 ## 10. Open
 
 1. **Effect magnitudes.** Every number in §5 is a shape, not a value. These are

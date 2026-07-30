@@ -7,7 +7,8 @@
 // applyCommand(). That is what makes headless testing, replay and Monte Carlo
 // batches free: a game is a seed plus an ordered list of commands.
 //
-// The only command today is the many-to-one volley from 00-vision.md §8:
+// Three commands: the many-to-one volley from 00-vision.md §8, the standing
+// supply order, and `build` (04-development.md). The volley first:
 //
 //     { type:'send', owner, sources:[stationId,…], target:stationId, fraction,
 //       types?:['infantry',…] }
@@ -298,6 +299,7 @@ function applyCommand(state, cmd) {
 
   if (!state || !cmd || typeof cmd !== 'object') return _cmdFail(result, 'no-command');
   if (cmd.type === 'order') return _cmdApplyOrder(state, cmd, result);
+  if (cmd.type === 'build') return _cmdApplyBuild(state, cmd, result);
   if (cmd.type !== 'send') return _cmdFail(result, 'unknown-type');
   if (state.winner) return _cmdFail(result, 'game-over');
 
@@ -564,6 +566,102 @@ function _cmdApplyOrder(state, cmd, result) {
       target: target,
       added: target !== null && adding,
       changed: (st.supplyTo || next).length !== before,
+    });
+  }
+
+  if (!result.accepted.length) {
+    result.reason = result.rejected.length ? 'all-stations-rejected' : 'no-stations';
+    return result;
+  }
+  result.ok = true;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// { type:'build', owner, stations:[stationId,…], kind? }   — 04-development.md
+//
+// Spend units standing in a station to buy the next development tier there.
+// `kind` is OPTIONAL: omitted, a station with exactly one legal option builds it
+// (57 of 108 stations), and a station with more than one is rejected
+// 'choose-kind' so the UI can ask rather than guess.
+//
+// `stations`, not `sources`, matching the 'order' shape — a build is a thing you
+// do TO cities, not a thing you send FROM them.
+//
+// THE FIRST VERB IN THIS GAME THAT IS NOT SELECT-AND-TARGET, and 00-vision.md §8's
+// cut list names build queues explicitly. The cost is accepted with eyes open and
+// bounded: one key, one rail section, no queue, no menu tree, nothing to cancel. A
+// spend cannot exist without a spend gesture, and this is the smallest one there
+// is.
+//
+// PER-STATION, LIKE 'order' AND UNLIKE 'send'. Marqueeing a front and pressing `b`
+// should build in the cities that can afford it, not refuse the whole group
+// because one of them is short. Every rejection names its own station.
+//
+// The decision itself is developmentPlan() in sim/development.js and is NOT
+// duplicated here: the rail offers builds from the same function that accepts
+// them, or it will eventually offer one this refuses.
+function _cmdApplyBuild(state, cmd, result) {
+  if (state.winner) return _cmdFail(result, 'game-over');
+  if (typeof developmentPlan !== 'function') return _cmdFail(result, 'no-development-module');
+
+  var owner = cmd.owner;
+  if (!owner || !state.powers[owner]) return _cmdFail(result, 'unknown-owner');
+  if (owner === 'neutral') return _cmdFail(result, 'neutral-cannot-act');
+  if (state.powers[owner].alive === false) return _cmdFail(result, 'power-eliminated');
+  if (!Array.isArray(cmd.stations) || cmd.stations.length === 0) {
+    return _cmdFail(result, 'no-stations');
+  }
+  if (cmd.kind && DEV_KINDS.indexOf(cmd.kind) < 0) return _cmdFail(result, 'unknown-kind');
+
+  // Deduped and sorted, for the same reason a volley's sources are: the same
+  // station listed twice must not be charged twice, and the outcome must not
+  // depend on the caller's array order.
+  var seen = {}, ids = [];
+  for (var i = 0; i < cmd.stations.length; i++) {
+    var sid = cmd.stations[i];
+    if (typeof sid !== 'string' || seen[sid]) continue;
+    seen[sid] = true;
+    ids.push(sid);
+  }
+  ids.sort();
+
+  for (var k = 0; k < ids.length; k++) {
+    var id = ids[k];
+    var plan = developmentPlan(state, id, owner, cmd.kind);
+    if (!plan.ok) { _cmdReject(result, id, plan.reason); continue; }
+
+    var st = state.stations[id];
+    // Spend PROPORTIONALLY across the bundle, through core/state.js's existing
+    // splitUnits() rather than three multiplications written out here — a fourth
+    // implementation of "scale a bundle" is the defect logged five times
+    // (known-issues #9), and this one would be the one that goes stale when the
+    // three unit types collapse to one (04-development.md §9).
+    //
+    // Proportional rather than draining one type also means a build cannot be
+    // used to launder a stack's composition.
+    var held = totalUnits(st.units);
+    var f = (held > 0) ? ((held - plan.cost) / held) : 0;
+    if (f < 0) f = 0;
+    st.units = splitUnits(st.units, f);
+
+    if (!st.development) st.development = { kind: plan.kind, tier: 0 };
+    st.development.tier = plan.tier;
+
+    logEvent(state, 'build', POWERS[owner].name + ' built ' + DEV_NAMES[plan.kind] +
+      ' ' + plan.tier + ' at ' + STATIONS[id].name, id);
+
+    result.accepted.push({
+      station: id,
+      kind: plan.kind,
+      tier: plan.tier,
+      cost: plan.cost,
+      // The operating tier AFTER the spend, and it is usually LOWER than the tier
+      // just paid for — that is the intended sequencing, not a bug. Paying tier 3
+      // out of the overflow band leaves the station at half capacity, so the
+      // thing you just built runs at tier 2 until you regrow it. Reported here so
+      // a UI can say so instead of the player discovering it.
+      operating: operatingTier(state, id),
     });
   }
 

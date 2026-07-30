@@ -178,6 +178,12 @@ Distinct from the static data above. This is the only thing that mutates.
 }
 ```
 
+**`station.development`** is **absent** until something is built there, and absent again the moment the station changes hands — `setStationOwner` deletes it, so "never developed" and "developed then captured" are the same state and nothing has to tell them apart. When present it is `{ kind: 'fort'|'port'|'factory', tier: 1..3 }`.
+
+Everything else about development is **derived, never stored** — `sim/development.js` exports it and nothing recomputes it: `developmentOptions(sid)`, `developmentMaxTier(sid, kind)`, `developmentCost(sid, tier)`, `builtTier(state, sid)`, `developmentKind(state, sid)`, `operatingTier(state, sid)`, `operatingShortBy(state, sid)`, `developmentFortLevel(state, sid)`, and `developmentPlan(state, sid, owner, kind)` — which is the one function that decides whether a build is legal, used by `applyCommand` to accept it and by the rail to offer it.
+
+`fortLevel(sid, state)` takes an **optional** state. One argument is "what the map says this station is worth"; two is "what it is worth on this board now", including a built and garrisoned fortification. Anything deciding a real fight must pass state.
+
 `station.supplyTo` is a **sorted array of destination station ids**, defaulting
 to `[]` — see "Standing orders" below. Empty is the off switch; there is no
 `'hold'` sentinel and no station "type" of order. It lives here rather than in

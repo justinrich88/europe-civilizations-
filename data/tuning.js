@@ -1033,4 +1033,83 @@ const BAL = {
     TARGET_GAME_SECONDS: 900,
     GAME_SECONDS_TOLERANCE: 300,
   },
+
+  // -------------------------------------------------------------------------
+  // 12. Development — 04-development.md
+  //
+  // "A use for units that only pays if they are standing still." Two halves of
+  // one rule: SPEND units once to build a tier, and the tier only OPERATES
+  // while a garrison stands in the station. Build is the sink, garrison is the
+  // rent.
+  //
+  // EVERY NUMBER HERE IS A SHAPE, NOT A VALUE (04-development.md §10.1). The
+  // cost curve is argued from the growth curve and is meant to survive
+  // balancing; FORT_POWER_PER_TIER is a first guess derived below and is the
+  // one to move.
+  // -------------------------------------------------------------------------
+  DEV: {
+    // Build cost as a FRACTION OF THE STATION'S OWN CAPACITY, never flat.
+    // Capacity runs 13 to 74 on the live map, a 5.7x spread, so a flat cost
+    // would make development routine for industrial powers and impossible
+    // everywhere else — which sharpens exactly the rich-get-richer problem
+    // 04-development.md §7 is worried about.
+    //
+    // The curve is chosen for three properties, in order of importance:
+    //   1. tier 1 paid from a FULL station lands you at cap/2, which is peak
+    //      growth. The first investment has to be genuinely affordable or
+    //      development is a late-game luxury.
+    //   2. tier 3 costs a whole capacity, so it CANNOT be paid without first
+    //      pushing into the overflow band (units above 1.0x cap). That gives
+    //      the 5.6b overflow mechanic a purpose it currently lacks.
+    //   3. 2.25x capacity all in. A tier-3 fortress should be rare.
+    COST_FRACTION: [0.50, 0.75, 1.00],
+
+    // Operating tier = floor(garrison / (this * capacity)), capped at the tier
+    // actually built. A quarter of capacity per tier: 75% garrisoned operates
+    // at 3, 50% at 2, 25% at 1, below that nothing.
+    //
+    // Legible straight off the number already printed on the node, which
+    // matters because 00-vision.md §8 says the number IS the interface.
+    OPERATE_FRACTION: 0.25,
+
+    // A build may never take a station below this. A station at zero is
+    // capturable by anyone who walks past, and a build command must not be a
+    // way to lose a city by accident.
+    MIN_REMAINING: 1.0,
+
+    // Highest tier buildable, by kind. Fortification is capped at 2 EVERYWHERE
+    // EXCEPT CAPITALS (below), because it is available at all 108 stations
+    // while its counter — the factory — is available at 16. Defensive
+    // development seven times more available than the thing that answers it is
+    // how a board freezes (04-development.md §7).
+    MAX_TIER: { fort: 2, port: 3, factory: 3 },
+
+    // Capitals alone may fortify to tier 3. Seven stations on a 108-station
+    // board, and capital-ness is a STATIC property of the station rather than
+    // of whoever holds it — a captured Berlin is still eligible, and
+    // eligibility never moves during a game. A rule that shifted as capitals
+    // fell would make the ceiling a moving target the player cannot plan
+    // against.
+    //
+    // WATCH THIS ONE. 00-vision.md §7 makes capitulation the mercy rule, and
+    // tier-3 capital defence puts a wall in front of its trigger. If Milestone
+    // 6 shows the endgame dragging, FORT_POWER_PER_TIER at capitals is the
+    // first constant to cut.
+    CAPITAL_FORT_MAX_TIER: 3,
+
+    // Fortification's effect: additive defence power per OPERATING tier, on
+    // top of the station's own fortLevel. ADDITIVE, never multiplicative —
+    // 00-vision.md §5 is explicit that a multiplicative fortress is
+    // mathematically untakeable and freezes the map.
+    //
+    // Derived rather than picked: it is expressed in the same units as
+    // DEFENSE_BONUS_POWER (6.0 per point of fortLevel, which the comment there
+    // measures as ~12 infantry for a 3.5-defense citadel). 0.5 per tier means
+    // a tier-2 fort adds one full point of fortLevel — the difference between
+    // a plain holding city and a light fortress — and a tier-3 capital adds
+    // 1.5, which is half a citadel. It goes through the SAME artillery-strip
+    // and scale-in path as the existing bonus, so an unmanned development is
+    // not a ghost army.
+    FORT_POWER_PER_TIER: 0.5,
+  },
 };

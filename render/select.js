@@ -1409,8 +1409,56 @@ function selOnKeyDown(evt) {
       // before it happens.
       if (verb === 'supply') _selArmOrder();
       else { _selDisarm(); _selApplyOrder(null); }
+      return;
+    }
+
+    // `b` — build the next development tier in every selected city that can
+    // afford it (04-development.md §8).
+    //
+    // NO ARMING, and that is the whole reason it is one key. A build has no
+    // destination: it happens in the city, so there is nothing for a following
+    // click to name. R arms because it needs a target; `b` does not.
+    //
+    // It fires immediately and there is nothing to cancel — which is a real
+    // decision, not an omission. §8's cut list names build queues explicitly, and
+    // the smallest possible spend gesture is one key with no confirm. The safety
+    // net is that a build cannot take a city below BAL.DEV.MIN_REMAINING, so the
+    // worst a stray `b` can do is spend units, never lose a city.
+    //
+    // WITH NOTHING SELECTED IT DOES NOTHING, same rule as H, and for the stronger
+    // version of the same reason: "spend half of every city I own" is not a thing
+    // that should be one keystroke from a board where `b` is pressed often.
+    if (evt.key === 'b' || evt.key === 'B') {
+      evt.preventDefault();
+      _selBuild();
     }
   }
+}
+
+// Build the next tier in every selected city. Goes through queueCommand, not
+// applyCommand — `build` is the first verb in this game that is scheduled by
+// construction (07-roadmap.md A3), and it can be because unlike a volley there is
+// no immediate confirmation to draw: the tier appears on the node and in the rail
+// on the next tick, which is the same tick the player sees anyway.
+//
+// The selection SURVIVES. A build is something you do repeatedly to the same
+// group as it regrows — clearing it would make every second tier a reselection.
+function _selBuild() {
+  const g = selGame();
+  const me = selPlayer();
+  const mine = selectedSources().filter(selIsMine);
+  if (!g || !me || !mine.length) return null;
+  if (typeof queueCommand !== 'function') {
+    console.warn('[render/select] queueCommand is not loaded — build dropped');
+    return null;
+  }
+  // No `kind`. A city with one legal option builds it; a city with several is
+  // rejected 'choose-kind' and the rail's build section is where that choice
+  // lives. Deciding here would be a second implementation of a rule
+  // sim/development.js already owns.
+  const res = queueCommand(g, { type: 'build', owner: me, stations: mine });
+  if (!res.ok) console.warn('[render/select] build not queued:', res.reason);
+  return res;
 }
 
 // ── standing orders (01-data-schema.md, "Standing orders") ──────────────
@@ -1907,6 +1955,10 @@ window.clearSelection = clearSelection;
 // modifier override. Exported so the payload label, the preview and any check
 // read one function rather than three copies of the same precedence rule.
 window.selEffectiveFraction = selEffectiveFraction;
+// The build verb, exported so the rail's build section fires the SAME code path
+// the `b` key does rather than composing its own command — a second command
+// builder is how the button and the key end up disagreeing (known-issues #9).
+window.selBuild = _selBuild;
 
 // Self-bootstrap, matching render/map.js: the board is drivable before
 // app/main.js exists. Once the app layer lands it sets APP_OWNS_RENDER and

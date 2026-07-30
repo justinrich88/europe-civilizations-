@@ -250,6 +250,10 @@ function runAllTests() {
   // a failure there explains failures everywhere.
   if (typeof suiteQueue === 'function') suiteQueue();
 
+  // Development — test/development-tests.js. After the queue suite, because
+  // `build` is scheduled through it and one of these tests says so.
+  if (typeof suiteDevelopment === 'function') suiteDevelopment();
+
   suiteTuning(d);
   suiteCombatModel(d);
   suiteVerts(d);

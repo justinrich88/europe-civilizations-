@@ -170,6 +170,11 @@
 <script src="core/vision.js"></script>
 
 <script src="sim/commands.js"></script>
+<!-- Development. BEFORE sim/combat.js, which asks it for the fortification a
+     station has built and is garrisoning, and before sim/growth.js only for
+     tidiness — it has no dependency either way. It needs core/state.js above it
+     for totalUnits and checks for it loudly at load. -->
+<script src="sim/development.js"></script>
 <script src="sim/growth.js"></script>
 <script src="sim/movement.js"></script>
 <script src="sim/combat.js"></script>

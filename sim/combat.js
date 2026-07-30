@@ -58,12 +58,30 @@ function stationAttackers(state, sid) {
   return out;
 }
 
-// Station defense above the 1.0 baseline, plus terrain. Feeds the ADDITIVE
-// power block, never a multiplier -- multiplicative defense makes a full
-// fortress mathematically untakeable and the map freezes (§5).
-function fortLevel(sid) {
+// Station defense above the 1.0 baseline, plus terrain, plus whatever
+// fortification the owner has BUILT AND IS GARRISONING. Feeds the ADDITIVE power
+// block, never a multiplier -- multiplicative defense makes a full fortress
+// mathematically untakeable and the map freezes (§5).
+//
+// `state` IS OPTIONAL, and that is not defensive habit. fortLevel(sid) has
+// callers that hold no state -- test fixtures, and the static-data checks in
+// test/runner.js -- and silently changing what the one-argument form returns is
+// how a shared helper poisons a caller that never asked for the new behaviour
+// (the same reasoning as commandRoute's optional state/pid). One argument is
+// still "what the MAP says this station is worth"; two is "what it is worth on
+// this board, right now".
+//
+// Everything that decides a real fight must pass state, and _fortBonus below
+// does. A development contributes through THIS function rather than beside it, so
+// it goes through the existing scale-in and artillery-strip path -- an unmanned
+// development is not a ghost army, and artillery answers a built fort exactly as
+// it answers a stone one.
+function fortLevel(sid, state) {
   var d = STATIONS[sid];
   var lvl = (d.defense - 1) + terrainOf(sid).defense;
+  if (state && typeof developmentFortLevel === 'function') {
+    lvl += developmentFortLevel(state, sid);
+  }
   return lvl > 0 ? lvl : 0;
 }
 
@@ -173,7 +191,9 @@ function _allAttackerUnits(state, sid) {
 function stationPower(state, sid, side) {
   var st = state.stations[sid];
   if (!st) return 0;
-  var fort = fortLevel(sid);
+  // WITH state: this is the number a real fight is decided by, so a built and
+  // garrisoned fortification counts here.
+  var fort = fortLevel(sid, state);
   var atkUnits = _allAttackerUnits(state, sid);
   var defUnits = st.units;
 

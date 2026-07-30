@@ -2075,6 +2075,84 @@ function drawLinks(D, layer) {
   return drawn;
 }
 
+// NOTE ON PLACEMENT: this block is TOP LEVEL and has to be. The first draft
+// put it inside renderLive's body, where `var MAP_DEV_GAP` is function-scoped —
+// so drawStations() threw ReferenceError on the first frame, app/main.js caught
+// it, logged 'renderBoard() threw during boot; continuing', and the game came up
+// with an EMPTY BOARD. Found by loading the real page; nothing in test/node.js
+// loads this file, so no headless run could have caught it.
+// ── development pips (04-development.md §8) ──────────────────────────────
+//
+// SHOW THE GAP, NOT THE FACT. "This station is developed" is the boring half.
+// The half worth pixels is that BUILT and OPERATING tier can differ — a tier-3
+// fortress held by a skeleton garrison fights as tier 1, and spotting that
+// across the board is the whole skill the mechanic creates. So there is one slot
+// per BUILT tier, filled to the OPERATING tier, and the EMPTY slots are the
+// point: three slots with one filled reads as "you built a fortress and you are
+// not garrisoning it".
+//
+// A badge saying only "fortified" would be decoration. This is information.
+//
+// pointer-events: none in the stylesheet, like every other layer over the board.
+// An overlay that accepts pointer events swallows the click that commits an
+// attack, with no error and no console output — five occurrences (known-issue #5,
+// and the warning in index.html).
+//
+// Type is a GLYPH, not a colour: colour is spent on ownership and cannot be
+// borrowed. One letter, because at the size these render a shape is a smudge and
+// a letter is at least a letter. F / P / K — K rather than F for factory, which
+// would collide with fortification.
+//
+// LEGIBILITY AT 800px IS THE REAL RISK AND §8 SAYS SO. The garrison number
+// renders around 8.8px at the window this game is played at, so a pip is 2-3px
+// and may collapse into mush across 108 stations. The fallback the design names
+// is moving tier onto the node outline instead, which costs no extra pixels —
+// and that decision is to be made against a screenshot, not an opinion.
+var MAP_DEV_GAP = 4.5;              // below the fullness ring
+var MAP_DEV_PIP_R = 1.5;
+var MAP_DEV_PIP_STEP = 4.2;
+var MAP_DEV_GLYPH = { fort: 'F', port: 'P', factory: 'K' };
+
+function _mapDevDraw(rec, kind, built, operating) {
+  // One group, created on this station's first build and reused after.
+  if (!rec.devG) {
+    rec.devG = el('g', 'station-dev');
+    rec.devPips = [];
+    rec.devG.appendChild(el('text', 'station-dev-glyph', {
+      x: 0, y: rec.devY + 1.2, 'text-anchor': 'middle', 'font-size': '4.4', text: '',
+    }));
+    rec.g.appendChild(rec.devG);
+  }
+  var glyph = rec.devG.firstChild;
+  glyph.textContent = MAP_DEV_GLYPH[kind] || '?';
+
+  // Pips: one per BUILT tier. Created up to the number needed and never
+  // destroyed — a tier can only be lost with the station, and the station's whole
+  // node is rebuilt then.
+  var need = built;
+  while (rec.devPips.length < need) {
+    var i = rec.devPips.length;
+    var pip = el('circle', 'station-dev-pip', {
+      cx: 0, cy: rec.devY + 5.4, r: MAP_DEV_PIP_R,
+    });
+    rec.devPips.push(pip);
+    rec.devG.appendChild(pip);
+  }
+  // Centred as a row, so a one-pip station and a three-pip station both sit under
+  // the node rather than growing to one side.
+  var span = (need - 1) * MAP_DEV_PIP_STEP;
+  for (var j = 0; j < rec.devPips.length; j++) {
+    var on = j < need;
+    rec.devPips[j].style.display = on ? '' : 'none';
+    if (!on) continue;
+    rec.devPips[j].setAttribute('cx', (-span / 2 + j * MAP_DEV_PIP_STEP).toFixed(2));
+    // FILLED to the operating tier; the rest are outlines. The outlines are the
+    // information.
+    rec.devPips[j].classList.toggle('is-on', j < operating);
+  }
+}
+
+
 function drawStations(D, layer, state) {
   const ids = Object.keys(D.STATIONS).sort();
   // One table, shared with the link geometry above. It used to be a capMin /
@@ -2194,6 +2272,16 @@ function drawStations(D, layer, state) {
       // ordState are, it is dropped with them by resetLiveIndex() whenever the
       // board is rebuilt, and it cannot be read by anything below render/.
       ordSeen: Object.create(null),
+      // DEVELOPMENT PIPS: geometry now, DOM on this station's first build.
+      // `devKey` is the pair as last DRAWN, so an undeveloped board — which is
+      // every board until somebody presses `b` — never enters the build branch
+      // and pays one string compare per station per frame. Same shape as ordKey
+      // above and for the same reason.
+      devY: outer + RING_GAP + MAP_DEV_GAP,
+      devR: r,
+      devKey: '',
+      devG: null,
+      devPips: null,
       // battle readout: geometry now, DOM on this station's first fight
       ring: battleRing,
       momR: momR,
@@ -2698,6 +2786,30 @@ function liveStations(D, state) {
       LIVE.writes++;
     }
 
+    // Development pips. LIVE, not believed, and gated on level 2 for the same
+    // reason the battle readout is: the operating tier is a live read of the
+    // garrison standing there right now, and `state.seen` records no development
+    // at all. A remembered build beside a live tier would be one number answering
+    // two different questions (known-issue #18). On a fogged node there is
+    // nothing to draw and the key resets, so re-entering vision redraws rather
+    // than trusting a stale group.
+    const devVisible = level === 2 && typeof developmentKind === 'function';
+    const devKind = devVisible ? developmentKind(state, sid) : null;
+    const devKey = devKind
+      ? (devKind + builtTier(state, sid) + ':' + operatingTier(state, sid))
+      : '';
+    if (devKey !== rec.devKey) {
+      rec.devKey = devKey;
+      if (devKind) {
+        _mapDevDraw(rec, devKind, builtTier(state, sid), operatingTier(state, sid));
+        rec.devG.style.display = '';
+      } else if (rec.devG) {
+        rec.devG.style.display = 'none';
+      }
+      LIVE.writes++;
+    }
+
+    
     // A BATTLE YOU CANNOT SEE IS INVISIBLE. Gated on level 2 at the station,
     // not on the fight itself: the momentum ring, the attacker's count and the
     // combat alert are all live reads of `state.stations[sid].attackers` and

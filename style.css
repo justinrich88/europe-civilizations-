@@ -3392,3 +3392,45 @@ kbd.help-key {
 }
 .help-btn:hover { color: var(--accent); border-color: var(--accent); }
 /* help:end */
+
+/* ── development pips (04-development.md §8, render/map.js) ───────────────
+   One slot per BUILT tier, filled to the OPERATING tier. The EMPTY slots are
+   the information: three outlines with one filled reads as "you built a
+   fortress and you are not garrisoning it", which is the whole skill the
+   mechanic creates.
+
+   pointer-events: none on the group, and it is not optional. Anything painted
+   over the board that accepts pointer events swallows the click that commits an
+   attack, with no error and no console output — five occurrences in this project
+   (known-issues #5). These sit inside the station <g>, which select.js
+   hit-tests, so without this a pip under a node would eat presses aimed at it.
+
+   Colour is NOT used to carry type — it is spent on ownership and cannot be
+   borrowed (§8). Type is the single-letter glyph; these are neutral ink. */
+.station-dev { pointer-events: none; }
+
+.station-dev-glyph {
+  fill: #8b949e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  letter-spacing: 0;
+  /* An SVG presentation attribute on the element loses to any rule here
+     (known-issues #15), so font-size is deliberately NOT set in this block —
+     render/map.js writes it per node and this rule must not beat it. */
+}
+
+.station-dev-pip {
+  fill: none;
+  stroke: #8b949e;
+  stroke-width: 0.7;
+}
+
+/* Filled = this tier is actually running. */
+.station-dev-pip.is-on {
+  fill: #d7dee8;
+  stroke: #d7dee8;
+}
+
+/* A remembered node's development is not drawn at all (render/map.js gates on
+   belief level 2), so there is no is-seen variant here on purpose: a stale pip
+   row would be a remembered build beside a live tier. */

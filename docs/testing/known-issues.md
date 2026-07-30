@@ -719,3 +719,65 @@ rewritten:
 is a top-level `function` declaration, so it is already a property of `window`
 (#3's other half). The explicit export line is documentation, not mechanism —
 the mutation that actually removes the function is renaming it.
+
+---
+
+## 24. `var` inside a function body is not a global either — and the board comes up EMPTY, not broken
+
+#3 is about top-level `const` not landing on `window`. This is the other half, and
+it fails more quietly.
+
+A block of shared constants and one helper were inserted into `render/map.js` at
+what looked like the right place — next to the code that consumes them. It was
+*inside `renderLive`'s body*. `var MAP_DEV_GAP = 4.5` there is function-scoped, so
+`drawStations()` threw `ReferenceError: MAP_DEV_GAP is not defined` on the first
+frame.
+
+**What the player saw was not an error.** `app/main.js` wraps the boot render:
+
+```
+[app/main] renderBoard() threw during boot; continuing: ReferenceError: …
+```
+
+— it caught it, logged one line to the console, and the game came up with a live
+`GAME`, a live `PLAYER`, a rail, a ticker, and **an empty map**. 108 stations, zero
+station nodes.
+
+Three things to take from it:
+
+1. **A `var` is only a global at the TOP LEVEL of the file.** Same trap as #3 with
+   the opposite symptom: #3's guard reads "missing", this one throws.
+2. **`node test/node.js` cannot catch it.** The headless harness loads no
+   `render/` file except `help.js` and `standings.js`. The full suite was green —
+   329 tests — on a build whose board did not draw.
+3. **The catch-and-continue in `app/main.js` is right and it is also the reason
+   this is dangerous.** A boot that half-works is better for a player than a white
+   page, and it means the only signal is one console line nobody is reading.
+   Loading the real page and counting `document.querySelectorAll('[data-station]')`
+   is the check; it takes one line and it is the only thing that found this.
+
+## 25. `_rdoSet(rec, …)` — passing a row RECORD instead of its value element sets a property on a plain object and silently does nothing
+
+`render/readout.js`'s row helpers return a record, `{ row, k, v }`. The write
+helper takes the **value element**:
+
+```js
+_rdoSet(n.have.v, 'bldhave', '…')     // right
+_rdoSet(n.have,   'bldhave', '…')     // wrong, and SILENT
+```
+
+The wrong form assigns `textContent` on an ordinary JavaScript object. That is
+perfectly legal, throws nothing, logs nothing, and the property is never read
+again. A new rail section written this way rendered **five labels with no values**
+— `built | running | to next | b builds | could build` — and looked like a CSS
+problem.
+
+Same shape for visibility: `rec.row.hidden = false` loses to any stylesheet
+`display` rule (#15). `_rdoShow(rec, key, on)` is the file's own lever and takes
+the record, not the element — so the two helpers want *different* arguments, which
+is exactly why this is easy to get wrong.
+
+**Found by reading the section's `innerText` out of a real browser.** Nothing in
+`test/node.js` loads `render/readout.js`, so no headless run could have caught it,
+and the section is only built for a station the player owns and is hovering —
+which no existing test does.

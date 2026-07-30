@@ -38,8 +38,9 @@ constants `Math.PI` / `Math.LN2` / `Math.SQRT2` ARE exact and are fine.
 **All input — player and AI — goes through `applyCommand(state, cmd)`.** Nothing
 else may build a wave or mutate a station's owner. Command shapes are
 `{type:'send', owner, sources:[…], target, fraction, standing?}` and
-`{type:'order', owner, stations:[…], target}` — note `stations`, not `sources`,
-and `owner` is required on both.
+`{type:'order', owner, stations:[…], target}` and
+`{type:'build', owner, stations:[…], kind?}` — note `stations`, not `sources`, on
+the last two, and `owner` is required on all three.
 
 **New commands are SCHEDULED, not applied.** `queueCommand(state, cmd, atTick)`
 puts a command in `state.queued`; `commandsTick` — **phase 1**, ahead of growth —
@@ -55,9 +56,10 @@ immediate; see `07-roadmap.md` A3 for why and what it costs.
 ## Running things
 
 ```
-node test/node.js                  the sim suite — 304 tests, 32 suites, headless
+node test/node.js                  the sim suite — 329 tests, 33 suites, headless
 node test/exact-tests.js           the deterministic-maths suite standalone
 node test/queue-tests.js           scheduled commands standalone
+node test/development-tests.js     development standalone
 node test/scenarios-orderswhy.js   one suite standalone (a few do this)
 node tools/balance.js 200          Monte Carlo sweep
 node tools/verify-stations.js      map/station/link reconciliation
@@ -125,7 +127,7 @@ such measurement beside it is an unexplained regression.
 
 ## Known issues — read `docs/testing/known-issues.md` before debugging
 
-23 numbered entries, five of which recurred after being written down. The ones
+25 numbered entries, five of which recurred after being written down. The ones
 that cost the most time:
 
 | # | The trap |
@@ -140,6 +142,8 @@ that cost the most time:
 | 18 | A readout can answer a different question from the one on screen and never look wrong |
 | 22 | A load-time `railAddSection()` call is a load-order dependency; guard it, but make the else branch loud |
 | 23 | `tests-ui.html` result depended on browser localStorage — the guide covered the board on a fresh profile and eleven select tests silently never ran |
+| 24 | `var` inside a function body is not a global — `renderBoard()` threw, `app/main.js` caught it, and the board came up EMPTY with 329 tests green |
+| 25 | `_rdoSet(rec, …)` instead of `_rdoSet(rec.v, …)` writes to a plain object and does nothing, with no error |
 
 **macOS only:** files under `~/Downloads` pick up a `com.apple.macl` ACL the
 preview server cannot read, giving silent 404s that look exactly like code bugs

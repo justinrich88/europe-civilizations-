@@ -212,12 +212,23 @@ after it**. Development replaces what the infantry/artillery/armour triangle
 was for, and does it better — the triangle was never visible, because the
 number on a node never said what a stack was made of.
 
-### C2. Development
+### C2. Development — FIRST PROTOTYPE SHIPPED 2026-07, out of order, on request
 
 `04-development.md`, including the `b` key, the rail section, and the on-map
-mark. **Not started** — there is no `station.development`, no build command, no
-UI. Its interaction with B1 is the point: fortification taxes armies that go
-*past* a city, which is what stops defensive investment freezing the board.
+mark. ~~**Not started** — there is no `station.development`, no build command, no
+UI.~~ All three exist. See `04-development.md` §9b for what is in it, what is
+inert, and the 800px measurement of the pips.
+
+**It landed before C1 and before B1, deliberately.** C1 first is still the right
+sequencing and the spend is written through `splitUnits()` so the collapse costs it
+nothing. B1 is the more interesting omission: its interaction with development is
+the point — fortification taxes armies that go *past* a city, which is what stops
+defensive investment freezing the board — and **that half does not exist yet**, so
+what is playable now is the investment without its release valve. Read any
+stalemate seen in playtesting with that in mind.
+
+**The AI does not build** (`04-development.md` §10.3), so development is a
+player-only mechanic today and the balance hashes did not move at all.
 
 ### C3. Route state and the standings panel
 

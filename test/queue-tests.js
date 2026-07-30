@@ -394,7 +394,7 @@ if (typeof require === 'function' && typeof module !== 'undefined' && require.ma
     var SCRIPTS = [
       'core/rng.js', 'core/exact.js', 'core/util.js', 'core/state.js', 'core/vision.js',
       'data/tuning.js', 'data/map.js', 'data/stations.js', 'data/scenario.js',
-      'sim/commands.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
+      'sim/commands.js', 'sim/development.js', 'sim/growth.js', 'sim/movement.js', 'sim/combat.js',
       'sim/relations.js', 'sim/victory.js', 'sim/step.js',
       'ai/score.js', 'ai/ai.js',
       'test/asserts.js', 'test/runner.js',

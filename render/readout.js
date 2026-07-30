@@ -237,11 +237,13 @@ var RDO_EMPIRE_EVERY = 6;
 //   11  supply    an alarm, and it invalidates half of the station block
 //   12  fight     what decides an assault, both directions
 //   13  orders    standing supply lines
+//   14  build     what may be built here, and what it is running at
 var RDO_HEADER_ORDER = 5;
 var RDO_SECTION_ORDER = 10;
 var RDO_SUPPLY_ORDER = 11;
 var RDO_FIGHT_ORDER = 12;
 var RDO_ORDERS_ORDER = 13;
+var RDO_BUILD_ORDER = 14;
 
 // Consecutive throws before a section is retired, matching RENDER_FAIL_LIMIT in
 // app/loop.js. A section that cannot survive three frames is broken, not
@@ -1948,7 +1950,12 @@ function _rdoFightUpdate(state, n) {
   var d = STATIONS[sid];
   var st = state.stations[sid];
   var units = st.units;
-  var fort = fortLevel(sid);
+  // WITH state, so the fight readout agrees with the fight. Passing sid alone
+  // here would print a defence number that ignored a garrisoned fortification
+  // while stationPower() below counted it — known-issue #18 exactly: a readout
+  // answering a different question from the one on screen, and never looking
+  // wrong.
+  var fort = fortLevel(sid, state);
 
   // Every hostile stack standing here, via the sim's own reader. Pure: it
   // builds a fresh unit bag with emptyUnits()/addUnits and never writes back.
@@ -2601,6 +2608,123 @@ function _rdoOrdersUpdate(state, n) {
   return true;
 }
 
+
+// ── the build section (04-development.md §8) ─────────────────────────────
+//
+// WHAT THIS SECTION IS FOR, and it is not "this city is developed".
+//
+// The boring half is the fact. The half worth rail space is that BUILT TIER AND
+// OPERATING TIER CAN DIFFER — a tier-3 fortress held by a skeleton garrison
+// fights as tier 1, and noticing that is the entire skill the mechanic creates.
+// So the shape of every line here is "what you paid for, what it is doing, and
+// how many units close the gap".
+//
+// EVERY NUMBER COMES FROM sim/development.js. Not one of them is recomputed here
+// — not the cost, not the operating tier, not the shortfall, and not whether a
+// build is legal. The rail offers a build from developmentPlan(), which is the
+// same function applyCommand uses to accept it, so the rail cannot offer
+// something the command then refuses (known-issues #9, logged five times, and
+// #18 — a readout answering from its own private opinion).
+//
+// PORT AND FACTORY SAY THEY DO NOTHING YET, in words, from DEV_LIVE. A screen
+// that showed "Port 2" beside a fortification's real bonus would be claiming an
+// effect the sim does not have, and the player would spend a capacity and a half
+// finding out.
+function _rdoBuildBuild(host) {
+  _rdoForget('bld');
+  var n = {};
+  n.have = _rdoRow(host, 'rdo-mod', 'built');
+  n.run = _rdoRow(host, 'rdo-mod', 'running');
+  n.gap = _rdoRow(host, 'rdo-mod', 'to next');
+  n.next = _rdoRow(host, 'rdo-mod', 'b builds');
+  n.opts = _rdoRow(host, 'rdo-mod', 'could build');
+  return n;
+}
+
+function _rdoBuildUpdate(state, n) {
+  var sid = _rdoFocusOn(state);
+  if (!sid) return false;
+  if (typeof developmentPlan !== 'function') return false;
+  // YOUR OWN CITIES ONLY. What may be built somewhere is a statement about a
+  // decision only its owner can take, and printing an enemy city's build options
+  // would be offering a gesture that cannot fire. The belief gate is still
+  // checked first, for the same reason every other section checks it.
+  if (_rdoBelief(state, sid).level !== 2) return false;
+  var me = (typeof PLAYER === 'string') ? PLAYER : null;
+  if (!me || state.stations[sid].owner !== me) return false;
+
+  // WRITE THROUGH `rec.v`, NOT `rec` — and show/hide through _rdoShow, not the
+  // `hidden` attribute. The first version of this function did both wrong and it
+  // FAILED SILENTLY IN BOTH DIRECTIONS: _rdoSet(rec, …) sets `textContent` on a
+  // plain JavaScript object, which is legal and does nothing, so the rail
+  // rendered five labels with no values and threw no error. Caught by reading the
+  // section's innerText in a real browser; nothing in test/node.js loads this
+  // file, so nothing else could have caught it (known-issue #18, and #15 for why
+  // `hidden` is the wrong lever here — a stylesheet display rule silently beats
+  // it).
+  var kind = developmentKind(state, sid);
+  var built = builtTier(state, sid);
+
+  if (built > 0) {
+    _rdoSet(n.have.v, 'bldhave', DEV_NAMES[kind] + ' ' + built +
+      (DEV_LIVE[kind] ? '' : ' — no effect yet'));
+    _rdoShow(n.have, 'bldhave', true);
+
+    var op = operatingTier(state, sid);
+    // The gap, stated as a gap. "1 of 2" rather than "1" — a bare number cannot
+    // say whether it is the whole of what was paid for, and that gap is the one
+    // thing this section exists to communicate.
+    _rdoSet(n.run.v, 'bldrun', op + ' of ' + built +
+      (op < built ? ' — under-garrisoned' : ''));
+    _rdoShow(n.run, 'bldrun', true);
+
+    var short = operatingShortBy(state, sid);
+    var haveGap = (short !== null && short > 0);
+    if (haveGap) _rdoSet(n.gap.v, 'bldgap', _rdoNum(short) + ' more to run at ' + (op + 1));
+    _rdoShow(n.gap, 'bldgap', haveGap);
+  } else {
+    _rdoShow(n.have, 'bldhave', false);
+    _rdoShow(n.run, 'bldrun', false);
+    _rdoShow(n.gap, 'bldgap', false);
+  }
+
+  // What `b` would do right now, from the same planner the command uses — so the
+  // rail cannot offer a build applyCommand then refuses.
+  var plan = developmentPlan(state, sid, me, null);
+  var nextText = null;
+  if (plan.ok) {
+    nextText = DEV_NAMES[plan.kind] + ' ' + plan.tier + ' — ' + _rdoNum(plan.cost) + ' units';
+  } else if (plan.reason === 'choose-kind') {
+    // NOT a failure. The player has a decision to make, and saying "cannot
+    // build" here would answer a different question.
+    nextText = 'pick one below';
+  } else if (plan.reason === 'at-max-tier') {
+    nextText = 'nothing left to build here';
+  } else if (plan.reason === 'too-few-units') {
+    nextText = 'needs ' + _rdoNum(developmentCost(sid, built + 1)) + ' units';
+  } else if (plan.reason === 'not-legal-here') {
+    nextText = 'nothing can be built here';
+  }
+  if (nextText !== null) _rdoSet(n.next.v, 'bldnext', nextText);
+  _rdoShow(n.next, 'bldnext', nextText !== null);
+
+  // The choice, listed only while there IS one — once something is built the
+  // station can never change kind (§5), so the list would be noise.
+  var opts = kind ? [] : developmentOptions(sid);
+  if (opts.length > 1) {
+    var names = [];
+    for (var i = 0; i < opts.length; i++) {
+      names.push(DEV_NAMES[opts[i]] + (DEV_LIVE[opts[i]] ? '' : ' (inert)'));
+    }
+    _rdoSet(n.opts.v, 'bldopts', names.join(' · '));
+    _rdoShow(n.opts, 'bldopts', true);
+  } else {
+    _rdoShow(n.opts, 'bldopts', false);
+  }
+
+  return true;
+}
+
 // ── registration ────────────────────────────────────────────────────────
 //
 // Every section registers through the same public seam any later one will use —
@@ -2640,6 +2764,13 @@ railAddSection({
   order: RDO_ORDERS_ORDER,
   build: _rdoOrdersBuild,
   update: _rdoOrdersUpdate,
+});
+
+railAddSection({
+  id: 'build',
+  order: RDO_BUILD_ORDER,
+  build: _rdoBuildBuild,
+  update: _rdoBuildUpdate,
 });
 
 // The per-frame pump, called by app/loop.js behind safeRender. It drives the

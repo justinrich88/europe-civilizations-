@@ -264,6 +264,21 @@ function setStationOwner(state, sid, owner) {
   // A fresh array, never `length = 0`: a caller holding the old one (a snapshot
   // helper, a renderer that cached it) must not have it emptied underneath them.
   st.supplyTo = [];
+
+  // DEVELOPMENT DOES NOT SURVIVE A CAPTURE EITHER — the build, not merely the
+  // tier (04-development.md §6). The new owner starts from nothing.
+  //
+  // Note the asymmetry with the operating tier, and that it is deliberate: being
+  // RAIDED degrades your development, because the tier tracks the garrison;
+  // being CONQUERED deletes it. That is what keeps the sink honest — development
+  // is a permanent cost that a permanent loss can take away, which is what makes
+  // garrisoning it matter.
+  //
+  // Here for the same reason supplyTo is: setStationOwner is the only supported
+  // way ownership changes, so it is the only place this can leak from. `delete`
+  // rather than a zeroed object, so "never developed" and "developed then
+  // captured" are the same state and nothing has to distinguish them.
+  if (st.development) delete st.development;
   return true;
 }
 
