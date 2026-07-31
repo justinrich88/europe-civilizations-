@@ -1111,5 +1111,31 @@ const BAL = {
     // and scale-in path as the existing bonus, so an unmanned development is
     // not a ghost army.
     FORT_POWER_PER_TIER: 0.5,
+
+    // INTERDICTION — losses per tick, per OPERATING tier, on a hostile wave
+    // making its final approach to a fortified station.
+    //
+    // "A fortified location should cause attrition of enemy units when
+    // approaching the target to attack." The design already wanted this and
+    // already argued for it: 06-movement-and-attrition.md §6 decided that
+    // fortification must tax armies rather than only absorb them, because
+    // 04-development.md §7's stalemate risk — fortification available at 108
+    // stations against a factory counter at 16 — is answered by a fortress that
+    // PROJECTS. "A fortress that projects outward is not a turtle." Walls stop
+    // being a way to avoid the game and become a way to shape where the enemy
+    // can afford to walk.
+    //
+    // 0.0005 per tick per tier. Compounded over a ~200-tick approach that is
+    // ~10% of the assault at tier 1, ~18% at tier 2, ~26% at a tier-3 capital.
+    // Worth paying to go around; not enough to make a fortress untakeable, which
+    // 00-vision.md §5 forbids outright.
+    //
+    // OPERATING tier, not built — an ungarrisoned fortification projects nothing,
+    // exactly as it adds no defensive power. Manning the wall is what makes it a
+    // wall.
+    //
+    // UNTUNED, and the first number to move if playtesting shows the board
+    // freezing. It is one constant and it is isolated.
+    FORT_APPROACH_LOSS: 0.0005,
   },
 };

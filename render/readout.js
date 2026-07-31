@@ -324,6 +324,16 @@ var RDO_ICONS = {
   // lucide `timer` — march time out of here, in days.
   timer: 'M10 2L14 2 M12 14L15 11 M20 14A8 8 0 1 1 4 14A8 8 0 1 1 20 14',
 
+  // The three developments (04-development.md §5). Stroke-only silhouettes, sized
+  // for 11px: at that size a detailed glyph is a smudge, so each is three or four
+  // strokes and is meant to be recognised by OUTLINE rather than read.
+  //
+  // Type is carried by SHAPE, never by colour — colour is spent on ownership and
+  // cannot be borrowed (00-vision.md §8). Same rule the map pips follow.
+  fort: 'M3 21V10h3V7h3v3h3V7h3v3h3v11z M9 21v-5h6v5',
+  port: 'M12 4.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M12 8.5V21 M7 12h10 M4 14a8 8 0 0 0 16 0',
+  factory: 'M2 21V12l6 3v-3l6 3v-3l6 3v6z M6 12V4h3v8',
+
   // lucide `triangle-alert` — the one icon that means "something is wrong
   // here". Spent on cut-off pockets, sieges and stalled supply, and on nothing
   // else, because a column that warns about everything warns about nothing.
@@ -2119,6 +2129,22 @@ function _rdoFightMarch(state, n, sid) {
     why.push('sea ' + _rdoMul(BAL.SEA_SPEED_MUL) + ' · −' +
       _rdoPctFine(BAL.SEA_ARTILLERY_LOSS) + ' of the guns per crossing');
   }
+  // WHAT THIS CITY COSTS TO WALK AT. The other lines here explain why leaving is
+  // slow; this one explains why arriving is expensive, and it belongs beside them
+  // because it is the same question asked from the attacker's side.
+  //
+  // The whole point of the mechanic is that a fortress projects OUTWARD
+  // (06-movement-and-attrition.md §6), and a toll nobody can see is a toll nobody
+  // routes around — which would leave the player losing armies to a number that
+  // never appears anywhere. OPERATING tier, from the sim, so an ungarrisoned
+  // fortress correctly advertises nothing.
+  if (typeof operatingTier === 'function' && developmentKind(state, sid) === 'fort') {
+    var oTier = operatingTier(state, sid);
+    if (oTier > 0 && BAL.DEV && BAL.DEV.FORT_APPROACH_LOSS > 0) {
+      why.push('fortified — assaults lose −' +
+        _rdoPctFine(BAL.DEV.FORT_APPROACH_LOSS * oTier) + ' per tick closing on it');
+    }
+  }
   if (!real) why.push('quoted for infantry; nothing garrisoned');
   _rdoSources(n.marchSrc, 'fgtmarchsrc', why);
 }
@@ -2633,96 +2659,198 @@ function _rdoOrdersUpdate(state, n) {
 function _rdoBuildBuild(host) {
   _rdoForget('bld');
   var n = {};
-  n.have = _rdoRow(host, 'rdo-mod', 'built');
-  n.run = _rdoRow(host, 'rdo-mod', 'running');
-  n.gap = _rdoRow(host, 'rdo-mod', 'to next');
-  n.next = _rdoRow(host, 'rdo-mod', 'b builds');
-  n.opts = _rdoRow(host, 'rdo-mod', 'could build');
+
+  // ONE ROW FOR THE STATE, and it is mostly not words.
+  //
+  // The previous version read: "built Fortification 2 | running 1 of 2 —
+  // under-garrisoned | to next 14.4 more to run at 2 | b builds needs 72.0
+  // units". Four rows, thirty words, in a 200px column, to say something a row
+  // of pips says at a glance. The player's note was "too wordy" and it was right:
+  // the rail is glanced at between orders, not read.
+  //
+  // So: the TYPE is an icon, the TIER is pips filled to what is running, and the
+  // only number is the one that is actionable — how many units switch the next
+  // tier on. Everything else was decoration on a fact the pips already carry.
+  n.state = _rdoRow(host, 'rdo-mod rdo-dev-state', '');
+  n.stateIco = _rdoIcon('fort');                 // src swapped per kind below
+  n.state.k.appendChild(n.stateIco);
+  n.pips = el('span', 'rdo-dev-pips');
+  n.state.v.appendChild(n.pips);
+  n.pipEls = [];
+  for (var t = 0; t < 3; t++) {
+    var pip = el('span', 'rdo-dev-pip');
+    n.pipEls.push(pip);
+    n.pips.appendChild(pip);
+  }
+  n.need = el('span', 'rdo-dev-need');
+  n.state.v.appendChild(n.need);
+
+  // What `b` would buy here. One line, and it is the price — the chooser that `b`
+  // opens carries the rest, so repeating it here would be the same words twice.
+  n.next = _rdoRow(host, 'rdo-mod', 'b');
+
+  // THE CHOICE, AND IT IS THE FIRST INTERACTIVE THING IN THE RAIL.
+  //
+  // §8 puts the choice behind `b`, and that is the fast path. These are the same
+  // choice for a player who would rather point at it, and they are the reason a
+  // station with two options is not a dead end for someone who has not learned
+  // the keys yet.
+  //
+  // Safe in the rail in a way it would not be over the board: the rail is a DOM
+  // sibling in normal flow, so these cannot swallow the click that commits an
+  // attack (known-issues #5, five occurrences). Nothing here is ever painted over
+  // #board.
+  //
+  // ONE listener on the row, not three on the buttons — the buttons are reused
+  // across stations every frame and per-button listeners would have to be
+  // rebound. The station is read from `data-sid` AT CLICK TIME, written by the
+  // update below, so a button always acts on the city it is currently labelled
+  // for even if the rail has moved on.
+  n.pickRow = _rdoRow(host, 'rdo-mod rdo-build-pick', '');
+  n.picks = {};
+  for (var i = 0; i < DEV_KINDS.length; i++) {
+    var kind = DEV_KINDS[i];
+    var btn = el('button', 'btn rdo-build-btn', { type: 'button', 'data-kind': kind });
+    btn.appendChild(_rdoIcon(kind));
+    n.picks[kind] = btn;
+    n.pickRow.v.appendChild(btn);
+  }
+  n.pickRow.v.addEventListener('click', _rdoBuildClick);
   return n;
+}
+
+// A build button was pressed. Goes through render/select.js's selBuild(), which
+// is the SAME function the `b` key calls — see the note there for why there is
+// only one place that composes a build command.
+function _rdoBuildClick(ev) {
+  var btn = ev.target && ev.target.closest ? ev.target.closest('.rdo-build-btn') : null;
+  if (!btn) return;
+  var sid = btn.getAttribute('data-sid');
+  var kind = btn.getAttribute('data-kind');
+  if (!sid || !kind) return;
+  if (typeof selBuild !== 'function') {
+    console.error('[render/readout] no selBuild — render/select.js must load before ' +
+      'the rail is clicked. The build buttons do nothing.');
+    return;
+  }
+  selBuild([sid], kind);
+  // BLUR, and it is not cosmetic. A focused button keeps keyboard focus, so the
+  // next Space would re-fire it instead of pausing the game, and the next Enter
+  // likewise. The board's keys are the primary interface; a rail button must hand
+  // focus straight back.
+  btn.blur();
 }
 
 function _rdoBuildUpdate(state, n) {
   var sid = _rdoFocusOn(state);
   if (!sid) return false;
   if (typeof developmentPlan !== 'function') return false;
-  // YOUR OWN CITIES ONLY. What may be built somewhere is a statement about a
-  // decision only its owner can take, and printing an enemy city's build options
-  // would be offering a gesture that cannot fire. The belief gate is still
-  // checked first, for the same reason every other section checks it.
+  // YOUR OWN CITIES ONLY. What may be built somewhere is a decision only its
+  // owner can take, and printing an enemy city's options would offer a gesture
+  // that cannot fire. The belief gate is checked first, like every other section.
   if (_rdoBelief(state, sid).level !== 2) return false;
   var me = (typeof PLAYER === 'string') ? PLAYER : null;
   if (!me || state.stations[sid].owner !== me) return false;
 
   // WRITE THROUGH `rec.v`, NOT `rec` — and show/hide through _rdoShow, not the
-  // `hidden` attribute. The first version of this function did both wrong and it
+  // `hidden` attribute. An earlier version of this function did both wrong and it
   // FAILED SILENTLY IN BOTH DIRECTIONS: _rdoSet(rec, …) sets `textContent` on a
-  // plain JavaScript object, which is legal and does nothing, so the rail
-  // rendered five labels with no values and threw no error. Caught by reading the
-  // section's innerText in a real browser; nothing in test/node.js loads this
-  // file, so nothing else could have caught it (known-issue #18, and #15 for why
-  // `hidden` is the wrong lever here — a stylesheet display rule silently beats
-  // it).
+  // plain object, which is legal and does nothing, so the rail rendered labels
+  // with no values and threw nothing (known-issues #25, and #15 for why `hidden`
+  // is the wrong lever).
   var kind = developmentKind(state, sid);
   var built = builtTier(state, sid);
 
+  // ── the state row: icon, pips, and the one actionable number ──
   if (built > 0) {
-    _rdoSet(n.have.v, 'bldhave', DEV_NAMES[kind] + ' ' + built +
-      (DEV_LIVE[kind] ? '' : ' — no effect yet'));
-    _rdoShow(n.have, 'bldhave', true);
+    // The icon IS the type. Swapped by rewriting the path, so the row keeps one
+    // element rather than churning DOM every time the pointer moves.
+    _rdoSetIcon(n.stateIco, kind, 'bldico');
+    n.state.k.setAttribute('title', DEV_NAMES[kind] +
+      (DEV_LIVE[kind] ? '' : ' — no effect implemented yet'));
 
     var op = operatingTier(state, sid);
-    // The gap, stated as a gap. "1 of 2" rather than "1" — a bare number cannot
-    // say whether it is the whole of what was paid for, and that gap is the one
-    // thing this section exists to communicate.
-    _rdoSet(n.run.v, 'bldrun', op + ' of ' + built +
-      (op < built ? ' — under-garrisoned' : ''));
-    _rdoShow(n.run, 'bldrun', true);
+    // ONE SLOT PER BUILT TIER, FILLED TO THE OPERATING TIER. The empty slots are
+    // the whole reading: two filled of three says "you paid for a fortress and
+    // you are not garrisoning it" without a sentence. Same encoding as the pips
+    // under the node, deliberately — one idea, one visual language.
+    for (var t = 0; t < n.pipEls.length; t++) {
+      var show = t < built;
+      n.pipEls[t].style.display = show ? '' : 'none';
+      n.pipEls[t].classList.toggle('is-on', t < op);
+    }
+    _rdoStyle(n.pips, 'bldpips', 'display', '');
+    n.pips.setAttribute('title', op + ' of ' + built + ' tiers running');
 
+    // The only number, and only when acting on it would change something.
     var short = operatingShortBy(state, sid);
-    var haveGap = (short !== null && short > 0);
-    if (haveGap) _rdoSet(n.gap.v, 'bldgap', _rdoNum(short) + ' more to run at ' + (op + 1));
-    _rdoShow(n.gap, 'bldgap', haveGap);
+    var needTxt = (short !== null && short > 0) ? ('+' + _rdoNum(short)) : '';
+    _rdoSet(n.need, 'bldneed', needTxt);
+    n.need.setAttribute('title', needTxt
+      ? (_rdoNum(short) + ' more units to run tier ' + (op + 1))
+      : 'fully garrisoned');
+    _rdoShow(n.state, 'bldstate', true);
   } else {
-    _rdoShow(n.have, 'bldhave', false);
-    _rdoShow(n.run, 'bldrun', false);
-    _rdoShow(n.gap, 'bldgap', false);
+    _rdoShow(n.state, 'bldstate', false);
   }
 
-  // What `b` would do right now, from the same planner the command uses — so the
-  // rail cannot offer a build applyCommand then refuses.
+  // ── what `b` would buy ──
   var plan = developmentPlan(state, sid, me, null);
   var nextText = null;
   if (plan.ok) {
-    nextText = DEV_NAMES[plan.kind] + ' ' + plan.tier + ' — ' + _rdoNum(plan.cost) + ' units';
+    nextText = _rdoNum(plan.cost) + ' units → ' + DEV_NAMES[plan.kind] + ' ' + plan.tier;
   } else if (plan.reason === 'choose-kind') {
-    // NOT a failure. The player has a decision to make, and saying "cannot
-    // build" here would answer a different question.
-    nextText = 'pick one below';
+    nextText = 'choose';
   } else if (plan.reason === 'at-max-tier') {
-    nextText = 'nothing left to build here';
+    nextText = 'maxed';
   } else if (plan.reason === 'too-few-units') {
-    nextText = 'needs ' + _rdoNum(developmentCost(sid, built + 1)) + ' units';
-  } else if (plan.reason === 'not-legal-here') {
-    nextText = 'nothing can be built here';
+    nextText = 'needs ' + _rdoNum(developmentCost(sid, built + 1));
   }
   if (nextText !== null) _rdoSet(n.next.v, 'bldnext', nextText);
   _rdoShow(n.next, 'bldnext', nextText !== null);
 
-  // The choice, listed only while there IS one — once something is built the
-  // station can never change kind (§5), so the list would be noise.
+  // ── the choice ──
+  //
+  // Buttons only while there IS one: a station can never change kind once
+  // something is built (§5), and a single legal option needs no choosing because
+  // `b` already builds it. The row's presence is the reading.
   var opts = kind ? [] : developmentOptions(sid);
-  if (opts.length > 1) {
-    var names = [];
-    for (var i = 0; i < opts.length; i++) {
-      names.push(DEV_NAMES[opts[i]] + (DEV_LIVE[opts[i]] ? '' : ' (inert)'));
-    }
-    _rdoSet(n.opts.v, 'bldopts', names.join(' · '));
-    _rdoShow(n.opts, 'bldopts', true);
-  } else {
-    _rdoShow(n.opts, 'bldopts', false);
+  var choosing = opts.length > 1;
+  for (var i = 0; i < DEV_KINDS.length; i++) {
+    var k = DEV_KINDS[i];
+    var btn = n.picks[k];
+    var legal = choosing && opts.indexOf(k) >= 0;
+    btn.style.display = legal ? '' : 'none';
+    if (!legal) continue;
+    // Rewritten every frame the row is up: the rail follows the pointer, so this
+    // button may be labelled for a different city than it was last frame. Read at
+    // CLICK time, never captured at build time.
+    btn.setAttribute('data-sid', sid);
+    // Affordability is the SIM's answer, from the planner that would accept the
+    // command. A button offering a build applyCommand then refuses is the rail
+    // lying (known-issues #9, #18).
+    var p = developmentPlan(state, sid, me, k);
+    btn.disabled = !p.ok;
+    btn.setAttribute('title', p.ok
+      ? (DEV_NAMES[k] + ' ' + p.tier + ' — ' + _rdoNum(p.cost) + ' units' +
+         (DEV_LIVE[k] ? '' : ', no effect implemented yet'))
+      : (DEV_NAMES[k] + ' — ' + p.reason));
   }
+  _rdoShow(n.pickRow, 'bldpick', choosing);
 
   return true;
+}
+
+// Swap an existing icon's path in place. One element per row for the life of the
+// rail, rather than tearing down and rebuilding an <svg> every time the pointer
+// moves to a city with a different development.
+function _rdoSetIcon(svg, name, key) {
+  if (!svg) return;
+  if (_rdoLast[key] === name) return;
+  _rdoLast[key] = name;
+  svg.setAttribute('class', 'rdo-ico rdo-ico-' + name);
+  var path = svg.firstChild;
+  if (path) path.setAttribute('d', RDO_ICONS[name] || '');
 }
 
 // ── registration ────────────────────────────────────────────────────────

@@ -218,6 +218,28 @@ function developmentFortLevel(state, sid) {
   return operatingTier(state, sid) * BAL.DEV.FORT_POWER_PER_TIER;
 }
 
+// What would the OPERATING tier be if `tier` were built here right now, after
+// paying `cost` out of the garrison?
+//
+// The question the build chooser has to answer before the player commits, and it
+// is not the same as "can I afford it": paying tier 3 out of the overflow band is
+// affordable and still leaves the thing running at tier 2 (§4). A chooser that
+// only said "36 units" would let a player spend most of a city on a development
+// that does not switch on, and discover it afterwards.
+//
+// Derived here rather than in the renderer, from the same rule operatingTier
+// uses, because two implementations of a tier boundary is the defect this project
+// has logged five times.
+function operatingAfterBuild(state, sid, tier, cost) {
+  var d = STATIONS[sid];
+  var step = BAL.DEV.OPERATE_FRACTION * d.capacity;
+  if (!(step > 0)) return tier;
+  var left = totalUnits(state.stations[sid].units) - cost;
+  if (left < 0) left = 0;
+  var can = Math.floor(left / step);
+  return can < tier ? can : tier;
+}
+
 // Can `owner` build the next tier here, and what stops them?
 //
 // Returns { ok, kind, tier, cost, reason }. ONE function, used by applyCommand to

@@ -104,6 +104,32 @@ two callers — the battle and the toll.
 > It also gives the player a genuine choice the current game cannot express:
 > pay the toll and go around, or pay the battle and go through.
 
+> **THE APPROACH HALF SHIPPED EARLY, 2026-07, on the player's instruction:**
+> *"in addition to being stronger, a fortified location should cause attrition of
+> enemy units when approaching the target to attack."*
+>
+> `sim/movement.js`'s `_chargeApproach()` bleeds a hostile wave on its **final
+> hop** toward a fortified station, scaled by `BAL.DEV.FORT_APPROACH_LOSS` and the
+> **operating** tier. That is the *approach* — the ground in front of the walls.
+>
+> **It is deliberately narrower than the rule above, in two ways, and both are
+> temporary:**
+>
+> 1. It scales by the **fortification tier alone**, not by
+>    `stationPower(state, sid, 'defender')`. §6 is right that a passage toll must
+>    scale with full defensive power — but doing that now would make *every
+>    garrison on the board* bleed *every attacker*, which is this whole document's
+>    combat model arriving under a constant named for forts, with no balance pass
+>    behind it. When B1 lands, `_chargeApproach` becomes the **fortification term**
+>    of the real toll rather than a rule of its own.
+> 2. It fires on the **final hop only**, never on passage. That guard is
+>    **currently unobservable** and the test says so: `_moveCanTraverse` is
+>    `st.owner === pid`, so every intermediate station on every route belongs to
+>    the wave's owner, and the toll exempts your own ground. Nothing can walk past
+>    a hostile fort yet. **When B1 makes it possible, fortify an intermediate the
+>    wave does not own and the guard becomes testable in one line** — the test in
+>    `test/development-tests.js` names the spot.
+
 ### March attrition
 
 **A wave loses strength for every tick it is in transit.**

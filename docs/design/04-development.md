@@ -363,12 +363,38 @@ Built, and tested in `test/development-tests.js` (25 tests):
 - **fortification has a real effect**, through `fortLevel(sid, state)` so it goes
   through the existing scale-in and artillery-strip path. An unmanned fortification
   adds nothing, and artillery still answers a built fort. Both tested.
+- **fortification INTERDICTS.** A hostile wave loses units on its final approach
+  to a garrisoned fortification (`BAL.DEV.FORT_APPROACH_LOSS`, scaled by the
+  operating tier). This is `06-movement-and-attrition.md` §6's "fortification taxes
+  armies" arriving early, on the player's instruction, and it is **§7's own answer
+  to the stalemate risk**: a fortress that projects outward is not a turtle. See
+  that document for the two ways this is deliberately narrower than the full
+  passage toll.
+- **the gesture is `b` → a numbered chooser → 1/2/3.** It arms rather than firing,
+  because a spend has to say what it buys, what it costs, and **whether the thing
+  will actually switch on afterwards** — `operatingAfterBuild()` answers the last
+  one, and it is the surprise this mechanic can otherwise spring (§4). The first
+  version fired immediately with no kind and was a **dead end at 51 of 108
+  stations**: the command correctly rejected `choose-kind` and there was nothing to
+  choose with.
 
 **Port and factory are buildable and INERT.** Tracked, tiered, capture-deleted —
 and they do nothing, because nothing implements them. `DEV_LIVE` in
 `sim/development.js` is the single source of truth for that, and the rail prints
 "no effect yet" / "(inert)" from it, so no screen claims an effect the sim does not
 have. The *choice* is what is worth playtesting now; the effects can follow.
+
+### The rail, after "too wordy"
+
+The first version read: *"built Fortification 2 | running 1 of 2 —
+under-garrisoned | to next 14.4 more to run at 2 | b builds needs 72.0 units"* —
+four rows and thirty words in a 200px column, to say what a row of pips says at a
+glance. The rail is **glanced at between orders, not read**.
+
+Now: the **type is an icon**, the **tier is pips filled to what is running**, and
+the only number is the actionable one — how many units switch the next tier on.
+Same pip encoding as the map, deliberately: one idea should not have two visual
+languages.
 
 ### §8's map question, measured rather than argued
 

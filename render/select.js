@@ -1412,27 +1412,189 @@ function selOnKeyDown(evt) {
       return;
     }
 
-    // `b` — build the next development tier in every selected city that can
-    // afford it (04-development.md §8).
+    // `b` — OPEN THE BUILD CHOOSER over the selection (04-development.md §8).
     //
-    // NO ARMING, and that is the whole reason it is one key. A build has no
-    // destination: it happens in the city, so there is nothing for a following
-    // click to name. R arms because it needs a target; `b` does not.
+    // It ARMS rather than firing, and the reason is the player's: a spend needs to
+    // say what it is buying, how much it costs, and whether the thing will
+    // actually switch on afterwards — none of which fits on a keycap. So `b` puts
+    // a numbered list on screen and 1/2/3 commits.
     //
-    // It fires immediately and there is nothing to cancel — which is a real
-    // decision, not an omission. §8's cut list names build queues explicitly, and
-    // the smallest possible spend gesture is one key with no confirm. The safety
-    // net is that a build cannot take a city below BAL.DEV.MIN_REMAINING, so the
-    // worst a stray `b` can do is spend units, never lose a city.
+    // The first version fired immediately with no kind, and it was a DEAD END at
+    // every station with more than one legal development — 51 of the 108. The
+    // command correctly rejected 'choose-kind' and there was no way to choose.
     //
-    // WITH NOTHING SELECTED IT DOES NOTHING, same rule as H, and for the stronger
-    // version of the same reason: "spend half of every city I own" is not a thing
-    // that should be one keystroke from a board where `b` is pressed often.
+    // WITH NOTHING SELECTED IT DOES NOTHING, same rule as H and for the stronger
+    // version of the same reason: "spend half of every city I own" must not be one
+    // keystroke away on a board where `b` is pressed often.
     if (evt.key === 'b' || evt.key === 'B') {
       evt.preventDefault();
-      _selBuild();
+      if (SEL_STATE.armed === 'build') _selDisarm();
+      else _selArmBuild();
+    }
+
+    // 1/2/3 PICK FROM THE CHOOSER — and only while it is open.
+    //
+    // These are the send-amount keys the rest of the time, which is exactly why
+    // this branch is inside `armed === 'build'` and nowhere else. Arming is not a
+    // mode you can forget you are in (see _selArmOrder): the chooser is on screen
+    // the whole time it is live, one key consumes it, and Escape or a click on the
+    // board cancels it. app/main.js's digit handler is left alone — it checks the
+    // same armed flag rather than being reordered, so the two cannot disagree.
+    if (SEL_STATE.armed === 'build') {
+      var pick = SEL_BUILD_KEYS[evt.key];
+      if (pick !== undefined) {
+        evt.preventDefault();
+        var opts = _selBuildOptions();
+        if (opts[pick]) {
+          _selBuild(_selBuildTargets(), opts[pick].kind);
+          _selDisarm();
+        }
+      }
     }
   }
+}
+
+// ── the build chooser ───────────────────────────────────────────────────
+
+// Digit -> index into the option list. 1-based on the keycap, 0-based in the
+// array, which is the only reason this table exists rather than a parseInt.
+const SEL_BUILD_KEYS = { 1: 0, 2: 1, 3: 2 };
+
+// The cities `b` would act on: every SELECTED city the player owns.
+function _selBuildTargets() {
+  return selectedSources().filter(selIsMine);
+}
+
+// The kinds offered, with everything the player needs to decide, computed ONCE
+// per repaint rather than per row.
+//
+// Every number comes from sim/development.js. The renderer decides nothing here —
+// not what is legal, not the cost, not whether the result would run — because the
+// rail already learned that lesson: a chooser that offers a build applyCommand
+// then refuses is the same defect as a rail that does (known-issues #9, #18).
+function _selBuildOptions() {
+  const g = selGame();
+  const me = selPlayer();
+  const targets = _selBuildTargets();
+  if (!g || !me || !targets.length || typeof developmentPlan !== 'function') return [];
+
+  // Union of what is legal across the selection, in DEV_KINDS order so the digit
+  // for a given development does not move between two cities.
+  const out = [];
+  for (let i = 0; i < DEV_KINDS.length; i++) {
+    const kind = DEV_KINDS[i];
+    let can = 0, cost = null, tier = null, runsAt = null, blocked = null;
+    for (let j = 0; j < targets.length; j++) {
+      const plan = developmentPlan(g, targets[j], me, kind);
+      if (plan.ok) {
+        can++;
+        if (cost === null) {
+          cost = plan.cost;
+          tier = plan.tier;
+          runsAt = (typeof operatingAfterBuild === 'function')
+            ? operatingAfterBuild(g, targets[j], plan.tier, plan.cost) : null;
+        }
+      } else if (blocked === null && plan.reason !== 'not-legal-here') {
+        blocked = plan.reason;
+      }
+    }
+    // 'not-legal-here' everywhere means this development simply does not belong
+    // at these cities, and listing it would be offering a choice that is not one.
+    if (!can && blocked === null) continue;
+    out.push({ kind: kind, can: can, of: targets.length, cost: cost, tier: tier,
+               runsAt: runsAt, blocked: blocked });
+  }
+  return out;
+}
+
+function _selArmBuild() {
+  if (!_selBuildTargets().length) return null;
+  if (!_selBuildOptions().length) return null;
+  SEL_STATE.armed = 'build';
+  _selPaintArmed();
+  return 'build';
+}
+
+// Paint the chooser. Keyboard-only and `pointer-events: none`, so it can float
+// over the board without any risk of eating a click (index.html says why).
+function _selPaintBuildChooser() {
+  const host = (typeof byId === 'function') ? byId('build-chooser') : null;
+  if (!host) return;
+  if (SEL_STATE.armed !== 'build') { host.hidden = true; host.textContent = ''; return; }
+
+  const opts = _selBuildOptions();
+  const targets = _selBuildTargets();
+  host.textContent = '';
+
+  const head = document.createElement('div');
+  head.className = 'bc-head';
+  head.textContent = targets.length === 1
+    ? ('Build in ' + STATIONS[targets[0]].name)
+    : ('Build in ' + targets.length + ' cities');
+  host.appendChild(head);
+
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i];
+    const row = document.createElement('div');
+    row.className = 'bc-row' + (o.can ? '' : ' is-blocked');
+
+    const key = document.createElement('span');
+    key.className = 'bc-key';
+    key.textContent = String(i + 1);
+    row.appendChild(key);
+
+    const name = document.createElement('span');
+    name.className = 'bc-name';
+    name.textContent = DEV_NAMES[o.kind] + (o.tier ? ' ' + o.tier : '');
+    row.appendChild(name);
+
+    const cost = document.createElement('span');
+    cost.className = 'bc-cost';
+    // ONE city: the exact price. SEVERAL: how many can pay it, because an
+    // average would be a number that is true of none of them.
+    cost.textContent = !o.can
+      ? _selBuildWhy(o.blocked)
+      : (targets.length === 1
+        ? (Math.round(o.cost * 10) / 10) + ' units'
+        : o.can + ' of ' + o.of + ' can pay');
+    row.appendChild(cost);
+
+    // WILL IT ACTUALLY RUN. The point of the whole chooser: paying for a tier and
+    // discovering afterwards that the garrison left cannot operate it is the one
+    // surprise this mechanic can spring (§4), and it is worst on the expensive
+    // tiers, which are exactly the ones worth warning about.
+    if (o.can && targets.length === 1 && o.runsAt !== null) {
+      const run = document.createElement('span');
+      const live = o.runsAt >= o.tier;
+      run.className = 'bc-run' + (live ? ' is-on' : '');
+      run.textContent = live ? 'runs at once' : ('runs at ' + o.runsAt + ' until regarrisoned');
+      row.appendChild(run);
+    }
+    if (o.can && !DEV_LIVE[o.kind]) {
+      const inert = document.createElement('span');
+      inert.className = 'bc-inert';
+      inert.textContent = 'no effect yet';
+      row.appendChild(inert);
+    }
+    host.appendChild(row);
+  }
+
+  const foot = document.createElement('div');
+  foot.className = 'bc-foot';
+  foot.textContent = 'Esc to cancel';
+  host.appendChild(foot);
+  host.hidden = false;
+}
+
+// Plain words for a refusal. The two that are not failures matter most: at max
+// tier means finished here, and too few units names the thing to fix.
+function _selBuildWhy(reason) {
+  return {
+    'at-max-tier': 'nothing left to build',
+    'too-few-units': 'not enough units',
+    'already-developed': 'already developed',
+    'not-owned': 'not yours',
+  }[reason] || (reason || 'unavailable');
 }
 
 // Build the next tier in every selected city. Goes through queueCommand, not
@@ -1443,20 +1605,32 @@ function selOnKeyDown(evt) {
 //
 // The selection SURVIVES. A build is something you do repeatedly to the same
 // group as it regrows — clearing it would make every second tier a reselection.
-function _selBuild() {
+// ONE COMMAND BUILDER FOR BOTH ROUTES. The `b` key and the rail's build buttons
+// are the same verb reached two ways (04-development.md §8), and two places
+// composing a `{type:'build'}` object is how the key and the button end up
+// disagreeing about what they do — known-issues #9, logged five times here.
+//
+//   _selBuild()               the key: every selected city, no kind named
+//   _selBuild([sid], 'port')  the rail: one city, one named kind
+//
+// `stations` defaults to the selection and `kind` to nothing, so the key's call
+// is the bare one and the rail passes what it knows.
+function _selBuild(stations, kind) {
   const g = selGame();
   const me = selPlayer();
-  const mine = selectedSources().filter(selIsMine);
+  const mine = (stations && stations.length ? stations : selectedSources()).filter(selIsMine);
   if (!g || !me || !mine.length) return null;
   if (typeof queueCommand !== 'function') {
     console.warn('[render/select] queueCommand is not loaded — build dropped');
     return null;
   }
-  // No `kind`. A city with one legal option builds it; a city with several is
-  // rejected 'choose-kind' and the rail's build section is where that choice
-  // lives. Deciding here would be a second implementation of a rule
+  // Omitting `kind` is meaningful, not lazy: a city with ONE legal option builds
+  // it, and a city with several is rejected 'choose-kind' so the rail can ask.
+  // Deciding that here would be a second implementation of a rule
   // sim/development.js already owns.
-  const res = queueCommand(g, { type: 'build', owner: me, stations: mine });
+  const cmd = { type: 'build', owner: me, stations: mine };
+  if (kind) cmd.kind = kind;
+  const res = queueCommand(g, cmd);
   if (!res.ok) console.warn('[render/select] build not queued:', res.reason);
   return res;
 }
@@ -1726,8 +1900,14 @@ function _selPaintArmed() {
   el.classList.remove('is-confirm');
   el.classList.remove('is-refused');
   el.style.background = '';
-  el.textContent = verb ? SEL_ARMED_TEXT : '';
-  el.hidden = !verb;
+  // TWO ARMED VERBS NOW, and they need different chrome. `supply` is a one-line
+  // instruction about the next CLICK; `build` is a numbered list answered by the
+  // KEYBOARD. One banner cannot be both, so the build verb paints the chooser and
+  // leaves this banner empty rather than showing a sentence nobody acts on.
+  const banner = verb && verb !== 'build';
+  el.textContent = banner ? SEL_ARMED_TEXT : '';
+  el.hidden = !banner;
+  _selPaintBuildChooser();
   // A class rather than inline style so style.css owns the look — and on the
   // board wrapper, not the element, because the cursor is the other half of the
   // signal and it has to change over the map.
@@ -1797,6 +1977,16 @@ function _selPaintArmed() {
 // which no-ops on exactly these targets.
 function _selCommitArmed(sid, cancelOnMiss) {
   if (!SEL_STATE.armed) return false;
+
+  // A BUILD NAMES NO DESTINATION — it happens in the cities already selected, so
+  // there is nothing for a click to point at. Any press on the board cancels it,
+  // which is the same escape hatch the supply verb has and means the chooser can
+  // never be a state the player is stuck in. Returning false lets the press go on
+  // to do whatever it would normally have done, so cancelling costs no click.
+  if (SEL_STATE.armed === 'build') {
+    _selDisarm();
+    return false;
+  }
 
   if (!sid || !selIsMine(sid)) {
     if (!cancelOnMiss) return false;

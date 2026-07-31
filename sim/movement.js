@@ -375,6 +375,14 @@ function _advanceWave(state, w) {
     if (v <= 0) return;                                  // empty stack
 
     var need = ((1 - w.progress) * d) / v;               // ticks to finish this hop
+
+    // INTERDICTION: a fortified target bleeds the assault on its final approach.
+    // Charged for the portion of THIS tick actually spent on the last hop, so it
+    // is a function of time under the guns rather than of how the tick boundaries
+    // happened to fall — otherwise a wave that finishes a hop early in a tick
+    // pays the same as one that spends the whole tick closing.
+    if (w.hop >= lastHop) _chargeApproach(state, w, to, (need > timeLeft) ? timeLeft : need);
+
     if (need > timeLeft) {
       w.progress += (timeLeft * v) / d;
       return;
@@ -678,6 +686,55 @@ function movementTick(state) {
   // hold references to state.waves.
   state.waves.length = 0;
   for (var k = 0; k < kept.length; k++) state.waves.push(kept[k]);
+}
+
+// A fortified station bleeds a hostile assault while it closes.
+//
+// "In addition to being stronger, a fortified location should cause attrition of
+// enemy units when approaching the target to attack." The design had already
+// argued for this and already decided it: 06-movement-and-attrition.md §6 makes
+// fortification TAX armies rather than only absorb them, because
+// 04-development.md §7's stalemate risk — fortification available at all 108
+// stations against a factory counter at 16 — is answered by a fortress that
+// PROJECTS. "A fortress that projects outward is not a turtle."
+//
+// WHY THE FINAL HOP ONLY, and not the whole march: this is the approach, the
+// ground in front of the walls. Attrition over a whole route is
+// 06-movement-and-attrition.md §7 and belongs to B1; charging it here would be
+// implementing half of B1 under a constant named for forts, and the balance pass
+// would not know which mechanic it was measuring.
+//
+// WHY OPERATING TIER: an ungarrisoned fortification projects nothing, exactly as
+// it adds no defensive power. Manning the wall is what makes it a wall — and it
+// means a raid that empties a fortress also opens the road past it.
+//
+// WHY NOT stationPower(): §6 says a PASSAGE toll must scale with the station's
+// FULL defensive power and must not derive a second formula — and it is right,
+// for passage. This is deliberately narrower: the DEVELOPMENT's effect, scaled by
+// the development alone. Scaling by total defensive power would make every
+// garrison on the board bleed every attacker, which is B1's whole combat model
+// arriving unannounced. When B1 lands this becomes the fortification TERM of that
+// rule rather than a rule of its own.
+//
+// PROPORTIONAL across the bundle, through core/state.js's splitUnits(), so it
+// needs no change when the three unit types collapse to one (§9).
+function _chargeApproach(state, w, to, ticks) {
+  if (!(ticks > 0)) return;
+  if (typeof developmentFortLevel !== 'function') return;
+  var st = state.stations[to];
+  if (!st || st.owner === w.owner) return;               // never your own ground
+  // A standing order only ever moves between cities one power holds, so it can
+  // never be an assault. The owner check above already covers it; this says so
+  // rather than leaving the next reader to re-derive it.
+  if (w.standing) return;
+  if (developmentKind(state, to) !== 'fort') return;
+  var tier = operatingTier(state, to);
+  if (tier <= 0) return;
+
+  var f = 1 - BAL.DEV.FORT_APPROACH_LOSS * tier * ticks;
+  if (f >= 1) return;
+  if (f < 0) f = 0;
+  w.units = splitUnits(w.units, f);
 }
 
 // ---------------------------------------------------------------------------

@@ -270,6 +270,49 @@ function suiteDevelopment() {
       'a fully-operating development still reports a shortfall');
   });
 
+  test('operatingAfterBuild answers the question the chooser has to ask', function () {
+    // "Can I afford it" and "will it switch on" are DIFFERENT questions, and the
+    // second is the one a player gets wrong. Paying tier 3 out of the overflow
+    // band is affordable and still leaves the thing running at 2 (§4). A chooser
+    // that only printed the price would let somebody spend most of a city on a
+    // development that does not run, and find out afterwards.
+    var sid = P.capital, cap = STATIONS[sid].capacity;
+    var s = _devtBoard('ger', sid, cap * 1.5);
+
+    // Tier 1 costs 0.5x cap out of 1.5x cap, leaving 1.0x — comfortably enough
+    // for tier 1 to run, so this one switches on immediately.
+    assertEqual(operatingAfterBuild(s, sid, 1, developmentCost(sid, 1)), 1,
+      'tier 1 from 1.5x capacity should run at once');
+
+    // The real case. Build 1 and 2 first, then price tier 3 from exactly the
+    // overflow band: it costs a whole capacity and leaves half, which operates 2.
+    for (var t = 1; t <= 2; t++) {
+      s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+      applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
+    }
+    s.stations[sid].units = { infantry: cap * 1.5, artillery: 0, armour: 0 };
+    assertEqual(operatingAfterBuild(s, sid, 3, developmentCost(sid, 3)), 2,
+      'tier 3 paid from 1.5x capacity should report that it will run at 2, not 3');
+
+    // And it must AGREE with what actually happens, or the warning is a guess.
+    var predicted = operatingAfterBuild(s, sid, 3, developmentCost(sid, 3));
+    applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
+    assertEqual(operatingTier(s, sid), predicted,
+      'the chooser predicted ' + predicted + ' and the board came out at ' +
+      operatingTier(s, sid) + ' — the warning is not derived from the same rule');
+  });
+
+  test('operatingAfterBuild never reports a tier the garrison cannot man', function () {
+    var sid = P.plainHolding, cap = STATIONS[sid].capacity;
+    var s = _devtBoard('ger', sid, cap);
+    // Spend it right down to the floor: nothing left to operate anything.
+    var cost = totalUnits(s.stations[sid].units) - BAL.DEV.MIN_REMAINING;
+    assertEqual(operatingAfterBuild(s, sid, 1, cost), 0,
+      'a build that leaves the floor still claims to be running');
+    assert(operatingAfterBuild(s, sid, 1, 1e9) >= 0,
+      'an impossible cost produced a negative tier');
+  });
+
   // ── the asymmetry: raid degrades, capture deletes ──────────────────────
 
   test('a raid DEGRADES the development and it comes back', function () {
@@ -456,6 +499,224 @@ function suiteDevelopment() {
     var vsArt = powerVs({ infantry: 0, artillery: 30, armour: 0 });
     assert(vsArt < vsInf, 'artillery did not strip the built fortification: ' +
       vsInf + ' vs ' + vsArt);
+  });
+
+  // ── interdiction: the fort bleeds the assault on its approach ──────────
+
+  test('a hostile wave loses units closing on a garrisoned fortification', function () {
+    // 06-movement-and-attrition.md §6: fortification must TAX armies, not only
+    // absorb them, or §7's stalemate risk has no answer. This is that tax on the
+    // final approach.
+    var sid = P.plainHolding, cap = STATIONS[sid].capacity;
+
+    function assault(fortify) {
+      var s = _devtBoard('fra', sid, cap);
+      if (fortify) applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
+      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+      // A neighbour Germany attacks from, so the wave has a real final hop.
+      var src = null;
+      for (var i = 0; i < LINKS.length && !src; i++) {
+        var l = LINKS[i];
+        var o = (l.a === sid) ? l.b : (l.b === sid ? l.a : null);
+        if (o) src = o;
+      }
+      setStationOwner(s, src, 'ger');
+      s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+      var res = applyCommand(s, {
+        type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1,
+      });
+      assert(res.ok, 'the fixture could not launch: ' + JSON.stringify(res.rejected));
+      var w = s.waves[s.waves.length - 1];
+      var launched = totalUnits(w.units);
+      // March until it lands, then read what actually arrived.
+      var guard = 0;
+      while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
+      return { launched: launched, landed: totalUnits(w.units), fortified: fortify };
+    }
+
+    var bare = assault(false);
+    var walled = assault(true);
+    assertClose(bare.landed, bare.launched, 1e-9,
+      'an UNfortified target bled the assault — the toll is firing on the wrong ' +
+      'condition, and every march on the board is now paying it');
+    assert(walled.landed < walled.launched,
+      'a garrisoned fortification took nothing off the assault closing on it: ' +
+      walled.launched + ' launched, ' + walled.landed + ' landed');
+  });
+
+  test('an UNGARRISONED fortification projects nothing', function () {
+    // The same rule that stops an unmanned fort adding defensive power. It also
+    // means a raid that empties a fortress opens the road past it, which is the
+    // half of the mechanic that keeps a fortress belt from being a wall you can
+    // build once and forget.
+    var sid = P.plainHolding, cap = STATIONS[sid].capacity;
+    var s = _devtBoard('fra', sid, cap);
+    applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
+    assertEqual(builtTier(s, sid), 1, 'the fixture did not build');
+    s.stations[sid].units = { infantry: 0.05, artillery: 0, armour: 0 };   // gutted
+    assertEqual(operatingTier(s, sid), 0, 'the fixture still operates the fort');
+
+    var src = null;
+    for (var i = 0; i < LINKS.length && !src; i++) {
+      var l = LINKS[i];
+      var o = (l.a === sid) ? l.b : (l.b === sid ? l.a : null);
+      if (o) src = o;
+    }
+    setStationOwner(s, src, 'ger');
+    s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+    applyCommand(s, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
+    var w = s.waves[s.waves.length - 1];
+    var launched = totalUnits(w.units);
+    var guard = 0;
+    while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
+    assertClose(totalUnits(w.units), launched, 1e-9,
+      'an empty fortress still bled the assault — the toll is reading the BUILT ' +
+      'tier, not the operating one');
+  });
+
+  test('the toll scales with the operating tier', function () {
+    var sid = P.capital, cap = STATIONS[sid].capacity;
+
+    function assaultAt(tier) {
+      var s = _devtBoard('fra', sid, cap * 3);
+      for (var t = 0; t < tier; t++) {
+        s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+        applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
+      }
+      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };   // fully manned
+      assertEqual(operatingTier(s, sid), tier, 'fixture is not operating at ' + tier);
+      var src = null;
+      for (var i = 0; i < LINKS.length && !src; i++) {
+        var l = LINKS[i];
+        var o = (l.a === sid) ? l.b : (l.b === sid ? l.a : null);
+        if (o) src = o;
+      }
+      setStationOwner(s, src, 'ger');
+      s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+      applyCommand(s, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
+      var w = s.waves[s.waves.length - 1];
+      var launched = totalUnits(w.units);
+      var guard = 0;
+      while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
+      return launched - totalUnits(w.units);
+    }
+
+    var one = assaultAt(1), three = assaultAt(3);
+    assert(one > 0, 'tier 1 took nothing');
+    assert(three > one * 2,
+      'tier 3 (' + three.toFixed(3) + ') should cost an assault far more than ' +
+      'tier 1 (' + one.toFixed(3) + ') — the toll is not scaling with the tier');
+  });
+
+  test('the toll is charged once for the approach, not per hop of the route', function () {
+    // MUTATION-DRIVEN, AND IT DOES NOT COVER WHAT I FIRST CLAIMED. Read this
+    // before trusting it.
+    //
+    // Every other interdiction test attacks from a direct neighbour, so "final
+    // hop" and "every hop" are the same thing there. This one uses a two-hop
+    // route so the two differ — and removing the `w.hop >= lastHop` guard in
+    // sim/movement.js STILL passes.
+    //
+    // The reason is not a weak test, it is the traversal rule.
+    // _moveCanTraverse is `st.owner === pid`: a wave may only cross its OWN
+    // ground, so every intermediate station on every route today belongs to the
+    // wave's owner — and _chargeApproach returns early on exactly that. The
+    // final-hop guard is therefore CURRENTLY UNOBSERVABLE. It is correct and it
+    // is forward-looking, and no test can distinguish it until B1 lets a wave
+    // walk past ground it does not hold.
+    //
+    // WHEN B1 LANDS, come back here: fortify an intermediate the wave does not
+    // own and the guard becomes testable in one line. Until then this asserts the
+    // half that IS observable — that the loss is a function of TIME ON THE FINAL
+    // LINK and not of how long the march before it was.
+    //
+    // The measurement: two assaults sharing the SAME final link, one launched
+    // from the neighbour and one from a city behind it. Same time under the guns,
+    // so the same loss.
+    var sid = P.capital, cap = STATIONS[sid].capacity;
+
+    // near = a neighbour of the fortress; far = a neighbour of `near` that is not
+    // the fortress, so the route far -> near -> sid has two hops.
+    var near = null, far = null;
+    for (var i = 0; i < LINKS.length && !near; i++) {
+      var l = LINKS[i];
+      var o = (l.a === sid) ? l.b : (l.b === sid ? l.a : null);
+      if (o) near = o;
+    }
+    for (var j = 0; j < LINKS.length && !far; j++) {
+      var m = LINKS[j];
+      var q = (m.a === near) ? m.b : (m.b === near ? m.a : null);
+      if (q && q !== sid) far = q;
+    }
+    assert(near && far, 'could not find a two-hop approach to ' + sid);
+
+    function assaultFrom(src, expectHops) {
+      var s = _devtBoard('fra', sid, cap * 2);
+      applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
+      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+      assert(operatingTier(s, sid) > 0, 'the fortress is not operating');
+      setStationOwner(s, near, 'ger');
+      setStationOwner(s, far, 'ger');
+      s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+      var res = applyCommand(s, {
+        type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1,
+      });
+      assert(res.ok, 'launch from ' + src + ' failed: ' + JSON.stringify(res.rejected));
+      var w = s.waves[s.waves.length - 1];
+      assertEqual(w.path.length - 1, expectHops,
+        'the route from ' + src + ' is ' + (w.path.length - 1) + ' hops, not ' +
+        expectHops + ' — this test is not measuring what it claims');
+      var launched = totalUnits(w.units);
+      var guard = 0;
+      while (s.waves.indexOf(w) >= 0 && guard++ < 8000) movementTick(s);
+      return launched - totalUnits(w.units);
+    }
+
+    var oneHop = assaultFrom(near, 1);
+    var twoHop = assaultFrom(far, 2);
+    assert(oneHop > 0, 'the one-hop assault paid nothing; the fixture is wrong');
+
+    // THE TOLERANCE IS DERIVED FROM BOTH SIDES, not picked to make this pass.
+    //
+    // The two are not bit-identical and cannot be: the toll compounds per CHUNK
+    // of tick spent on the hop, and a two-hop wave reaches the final link partway
+    // through a tick, so the same total time under the guns arrives split
+    // differently. (1-kt1)(1-kt2) is not 1-k(t1+t2). Measured: 1.8e-7 absolute,
+    // 8.6e-8 relative.
+    //
+    // The failure being guarded against is nothing like that size. Charging every
+    // hop DOUBLES the two-hop loss — 2.04 becomes 4.08. So 1e-4 is 570x the
+    // artifact and 20,000x below the signal, and there is no value the mutation
+    // could produce that this would accept.
+    assertClose(twoHop, oneHop, 1e-4,
+      'a two-hop approach lost ' + twoHop.toFixed(4) + ' where a one-hop approach ' +
+      'over the same final link lost ' + oneHop.toFixed(4) + ' — the toll is being ' +
+      'charged on every hop, so the fortress is taxing marches that never come ' +
+      'within sight of it');
+  });
+
+  test('your own reinforcements are never bled by your own walls', function () {
+    var sid = P.capital, cap = STATIONS[sid].capacity;
+    var s = _devtBoard('ger', sid, cap * 2);
+    applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
+    s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    assert(operatingTier(s, sid) > 0, 'the fixture is not operating');
+
+    var src = null;
+    for (var i = 0; i < LINKS.length && !src; i++) {
+      var l = LINKS[i];
+      var o = (l.a === sid) ? l.b : (l.b === sid ? l.a : null);
+      if (o) src = o;
+    }
+    setStationOwner(s, src, 'ger');
+    s.stations[src].units = { infantry: 40, artillery: 0, armour: 0 };
+    applyCommand(s, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
+    var w = s.waves[s.waves.length - 1];
+    var launched = totalUnits(w.units);
+    var guard = 0;
+    while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
+    assertClose(totalUnits(w.units), launched, 1e-9,
+      'a power marching into its OWN fortress lost units to it');
   });
 
   test('port and factory are tracked and have NO effect yet — and say so', function () {

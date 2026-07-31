@@ -56,7 +56,7 @@ immediate; see `07-roadmap.md` A3 for why and what it costs.
 ## Running things
 
 ```
-node test/node.js                  the sim suite — 329 tests, 33 suites, headless
+node test/node.js                  the sim suite — 336 tests, 33 suites, headless
 node test/exact-tests.js           the deterministic-maths suite standalone
 node test/queue-tests.js           scheduled commands standalone
 node test/development-tests.js     development standalone

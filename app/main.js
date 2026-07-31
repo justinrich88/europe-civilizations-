@@ -200,6 +200,17 @@ function wireKeys() {
       return;
     }
 
+    // THE DIGITS ARE ON LOAN WHILE THE BUILD CHOOSER IS OPEN. `b` puts a numbered
+    // list on screen and 1/2/3 pick from it (render/select.js); the same keys
+    // otherwise set the send amount, and both handlers are on `document`, so
+    // without this check one keypress would both build a fortification and change
+    // the send amount underneath it.
+    //
+    // Checked here rather than fixed by listener ORDER, because listener order is
+    // invisible in both files and would be silently broken by anything that
+    // re-registered either one. The armed flag is the single fact both consult.
+    if (typeof SEL_STATE !== 'undefined' && SEL_STATE && SEL_STATE.armed === 'build') return;
+
     const ladder = (typeof BAL !== 'undefined' && BAL && BAL.SEND_FRACTIONS) || [];
     const slot = Number(ev.key) - 1;
     if (ev.key.length === 1 && slot >= 0 && slot < ladder.length) {

@@ -130,6 +130,18 @@
              the banner a pixel. -->
         <span class="send-armed" id="send-armed" hidden aria-live="polite"></span>
 
+        <!-- THE BUILD CHOOSER (04-development.md §8). Same reasoning as
+             .send-armed above and the same rules: `position: fixed` so appearing
+             cannot shift the board under a cursor, and `pointer-events: none`
+             because it floats over the map and anything over the map that accepts
+             pointer events silently eats the click that commits an attack — five
+             occurrences on this project.
+             It is KEYBOARD-ONLY by design, which is what makes pointer-events:none
+             free rather than a compromise: `b` opens it, 1/2/3 pick, Esc cancels.
+             Filled by render/select.js; it lives in this element for the same
+             reason the armed banner does. -->
+        <div class="build-chooser" id="build-chooser" hidden aria-live="polite"></div>
+
         <!-- The INF · ART · ARM type toggles used to sit here. Deleted 2026-07 on
              the player's instruction ("Delete them."). Choosing SOURCES already
              chooses types — the Ruhr makes armour, Leipzig makes artillery,
