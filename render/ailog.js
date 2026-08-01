@@ -341,12 +341,15 @@ function ailogWriteRow(rec, d) {
     rec.pow.style.color = c || '';
 
     // Pass the kind through rather than folding everything that is not a hold
-    // into "attack". There are three kinds now, not two: a 'stage' decision
-    // marches rear garrisons into a border city the power already owns, and
-    // rendering that as an ATTACK on a friendly city is not a cosmetic slip —
-    // this log is the instrument used to work out why a power is doing nothing,
-    // and it would have been reporting an assault on one's own territory.
-    var kind = (d.kind === 'hold' || d.kind === 'stage') ? d.kind : 'attack';
+    // into "attack". There are FOUR kinds now, not two: a 'stage' decision
+    // marches rear garrisons into a border city the power already owns, and a
+    // 'build' decision spends a garrison on a fortification without moving a
+    // unit anywhere. Rendering either as an ATTACK on a friendly city is not a
+    // cosmetic slip — this log is the instrument used to work out why a power is
+    // doing nothing, and it would have been reporting an assault on one's own
+    // territory.
+    var kind = (d.kind === 'hold' || d.kind === 'stage' || d.kind === 'build')
+      ? d.kind : 'attack';
     ailogSetText(rec.kind, kind);
     if (rec.row.getAttribute('data-kind') !== kind) rec.row.setAttribute('data-kind', kind);
 

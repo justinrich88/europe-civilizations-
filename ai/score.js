@@ -205,9 +205,27 @@ function _aiRound(v) {
 // it can march through ground the sim will not let it cross, every plan it
 // makes beyond its own border is rejected as 'no-route' and the power simply
 // stops playing — a failure that looks like a passive AI, not a broken rule.
+// Can a wave of `pid` march THROUGH `sid`?
+//
+// THE ROADMAP CALLED THIS EXACTLY RIGHT: "the AI's missing horizon is fixed — it
+// was never an AI bug, it was the traversal rule." This function was a second
+// copy of sim/movement.js's `st.owner === pid`, so when B1 opened passage the AI
+// went on planning against a board where it could only walk on its own ground,
+// and its horizon stayed shut for reasons that had nothing to do with the AI.
+//
+// Delegated to the sim rather than re-implemented. Two copies of a traversal rule
+// is known-issues #9 in its purest form, and this one had already drifted by a
+// whole milestone before anyone noticed — because both halves were individually
+// correct and only their AGREEMENT was wrong.
+//
+// `movePassageRelation` is the sim's own answer, and the guard is there because
+// ai/ must run with sim/movement.js absent (a build with no movement module still
+// has to boot, same rule as ai/score.js being optional to the sim).
 function _aiScoreCanTraverse(state, pid, sid) {
   var st = state.stations[sid];
-  return !!st && st.owner === pid;
+  if (!st) return false;
+  if (typeof movePassageRelation !== 'function') return st.owner === pid;
+  return true;                    // passage is open; the toll is what it costs
 }
 
 function _aiHopsFromOwn(state, pid, own, cap) {
@@ -811,10 +829,16 @@ function aiScoreTarget(state, pid, sid, ctx) {
 // hold, which is a station you can see. **Under the current traversal rule, any
 // station the AI may legally attack is a station it can currently see.**
 //
-// So this filter is a guard, not a behaviour change — and it stops being one
-// the moment either of those two facts moves (a hop map that genuinely reaches
-// two, or a passability rule that lets a wave cross ground it does not hold).
-// It is cheap and it is correct; it stays.
+// ~~So this filter is a guard, not a behaviour change~~ — **B1 MOVED BOTH FACTS,
+// exactly as the sentence below predicted, and this is now a real behaviour
+// rule.** Passage lets a wave cross ground its owner does not hold, so the AI can
+// legally attack stations it cannot see, and this filter is what stops it doing
+// so.
+//
+// That is the right behaviour and it is what makes fog load-bearing
+// (06-movement-and-attrition.md §4): the AI attacks what it KNOWS about, a
+// remembered garrison is a bet rather than a curiosity, and the player is under
+// exactly the same rule. Kept deliberately, no longer incidentally.
 function aiCandidates(state, pid, ctx) {
   if (!ctx) ctx = aiContext(state, pid);
   var out = [];

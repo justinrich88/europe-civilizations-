@@ -123,14 +123,18 @@ if (typeof exactAtanh !== 'function') {
 //   rate-capped        MAX_ORDERS_PER_MINUTE backstop tripped
 //   command-rejected   applyCommand refused the volley — see .rejected
 //
-// `staging` is not a hold reason: it is the reason carried by a decision of
-// kind 'stage', which is an ORDER, not an absence of one. It is listed here so
-// the log stays greppable from one place.
+//   building           the walk found no attack and no staging march, and the
+//                      power spent the action developing its most exposed
+//                      frontier instead (04-development.md §10.3)
+//
+// `staging` and `building` are not hold reasons: they are the reasons carried by
+// decisions of kind 'stage' and 'build', which are ORDERS, not absences of one.
+// They are listed here so the log stays greppable from one place.
 var AI_HOLD_REASONS = [
   'no-scoring-module', 'no-candidates', 'already-held', 'not-at-war',
   'already-committed', 'no-sources', 'garrison-floor', 'too-few-units',
   'no-route', 'odds-too-low', 'stage-massed', 'stage-no-feeders',
-  'rate-capped', 'command-rejected', 'staging', 'peace-exhausted',
+  'rate-capped', 'command-rejected', 'staging', 'building', 'peace-exhausted',
 ];
 
 // ---------------------------------------------------------------------------
@@ -147,9 +151,90 @@ function _aiActMemo(state) {
     state.aiMemo = {
       next: {},     // pid -> earliest tick this power may act again
       orders: {},   // pid -> [ticks of recent applyCommand calls]
+      // COMMITMENT (roadmap B3). pid -> { sid, since }. Lives in state, like
+      // everything else the sim decides from, so a snapshot still determines the
+      // future and a replay does not wander onto a different front.
+      focus: {},
     };
   }
+  // Older snapshots predate `focus`; a state restored from one must not throw.
+  if (!state.aiMemo.focus) state.aiMemo.focus = {};
   return state.aiMemo;
+}
+
+// THE COMMITMENT RULE — 07-roadmap.md B3, the fix for defeat in detail.
+//
+// B1 opened the horizon and B3 is what makes that worth having: "without it, a
+// wider horizon just means splitting force in more directions."
+//
+// A power that re-picks the best-scoring target every action interval sends its
+// first volley at one city and its second at another, because two comparable
+// fronts trade places in the ranking constantly — a garrison grows, a relation
+// drifts, a neighbour changes hands. Neither city falls. That is defeat in detail
+// (00-vision.md §8) committed by the AI against itself, and it is what the
+// r = -0.88 correlation between opening neighbours and win rate is measuring: the
+// powers with the most directions to spread in do WORST.
+//
+// So a chosen target is KEPT, and the candidate list is reordered to put it first
+// rather than the walk being special-cased. That matters: the focus still has to
+// clear the war gate, the odds floor and every other check on the way through, so
+// commitment can never make the AI do something it would otherwise refuse — it
+// only changes WHICH legal thing it does.
+//
+// Dropped when the target stops being a legal candidate at all (taken, lost from
+// view, out of reach) or when FOCUS_TICKS runs out. A ceiling, not a sentence.
+//
+// READ-ONLY, on purpose. aiDecide's contract is "MUST NOT MUTATE STATE — a test
+// calls this, inspects the result, and the board is untouched", and this runs
+// inside aiDecide. An earlier draft deleted the stale entry here, which would
+// have meant that merely ASKING what Austria would do changed what Austria did
+// next. A stale focus is therefore ignored rather than removed, and cleared by
+// _aiActSetFocus the next time the power actually acts.
+function _aiActFocus(state, pid, cands) {
+  var memo = state.aiMemo;
+  var f = (memo && memo.focus) ? memo.focus[pid] : null;
+  if (!f) return cands;
+
+  var age = state.tick - f.since;
+  if (age < 0 || age > BAL.AI.FOCUS_TICKS) return cands;
+
+  var at = -1;
+  for (var i = 0; i < cands.length; i++) {
+    if (_aiActCandSid(cands[i]) === f.sid) { at = i; break; }
+  }
+  // Not a candidate any more: taken, fogged, or no longer reachable. Nothing to
+  // hold on to, and holding on would mean ignoring the board.
+  if (at < 0) return cands;
+  if (at === 0) return cands;
+
+  // A COPY, not a splice of the caller's array. aiCandidates() returns a fresh
+  // array today, but a scorer that ever memoised one would have its cache
+  // permanently reordered by whichever power looked at it first — and that is a
+  // desync, not a slowdown.
+  var out = cands.slice();
+  var pick = out.splice(at, 1)[0];
+  out.unshift(pick);
+  return out;
+}
+
+// Remember what this power committed to. Called from aiTick with the target of
+// an ACCEPTED order, so the focus is always something that cleared every gate
+// AND that applyCommand agreed to.
+function _aiActSetFocus(state, pid, sid) {
+  if (!sid) return;
+  var memo = _aiActMemo(state);
+  var f = memo.focus[pid];
+  // Same target and the commitment has not run out: keep the ORIGINAL `since`.
+  // Refreshing it on every volley would make FOCUS_TICKS a rolling window that
+  // renews itself as long as the power keeps acting — which is to say, never
+  // expires, and the ceiling would be decorative. Once it HAS run out the entry
+  // is rewritten rather than kept, so a target the power re-picks on merit after
+  // an unbiased walk gets a fresh commitment instead of being locked out.
+  if (f && f.sid === sid) {
+    var age = state.tick - f.since;
+    if (age >= 0 && age <= BAL.AI.FOCUS_TICKS) return;
+  }
+  memo.focus[pid] = { sid: sid, since: state.tick };
 }
 
 // Adjacency over LINKS. Built once; LINKS is static so it cannot go stale.
@@ -953,6 +1038,105 @@ function _aiActPlanStage(state, pid, target, plan, minOdds, ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// Building — 04-development.md §10.3, "does the AI build? It must, or
+// development becomes a player-only advantage and the balance pass measures
+// nothing."
+//
+// THREE DELIBERATE NARROWINGS, each of which is a decision and not a stub.
+//
+// 1. FORTS ONLY. `DEV_LIVE` says fort is wired into combat and port and factory
+//    are not (04-development.md §9b). A power that spent half a city on an
+//    inert development would be paying a real cost for nothing, and the balance
+//    pass would then be measuring the AI handicapping itself rather than
+//    measuring development. It reads DEV_LIVE rather than hard-coding 'fort',
+//    so the day a port does something this starts considering ports and the
+//    choice between them becomes the real problem it is meant to be.
+//
+// 2. TIER 1 ONLY. Tier 2 costs 0.75 x capacity, so the garrison left behind is
+//    at most 0.25 x capacity and the operating tier is at most 1 — the power
+//    would pay a second tier's price for the first tier's effect and wait out
+//    the regrowth to collect. That is a bet on the future that this AI has no
+//    machinery to reason about, and breadth is the better instinct for one that
+//    cannot plan: two forted frontier cities beat one twice-forted.
+//
+// 3. IT MUST SWITCH ON IMMEDIATELY. operatingAfterBuild() has to come back at
+//    the tier just paid for. Otherwise the power spends half a city on a
+//    development that does nothing until it regrows — and it is holding
+//    precisely because it is under pressure, which is the worst moment to be
+//    carrying an unpaid-for defence.
+//
+// WHERE: the most exposed frontier — the owned station with the most neighbours
+// it does not own. "Do I own this?" is the one ownership question fog never
+// clouds (see the two-owners note in _aiActWalk), so this needs no belief layer
+// and leaks nothing. Ties break on sid, because Object.keys order is a desync.
+//
+// WHEN: only on an action the power would otherwise spend HOLDING. Building
+// never competes with fighting, so this cannot make the AI passive — it can
+// only fill in the actions it was already wasting. A frozen empire whose
+// interior is at capacity has nothing to gain by standing still, because
+// logistic growth has already stopped paying it (§2), and that is the same
+// argument that justifies staging.
+// ---------------------------------------------------------------------------
+
+function _aiActBuildKinds() {
+  var out = [];
+  if (typeof DEV_KINDS === 'undefined' || typeof DEV_LIVE === 'undefined') return out;
+  for (var i = 0; i < DEV_KINDS.length; i++) {
+    if (DEV_LIVE[DEV_KINDS[i]]) out.push(DEV_KINDS[i]);
+  }
+  return out;                                  // DEV_KINDS order — already fixed
+}
+
+// Owned stations, most-exposed first. Stations with no foreign neighbour are
+// dropped outright: an interior city cannot be attacked without the frontier
+// falling first, and forting it is spending against a threat that does not
+// exist yet.
+function _aiActFrontier(state, pid) {
+  var adj = _aiActAdjacency();
+  var out = [];
+  for (var i = 0; i < STATION_IDS.length; i++) {
+    var sid = STATION_IDS[i];
+    if (state.stations[sid].owner !== pid) continue;
+    var ns = adj[sid] || [];
+    var exposed = 0;
+    for (var j = 0; j < ns.length; j++) {
+      var n = state.stations[ns[j]];
+      if (n && n.owner !== pid) exposed++;
+    }
+    if (exposed > 0) out.push({ sid: sid, exposed: exposed });
+  }
+  out.sort(function (a, b) {
+    if (b.exposed !== a.exposed) return b.exposed - a.exposed;
+    return a.sid < b.sid ? -1 : 1;
+  });
+  return out;
+}
+
+// PURE — it runs inside aiDecide. Returns { sid, kind, tier, cost } or null.
+function _aiActPlanBuild(state, pid) {
+  // sim/development.js absent from a stripped build: no build, no noise. Same
+  // contract core/vision.js gets in aiTick.
+  if (typeof developmentPlan !== 'function' ||
+      typeof operatingAfterBuild !== 'function') return null;
+
+  var kinds = _aiActBuildKinds();
+  if (!kinds.length) return null;
+
+  var front = _aiActFrontier(state, pid);
+  for (var i = 0; i < front.length; i++) {
+    var sid = front[i].sid;
+    for (var k = 0; k < kinds.length; k++) {
+      var plan = developmentPlan(state, sid, pid, kinds[k]);
+      if (!plan.ok) continue;
+      if (plan.tier !== 1) continue;                        // narrowing 2
+      if (operatingAfterBuild(state, sid, plan.tier, plan.cost) < plan.tier) continue;
+      return { sid: sid, kind: plan.kind, tier: plan.tier, cost: plan.cost };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Decision construction and the log
 // ---------------------------------------------------------------------------
 
@@ -977,6 +1161,12 @@ function _aiActDecision(state, pid, fields) {
     // assembled against. Declared here rather than only on stage decisions so
     // every entry in the log has the same shape and no reader needs a guard.
     stageFor: null,
+
+    // Only meaningful on kind 'build': `target` is then the station being
+    // developed. Same reasoning as stageFor — one shape for every entry.
+    buildKind: null,
+    buildTier: 0,
+    buildCost: 0,
   };
   if (fields) for (var k in fields) if (fields.hasOwnProperty(k)) d[k] = fields[k];
   return d;
@@ -1025,6 +1215,11 @@ function aiDecide(state, pid) {
     return _aiActDecision(state, pid, { reason: 'no-candidates', minOdds: minOdds });
   }
 
+  // COMMITMENT (B3): a target already chosen goes to the front of the list, so
+  // the walk below prefers it over a rival that has merely drifted ahead on
+  // score. It still has to clear every gate the walk applies.
+  cands = _aiActFocus(state, pid, cands);
+
   var d = _aiActWalk(state, pid, cands, minOdds, true, ctx);
 
   // THE PEACE OF THE PARTITION. `not-at-war` as the DEEPEST reason means no
@@ -1061,6 +1256,25 @@ function aiDecide(state, pid) {
       // log. Overwriting the reason here would have made every stage decision
       // in the game ambiguous to satisfy one of them.
       return forced;
+    }
+  }
+
+  // BUILDING (04-development.md §10.3). Last, and only on a hold: every branch
+  // above returns before reaching here, so an action the power could have spent
+  // attacking or staging is never spent building instead. `reason` is REPLACED
+  // rather than kept — the hold reason described why no attack cleared, and this
+  // decision is no longer a hold, so keeping it would leave the log claiming the
+  // power did nothing on the tick it built a fortress. The reason it could not
+  // attack is still in `rejected`.
+  if (d.kind === 'hold') {
+    var b = _aiActPlanBuild(state, pid);
+    if (b) {
+      d.kind = 'build';
+      d.target = b.sid;
+      d.buildKind = b.kind;
+      d.buildTier = b.tier;
+      d.buildCost = b.cost;
+      d.reason = 'building';
     }
   }
   return d;
@@ -1327,6 +1541,49 @@ function aiTick(state) {
         var accepted = [];
         for (var a = 0; a < res.accepted.length; a++) accepted.push(res.accepted[a].source);
         decision.sources = accepted.sort();
+        power.lastActTick = state.tick;
+
+        // COMMITMENT (B3). Recorded here and nowhere else: only an order the
+        // sim ACCEPTED is a commitment, and aiTick is the only place in ai/
+        // allowed to mutate.
+        //
+        // For a stage the front is `stageFor`, not `target`. `target` on a
+        // stage is our own depot, which _aiActWalk rejects as 'already-held'
+        // and so can never be a candidate — focusing on it would pin the power
+        // to something the reorder can never find, which expires 600 ticks
+        // later having done nothing. The front the mass is being assembled
+        // against is precisely the thing worth not abandoning.
+        _aiActSetFocus(state, pid,
+          decision.kind === 'stage' ? decision.stageFor : decision.target);
+      }
+    } else if (decision.kind === 'build') {
+      // `stations`, not `sources` — the build command's array has a different
+      // name from a send's, and getting it wrong is a silent 'no-stations'
+      // rejection rather than an error (CLAUDE.md, command shapes).
+      //
+      // Counted against MAX_ORDERS_PER_MINUTE like any other order: the backstop
+      // exists to bound how much this power can do per minute, and a build is
+      // something it did.
+      memo.orders[pid].push(state.tick);
+      var bres = applyCommand(state, {
+        type: 'build',
+        owner: pid,
+        stations: [decision.target],
+        kind: decision.buildKind,
+      });
+      if (bres.rejected && bres.rejected.length) {
+        decision.rejected = decision.rejected.concat(bres.rejected);
+      }
+      if (!bres.ok) {
+        decision.kind = 'hold';
+        decision.reason = 'command-rejected';
+      } else {
+        // The operating tier the sim actually reports, not the one the planner
+        // predicted — if those ever disagree the log is where it shows, and a
+        // decision that recorded its own prediction could never disagree with
+        // itself (known-issues #18).
+        decision.buildTier = bres.accepted[0].tier;
+        decision.buildCost = bres.accepted[0].cost;
         power.lastActTick = state.tick;
       }
     }

@@ -225,6 +225,16 @@ does work is the share of marches crossing ground the sender does not hold, and 
 went 0% → 3.4%. It is low because **B3 has not happened**, not because the
 constants are wrong.
 
+> **That last sentence was wrong, and B3 disproved it.** Re-measured at 12,000
+> ticks on seeds 100–103 after B3 landed, the share went **4.1% → 2.9%** — down,
+> not up. The prediction assumed a choosier AI would reach further; commitment
+> does the opposite, because a power that keeps hitting the target it already
+> picked stops reaching past it, and an action spent developing is an action not
+> spent marching. Passage usage is therefore **not** the instrument for whether
+> the AI is using its horizon well, and nothing should be tuned against it.
+> Left standing rather than rewritten, because the reasoning that produced the
+> wrong prediction is the part worth keeping.
+
 Fixed by it, as promised:
 
 - Multi-hop movement becomes true, as §8 always claimed.
@@ -242,12 +252,53 @@ Requested, and a **provable no-op until B1** — armies never travel anywhere
 already dark. Afterwards it enables scouting, which is a genuinely new
 strategic action using the existing verb.
 
-### B3. AI target selection
+### ~~B3. AI target selection~~ — SHIPPED 2026-08
 
 B1 hands the AI a horizon; it must then learn to **choose**. This is the fix
 for defeat in detail — the failure the r = −0.88 correlation between opening
 neighbours and win rate is measuring. Without it, a wider horizon just means
 splitting force in more directions.
+
+What landed, in three parts:
+
+**1. Commitment.** A target a power actually got an order accepted against is
+KEPT, for at most `BAL.AI.FOCUS_TICKS` (600). Implemented as a REORDER of the
+candidate list, not as a special case in the walk — the focus still has to clear
+the war gate, the odds floor, the garrison floor and everything else, so
+commitment can never make a power do something it would otherwise refuse. It
+only changes WHICH legal thing it does. A stage commits to its `stageFor`, never
+to the depot: the depot is the power's own ground and can therefore never be a
+candidate, so that focus would expire 600 ticks later having done nothing.
+Dropped when the target stops being a candidate at all — taken, fogged, out of
+reach — because holding on would mean ignoring the board.
+
+**The reorder is read-only.** `aiDecide`'s contract is that a test, or a console
+`aiDecisions()` call, may read it with the board untouched; an earlier draft
+cleared the stale entry inside the reorder, which would have meant that asking
+what Austria would do silently retargeted Austria.
+
+**2. The traversal rule, deduplicated.** `ai/score.js` kept its own copy of "can
+a wave enter this station" that still said `owner === pid`. B1 moved that rule
+and this copy did not follow — the second implementation of one rule, which is
+the defect this project has logged five times. It now delegates.
+
+**3. The AI builds** — `04-development.md` §10.3, closed. See there for the
+three narrowings and what was measured.
+
+**Verification.** `test/commitment-tests.js`, 16 tests, separate from
+`test/ai-tests.js` so that suite keeps its written-blind-to-the-implementation
+property. Every assertion was mutation-tested: eleven mutations of `ai/ai.js`,
+each caught. Four of them survived the first draft and forced the tests to be
+rewritten — three of the build rules are effectively invisible in ordinary play
+(158 builds across five seeds x 6,000 ticks, and only EIGHT had more than one
+legal site to choose between), so the run-based ordering test passed with the
+comparison reversed. Replaced with built fixtures that state the choice instead
+of hoping for one.
+
+`render/ailog.js` rendered anything that was not a hold as *attack*; a build now
+renders as a build. Unfixed, the panel showed the fortification of Beauce as one
+of eleven assaults — checked against the shipped page, not a copy of it, because
+no harness covers that file.
 
 ---
 
@@ -269,14 +320,19 @@ inert, and the 800px measurement of the pips.
 
 **It landed before C1 and before B1, deliberately.** C1 first is still the right
 sequencing and the spend is written through `splitUnits()` so the collapse costs it
-nothing. B1 is the more interesting omission: its interaction with development is
+nothing. ~~B1 is the more interesting omission: its interaction with development is
 the point — fortification taxes armies that go *past* a city, which is what stops
 defensive investment freezing the board — and **that half does not exist yet**, so
-what is playable now is the investment without its release valve. Read any
-stalemate seen in playtesting with that in mind.
+what is playable now is the investment without its release valve.~~ **B1 shipped,
+and the release valve with it**: fortification interdicts armies closing on a
+forted city, so a wall is a tax on the ground around it rather than only on the
+assault that reaches it.
 
-**The AI does not build** (`04-development.md` §10.3), so development is a
-player-only mechanic today and the balance hashes did not move at all.
+~~**The AI does not build** (`04-development.md` §10.3), so development is a
+player-only mechanic today and the balance hashes did not move at all.~~ **It
+builds, as of B3** — 75–88 builds a game across seeds 100–103, and the hashes
+moved a very long way. See `04-development.md` §10.3 for the three narrowings and
+what was measured.
 
 ### C3. Route state and the standings panel
 

@@ -481,7 +481,7 @@ function suiteAI(d) {
   // The decision object. §6: a passive AI is otherwise undebuggable.
   // -------------------------------------------------------------------------
 
-  test('every logged decision carries the pinned fields; kind is only attack|hold|stage', function () {
+  test('every logged decision carries the pinned fields; kind is only attack|hold|stage|build', function () {
     var s = newGame(9007);
     _aiRun(s, 400);
     // The opening is a land grab, so it produces attacks and holds but rarely a
@@ -497,11 +497,21 @@ function suiteAI(d) {
       'power that decided to hold must not look the same (§6)');
 
     log = log.concat(extra);
-    var staged = 0;
-    for (var q = 0; q < log.length; q++) if (log[q].kind === 'stage') staged++;
+    var staged = 0, builtN = 0;
+    for (var q = 0; q < log.length; q++) {
+      if (log[q].kind === 'stage') staged++;
+      if (log[q].kind === 'build') builtN++;
+    }
     assert(staged > 0,
       'no decision of kind "stage" was logged on a board built to require one — ' +
       'this test cannot check the shape of a decision it never sees');
+    // Same guard for the same reason (known-issues #8): the build arms below
+    // assert nothing at all if no power ever builds, and a suite that goes green
+    // because a feature stopped firing is worse than no suite.
+    assert(builtN > 0,
+      'no decision of kind "build" was logged in 800 ticks across two boards — ' +
+      'either the AI stopped building (04-development.md §10.3) or this test is ' +
+      'checking a shape it never sees');
 
     var pinned = ['tick', 'power', 'kind', 'target', 'score', 'terms', 'odds',
                   'minOdds', 'sources', 'fraction', 'reason', 'rejected'];
@@ -511,9 +521,10 @@ function suiteAI(d) {
       for (var k = 0; k < pinned.length; k++) {
         if (!(pinned[k] in dd)) problems.push(tag + ' missing field "' + pinned[k] + '"');
       }
-      if (dd.kind !== 'attack' && dd.kind !== 'hold' && dd.kind !== 'stage') {
+      if (dd.kind !== 'attack' && dd.kind !== 'hold' && dd.kind !== 'stage' &&
+          dd.kind !== 'build') {
         problems.push(tag + ' kind is ' + _aiJson(dd.kind) +
-                      ', only attack|hold|stage are legal');
+                      ', only attack|hold|stage|build are legal');
       }
       if (typeof dd.tick !== 'number') problems.push(tag + ' tick is not a number');
       if (!P[dd.power] || dd.power === 'neutral') {
@@ -548,6 +559,30 @@ function suiteAI(d) {
         }
         if (dd.sources && dd.sources.indexOf(dd.target) >= 0) {
           problems.push(tag + ' staged a depot into itself');
+        }
+      }
+      if (dd.kind === 'build') {
+        // A build is an ORDER against a station the power ALREADY OWNS, and the
+        // contract narrows it three ways (01-data-schema.md, "The decision
+        // object"): a live development kind, tier 1, and it must have been the
+        // sim that reported the tier rather than the planner predicting it.
+        if (typeof dd.target !== 'string' || !dd.target) {
+          problems.push(tag + ' build target is ' + _aiJson(dd.target));
+        }
+        if (typeof DEV_LIVE !== 'undefined' && !DEV_LIVE[dd.buildKind]) {
+          problems.push(tag + ' built ' + _aiJson(dd.buildKind) +
+                        ', which has no effect wired up — a real cost for nothing');
+        }
+        if (dd.buildTier !== 1) {
+          problems.push(tag + ' built tier ' + _aiJson(dd.buildTier) +
+                        '; the AI is pinned to tier 1 (it can never operate a tier 2 ' +
+                        'at the moment it pays for one)');
+        }
+        if (!(typeof dd.buildCost === 'number' && dd.buildCost > 0 && isFinite(dd.buildCost))) {
+          problems.push(tag + ' build cost is ' + _aiJson(dd.buildCost));
+        }
+        if (dd.reason !== 'building') {
+          problems.push(tag + ' build reason is ' + _aiJson(dd.reason) + ', expected "building"');
         }
       }
       if (!Array.isArray(dd.sources)) problems.push(tag + ' sources is not an array');

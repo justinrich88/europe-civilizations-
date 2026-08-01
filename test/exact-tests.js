@@ -354,11 +354,23 @@ function suiteExact() {
     // cheap enough that nobody is tempted to skip the suite.
     //
     // Read the header before treating a green here as portability evidence.
+    //
+    // RE-PINNED at B3 (07-roadmap.md). The AI now commits to a target and
+    // develops its frontier, so the pre-B3 values could not have survived and a
+    // green here would have meant the change did nothing. What was measured
+    // instead of asserting good faith, at 12,000 ticks on seeds 100-103: no
+    // maths moved, and both kinds of divergence the message below distinguishes
+    // are present at once — a SHAPE change (state.aiMemo.focus, and a
+    // development on 34-58 stations that previously never existed) and a
+    // BEHAVIOUR change (different wars, therefore a different log). The byte
+    // count moved +20,763 on seed 100 and +23,240 on seed 101 — different
+    // amounts, which is the signature of the second. The commit message carries
+    // the board diff.
     var s100 = newGame(100);
     for (var i = 0; i < 2000; i++) stepTick(s100);
     var h100 = _exatStateHash(s100);
-    assertEqual(h100.hash, 3903657434, 'seed 100 diverged after 2000 ticks — state is now ' +
-      h100.bytes + ' bytes of JSON against a pinned 126784. READ THE BYTE COUNT CAREFULLY: ' +
+    assertEqual(h100.hash, 4194702681, 'seed 100 diverged after 2000 ticks — state is now ' +
+      h100.bytes + ' bytes of JSON against a pinned 147547. READ THE BYTE COUNT CAREFULLY: ' +
       'it moves for BOTH kinds of change and cannot tell them apart on its own. A new field ' +
       'on the state moves it by a fixed amount on every seed (A3 moved it +76 on all four); ' +
       'different arithmetic moves it by a different amount on each seed, because a different ' +
@@ -368,8 +380,8 @@ function suiteExact() {
     var s101 = newGame(101);
     for (var j = 0; j < 2000; j++) stepTick(s101);
     var h101 = _exatStateHash(s101);
-    assertEqual(h101.hash, 3149818761, 'seed 101 diverged after 2000 ticks — state is now ' +
-      h101.bytes + ' bytes of JSON against a pinned 127284');
+    assertEqual(h101.hash, 1811313136, 'seed 101 diverged after 2000 ticks — state is now ' +
+      h101.bytes + ' bytes of JSON against a pinned 150524');
   });
 
   test('the pin would notice a one-bit change — it is not hashing a constant', function () {

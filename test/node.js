@@ -25,7 +25,7 @@ const SCRIPTS = [
   // a context with no `document` and no `window`.
   'render/standings.js',
   'test/asserts.js', 'test/exact-tests.js', 'test/queue-tests.js',
-  'test/development-tests.js', 'test/ai-tests.js',
+  'test/development-tests.js', 'test/ai-tests.js', 'test/commitment-tests.js',
   'test/fog-tests.js',
   'test/help-tests.js',
   'test/scenarios-standings.js', 'test/scenarios-routes.js',

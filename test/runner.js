@@ -279,6 +279,12 @@ function runAllTests() {
   // AI family — test/ai-tests.js; skips loudly until ai/ lands.
   if (typeof suiteAI === 'function') suiteAI(d);
 
+  // Commitment and building — test/commitment-tests.js (07-roadmap.md B3).
+  // AFTER suiteAI, deliberately: that suite is written blind to ai/ai.js and
+  // pins the contract, this one knows the mechanism and probes it. A contract
+  // failure explains a mechanism failure, never the other way round.
+  if (typeof suiteCommitment === 'function') suiteCommitment();
+
   // Fog family — test/fog-tests.js; skips loudly until core/vision.js lands.
   if (typeof suiteFog === 'function') suiteFog(d);
 
@@ -3268,16 +3274,32 @@ function suiteStandingOrders(d) {
             if (srcs.length) _ordLink(s, q, srcs, cap);
           }
         }
+        var epochBefore = s.ownerEpoch || 0;
         stepTick(s);
+        var captured = (s.ownerEpoch || 0) !== epochBefore;
 
         // Independent of the tripwire, and from the other end of the rule: a
-        // standing wave must be planned entirely over ground its owner holds.
+        // standing wave must be PLANNED entirely over ground its owner holds.
         // Checked on every wave the moment it appears, so thousands of real
         // launches are inspected rather than the end state alone.
+        //
+        // ONLY WHEN NOTHING CHANGED HANDS THIS TICK, and that qualifier is the
+        // difference between a rule and a race. Standing orders are planned in
+        // phase 3 and combat resolves in phase 5, so a station on a
+        // correctly-planned path can change owner later in the SAME tick — the
+        // wave was legal when it was made and the sim handles the rest by standing
+        // it down at that station. Reading the board after a full stepTick and
+        // calling that a routing violation blames the planner for a capture that
+        // had not happened yet.
+        //
+        // It surfaced when the AI's horizon opened (B3) and it started taking
+        // ground fast enough for the race to be common. The rule did not change;
+        // the sampling window was always slightly wrong and had never been caught.
         for (var w = 0; w < s.waves.length; w++) {
           var wv = s.waves[w];
           if (wv.id <= seenWave || !wv.standing) continue;
           totalLaunched++;
+          if (captured) continue;
           for (var h = 0; h < wv.path.length; h++) {
             if (s.stations[wv.path[h]].owner !== wv.owner) {
               pathViolations.push(wv.from + '->' + wv.to + ' via ' + wv.path[h]);

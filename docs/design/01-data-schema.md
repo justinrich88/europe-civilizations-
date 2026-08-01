@@ -507,11 +507,15 @@ Both files read this, so it is contractual rather than an implementation detail:
 ```js
 {
   tick, power,
-  kind:    'attack' | 'hold' | 'stage',
+  kind:    'attack' | 'hold' | 'stage' | 'build',
   target:  'bru' | null,   // on 'stage' this is the DEPOT being reinforced,
-                           // a station the power already owns
+                           // a station the power already owns; on 'build' it is
+                           // the station being developed, likewise already owned
   stageFor: 'ist' | null,  // 'stage' only: the enemy station the mass is being
                            // assembled against
+  buildKind: 'fort' | null,  // 'build' only
+  buildTier: 1,              // 'build' only: the tier PAID FOR, read back from
+  buildCost: 18.5,           // applyCommand's accepted[0] rather than predicted
   score:   14.2,
   terms:   { multiplier: 3.0, weakness: 2.1, proximity: 1.2, ... },
   odds:    2.4,          // estimated attacker:defender POWER ratio, not units
@@ -523,6 +527,7 @@ Both files read this, so it is contractual rather than an implementation detail:
                                 // through another power's ground
                 | 'stage-massed' | 'stage-no-feeders'
                 | 'staging'          // always, and only, on kind 'stage'
+                | 'building'         // always, and only, on kind 'build'
                 | 'peace-exhausted', // on an ATTACK: nothing was reachable but
                                      // ground held by a power at peace
   rejected: []           // populated only when BAL.AI.LOG_REJECTED
@@ -543,9 +548,25 @@ sources hold cannot attack, and holding does nothing, so it stands still
 forever while its interior sits at capacity not growing. Staging never sends
 anything at an enemy; it changes where the power's own units are standing.
 
+`kind: 'build'` is also an order — a `{type:'build'}` command through the same
+`applyCommand`. It is considered **last and only on a hold**, after attack and
+after staging, so building can never displace fighting; it fills in the actions
+a power was already spending on nothing. Narrowed three ways, each of which is a
+decision (`ai/ai.js`, above `_aiActPlanBuild`): **live kinds only** — read off
+`DEV_LIVE`, so today that is forts and nothing else, because a power that spent
+half a city on an inert development would be handicapping itself and the balance
+pass would measure that instead of measuring development; **tier 1 only**, since
+tier 2 costs 0.75 x capacity and can therefore never operate above tier 1 at the
+moment it is paid for; and **it must switch on immediately** —
+`operatingAfterBuild()` must return the tier just bought. It builds on the most
+exposed frontier: the owned station with the most neighbours it does not own.
+That question — *do I own this?* — is the one ownership fact fog never clouds,
+so it needs no belief layer.
+
 `render/ailog.js` renders any non-`hold` kind with the label *attack*, so a
 staging decision currently reads as an attack on a friendly city with reason
-`staging`. Cosmetic, and the panel is outside the AI's ownership.
+`staging`, and a build reads as one with reason `building`. Cosmetic, and the
+panel is outside the AI's ownership.
 
 ### Log storage
 

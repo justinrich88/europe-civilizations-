@@ -705,6 +705,17 @@ html, body {
   background: transparent;
 }
 
+/* A build moves nothing at all — it spends a garrison where it stands. It is
+   therefore NOT in the attack/stage family and does not borrow their accent:
+   dashed, in the neutral line colour, so it reads as the one kind that is not an
+   army going somewhere. Deliberately quieter than a stage, because it is the
+   less consequential decision and §8 reserves the loud end of the palette. */
+.ailog-row[data-kind="build"] .ailog-kind {
+  color: var(--ink-dim);
+  border: 1px dashed var(--link-sea);
+  background: transparent;
+}
+
 .ailog-target {
   width: 120px;
   flex: 0 0 auto;

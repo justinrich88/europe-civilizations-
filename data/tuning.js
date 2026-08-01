@@ -624,6 +624,27 @@ const BAL = {
     // outside the cadence.
     MAX_ORDERS_PER_MINUTE: 20,
 
+    // --- COMMITMENT: the defeat-in-detail fix (roadmap B3) ---
+
+    // Ticks a power stays committed to a target once it has chosen one.
+    //
+    // WHY THIS EXISTS. B1 opened the AI's horizon, and 07-roadmap.md B3 warned
+    // exactly what that buys on its own: "without it, a wider horizon just means
+    // splitting force in more directions." The candidate scores of two comparable
+    // fronts drift past each other constantly — a garrison grows, a relation
+    // moves, a neighbour is captured — and a power that re-picks the best target
+    // every ACTION_INTERVAL_TICKS sends the first wave at one city, the second at
+    // another, and takes neither. That is DEFEAT IN DETAIL, which 00-vision.md §8
+    // names as the defining mistake of the game, committed by the AI against
+    // itself.
+    //
+    // 600 ticks is 60 sim-seconds, or fifteen action intervals — long enough for
+    // several volleys to land at one place, short enough that a power is not stuck
+    // on a target that has become hopeless. The focus is ALSO dropped early the
+    // moment the target stops being a legal candidate, so this is a ceiling rather
+    // than a sentence.
+    FOCUS_TICKS: 600,
+
     // --- Target selection: "think in fronts" ---
 
     // The AI picks ONE target station and a commitment budget, rather than

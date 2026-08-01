@@ -444,6 +444,35 @@ are gated at belief level 2. The 108-stations-of-mush case does not arise.
    deliberately **not** proposed: `00-vision.md` §12 already flags multiplier
    reach as the mechanic most likely to prove too strong or too invisible, and
    amplifying it before it is understood is the wrong order.
-3. **Does the AI build?** It must, or development becomes a player-only
-   advantage and the balance pass measures nothing. `aiTick` is the seam. This
-   is real work and is not costed here.
+3. ~~**Does the AI build?**~~ **It does, as of B3.** `aiTick` was the seam, as
+   expected. `ai/ai.js` `_aiActPlanBuild()` — considered LAST in `aiDecide`,
+   after attack and after staging, so building can never displace an order that
+   moves units; it fills in the actions a power was already spending on nothing.
+   Narrowed three ways:
+
+   * **Live kinds only**, read off `DEV_LIVE` rather than hard-coded. Today that
+     means forts. A power that spent half a city on a port would be paying a
+     real cost for nothing, and the balance pass would then be measuring the AI
+     handicapping itself instead of measuring development. The day a port does
+     something, this starts weighing ports and §5's "choosing is the decision"
+     becomes the AI's problem too.
+   * **Tier 1 only.** A tier 2 costs 0.75 x capacity and needs 0.5 x capacity
+     left standing to run, so it wants 1.25 x capacity — reachable in the
+     overflow band, and it means paying a second tier's price for the first
+     tier's effect and waiting out the regrowth to collect. That is a bet on the
+     future this AI has no machinery to reason about, and breadth is the better
+     instinct for a chooser that cannot plan: two forted cities beat one
+     twice-forted.
+   * **It must switch on immediately** — `operatingAfterBuild()` must return the
+     tier just paid for. A power builds precisely when it is stuck, which is the
+     worst moment to be carrying a defence it has not finished paying for.
+
+   It builds on the most exposed frontier: the owned station with the most
+   neighbours it does not own. *Do I own this?* is the one ownership question
+   fog never clouds, so this needs no belief layer and leaks nothing.
+
+   **Measured at 12,000 ticks on seeds 100–103**: 75–88 builds per game, of
+   which 34–58 forts were still standing at the end — the rest were destroyed by
+   capture, which is §5's "a cost of it being destroyed" working with no damage
+   model. Every one of them operating at the tier paid for. Both halves of the
+   loop are live in AI play, not just in the player's hands.
