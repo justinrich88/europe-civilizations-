@@ -239,9 +239,36 @@ the far end of a scale that exists.
 
 **This could deepen the grind instead of fixing it.** If tolls and attrition
 are set high, nobody ever leaves their border and the game is exactly what it
-is today, with more arithmetic. The tell is the **mean number of hops from
+is today, with more arithmetic. ~~The tell is the **mean number of hops from
 border to target** in AI decisions — if it stays at 1 after this ships, the
-numbers are wrong, not the design. Instrument that before tuning anything.
+numbers are wrong, not the design.~~
+
+> **SHIPPED 2026-07, AND THE INSTRUMENT THIS SECTION SPECIFIED DOES NOT
+> DISCRIMINATE. Its premise was wrong.**
+>
+> Measured across seeds 100–103, 6,000 ticks, 4,473 manual waves:
+>
+> | | before B1 | after B1 |
+> |---|---|---|
+> | mean hops to target | **2.163** | **2.226** |
+> | marches crossing ground the sender does not hold | **0** | **151 (3.4%)** |
+> | columns destroyed en route | 0 | 1,040 |
+>
+> **Mean hops was never 1.** It was already 2.16, because a power holds
+> contiguous territory and own-ground routing already produced two- and
+> three-hop paths inside it. So "if it stays at 1, the numbers are wrong" could
+> never have fired, and B1 moved it by 3% — which says nothing either way.
+>
+> **The instrument that does discriminate is the second row**: the share of
+> marches that actually use the new capability. It went 0% → 3.4%, which is the
+> honest measure of passage existing.
+>
+> **3.4% is low, and the reason is B3, not the constants.** The AI's target
+> selection is unchanged, so it still mostly picks what it borders; passage is
+> available and rarely chosen. The roadmap already predicted this — "B1 hands the
+> AI a horizon; it must then learn to *choose*" — so the number to re-measure
+> after B3 is this one, and **tuning `TOLL_HOSTILE` or `MARCH_LOSS_PER_TICK`
+> against 3.4% now would be tuning against an AI that is not yet trying.**
 
 **It could also invert into chaos.** If passage is cheap, front lines stop
 meaning anything and the board becomes raids crossing through each other. The

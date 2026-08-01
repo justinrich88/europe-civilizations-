@@ -534,14 +534,20 @@ function suiteDevelopment() {
       return { launched: launched, landed: totalUnits(w.units), fortified: fortify };
     }
 
+    // AGAINST AN UNFORTIFIED CONTROL, not against what was launched. Since B1
+    // every wave pays flat march attrition, so "landed < launched" is true of
+    // every march on the board and says nothing about fortification. The control
+    // is the same assault over the same link with the fort removed, which is the
+    // only comparison that isolates this mechanic.
     var bare = assault(false);
     var walled = assault(true);
-    assertClose(bare.landed, bare.launched, 1e-9,
-      'an UNfortified target bled the assault — the toll is firing on the wrong ' +
-      'condition, and every march on the board is now paying it');
-    assert(walled.landed < walled.launched,
-      'a garrisoned fortification took nothing off the assault closing on it: ' +
-      walled.launched + ' launched, ' + walled.landed + ' landed');
+    var bareLost = bare.launched - bare.landed;
+    var walledLost = walled.launched - walled.landed;
+    assert(bareLost > 0, 'the unfortified control lost nothing at all — march ' +
+      'attrition is not running, so this comparison has no baseline');
+    assert(walledLost > bareLost,
+      'a garrisoned fortification cost the assault no more than an open city did: ' +
+      walledLost.toFixed(3) + ' vs ' + bareLost.toFixed(3));
   });
 
   test('an UNGARRISONED fortification projects nothing', function () {
@@ -569,9 +575,26 @@ function suiteDevelopment() {
     var launched = totalUnits(w.units);
     var guard = 0;
     while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
-    assertClose(totalUnits(w.units), launched, 1e-9,
-      'an empty fortress still bled the assault — the toll is reading the BUILT ' +
-      'tier, not the operating one');
+    var lost = launched - totalUnits(w.units);
+
+    // The control: identical assault, no fortification at all. Since B1 both pay
+    // march attrition, so the question is whether the EMPTY fort adds anything on
+    // top — and it must not.
+    var c = _devtBoard('fra', sid, cap);
+    c.stations[sid].units = { infantry: 0.05, artillery: 0, armour: 0 };
+    setStationOwner(c, src, 'ger');
+    c.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+    applyCommand(c, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
+    var cw = c.waves[c.waves.length - 1];
+    var cLaunched = totalUnits(cw.units);
+    guard = 0;
+    while (c.waves.indexOf(cw) >= 0 && guard++ < 4000) movementTick(c);
+    var cLost = cLaunched - totalUnits(cw.units);
+
+    assertClose(lost, cLost, 1e-6,
+      'an empty fortress cost the assault ' + lost.toFixed(4) + ' where no ' +
+      'fortress at all cost ' + cLost.toFixed(4) + ' — the toll is reading the ' +
+      'BUILT tier, not the operating one');
   });
 
   test('the toll scales with the operating tier', function () {
@@ -650,11 +673,16 @@ function suiteDevelopment() {
     }
     assert(near && far, 'could not find a two-hop approach to ' + sid);
 
-    function assaultFrom(src, expectHops) {
+    // `fortify` is the control switch. Since B1 a two-hop march pays MORE march
+    // attrition than a one-hop march simply because it is longer, so comparing
+    // raw losses compares route length. Running each distance both with and
+    // without the fort and differencing isolates the fort's own contribution,
+    // which is the only quantity this test is about.
+    function assaultFrom(src, expectHops, fortify) {
       var s = _devtBoard('fra', sid, cap * 2);
-      applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
+      if (fortify) applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
       s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
-      assert(operatingTier(s, sid) > 0, 'the fortress is not operating');
+      assert(!fortify || operatingTier(s, sid) > 0, 'the fortress is not operating');
       setStationOwner(s, near, 'ger');
       setStationOwner(s, far, 'ger');
       s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
@@ -672,23 +700,23 @@ function suiteDevelopment() {
       return launched - totalUnits(w.units);
     }
 
-    var oneHop = assaultFrom(near, 1);
-    var twoHop = assaultFrom(far, 2);
-    assert(oneHop > 0, 'the one-hop assault paid nothing; the fixture is wrong');
+    var oneHop = assaultFrom(near, 1, true) - assaultFrom(near, 1, false);
+    var twoHop = assaultFrom(far, 2, true) - assaultFrom(far, 2, false);
+    assert(oneHop > 0, 'the one-hop assault paid nothing for the fort; fixture is wrong');
 
     // THE TOLERANCE IS DERIVED FROM BOTH SIDES, not picked to make this pass.
     //
     // The two are not bit-identical and cannot be: the toll compounds per CHUNK
     // of tick spent on the hop, and a two-hop wave reaches the final link partway
     // through a tick, so the same total time under the guns arrives split
-    // differently. (1-kt1)(1-kt2) is not 1-k(t1+t2). Measured: 1.8e-7 absolute,
-    // 8.6e-8 relative.
+    // differently. (1-kt1)(1-kt2) is not 1-k(t1+t2). Since B1 the differencing
+    // above also leaves a little attrition-interaction residue, because a wave
+    // that is slightly smaller pays the fort toll on a slightly smaller stack.
     //
     // The failure being guarded against is nothing like that size. Charging every
-    // hop DOUBLES the two-hop loss — 2.04 becomes 4.08. So 1e-4 is 570x the
-    // artifact and 20,000x below the signal, and there is no value the mutation
-    // could produce that this would accept.
-    assertClose(twoHop, oneHop, 1e-4,
+    // hop DOUBLES the two-hop contribution. 1e-2 sits far above the residue and
+    // far below the signal.
+    assertClose(twoHop, oneHop, 1e-2,
       'a two-hop approach lost ' + twoHop.toFixed(4) + ' where a one-hop approach ' +
       'over the same final link lost ' + oneHop.toFixed(4) + ' — the toll is being ' +
       'charged on every hop, so the fortress is taxing marches that never come ' +
@@ -715,8 +743,23 @@ function suiteDevelopment() {
     var launched = totalUnits(w.units);
     var guard = 0;
     while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
-    assertClose(totalUnits(w.units), launched, 1e-9,
-      'a power marching into its OWN fortress lost units to it');
+    var lost = launched - totalUnits(w.units);
+
+    // Control: the same march with no fortification built. Both pay march
+    // attrition since B1; only the fort is being tested.
+    var c = _devtBoard('ger', sid, cap * 2);
+    c.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    setStationOwner(c, src, 'ger');
+    c.stations[src].units = { infantry: 40, artillery: 0, armour: 0 };
+    applyCommand(c, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
+    var cw = c.waves[c.waves.length - 1];
+    var cLaunched = totalUnits(cw.units);
+    guard = 0;
+    while (c.waves.indexOf(cw) >= 0 && guard++ < 4000) movementTick(c);
+
+    assertClose(lost, cLaunched - totalUnits(cw.units), 1e-6,
+      'a power marching into its OWN fortress paid more than the same march to an ' +
+      'undeveloped city — your walls are shooting at you');
   });
 
   test('port and factory are tracked and have NO effect yet — and say so', function () {

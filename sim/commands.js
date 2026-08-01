@@ -122,13 +122,18 @@ function _cmdFallbackRoute(fromSid, toSid, canPass) {
 // still give the SAME verdict as the real rule, or the one time it runs it
 // accepts a volley that then marches into a garrison it should have fought
 // (docs/testing/known-issues.md #9, #20).
-function commandRoute(fromSid, toSid, state, pid) {
+// `standingOnly` keeps a supply line on its owner's own ground (B1). Passage is
+// for armies, not for logistics — see the note at routeFor() in sim/movement.js
+// for why an unattended trickle routed through hostile country is worse than no
+// route at all. The fallback below mirrors it, as it always has.
+function commandRoute(fromSid, toSid, state, pid, standingOnly) {
   var canPass = null;
   if (state && state.stations && pid) {
-    if (typeof routeFor === 'function') return routeFor(state, pid, fromSid, toSid);
+    if (typeof routeFor === 'function') return routeFor(state, pid, fromSid, toSid, standingOnly);
     canPass = function (sid) {
       var st = state.stations[sid];
-      return !!st && st.owner === pid;
+      if (!st) return false;
+      return standingOnly ? st.owner === pid : true;
     };
   } else if (typeof routeBetween === 'function') {
     return routeBetween(fromSid, toSid);
@@ -367,7 +372,7 @@ function applyCommand(state, cmd) {
     // ground another power holds has no legal send, and is rejected here rather
     // than being quietly marched through the enemy. Per-source, like every
     // other check in this loop: the rest of the volley still goes.
-    var path = commandRoute(src, target, state, owner);
+    var path = commandRoute(src, target, state, owner, !!cmd.standing);
     if (!path || path.length < 2) { _cmdReject(result, src, 'no-route'); continue; }
 
     plans.push({ source: src, units: take, path: path });

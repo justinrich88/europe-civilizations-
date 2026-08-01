@@ -1906,6 +1906,49 @@ function _routeDiamond(adj) {
   return null;
 }
 
+// A diamond whose two middles offer routes of COMPARABLE length.
+//
+// _routeDiamond takes the first diamond it finds, and since B1 that is not good
+// enough for any test about the router preferring one door: the first diamond on
+// this map is aal->{aar,got}->ham, where via aar is 58 units of distance and via
+// got is 184. The router correctly keeps going through a heavily-held aar,
+// because a 3x detour is not worth avoiding a front — and a test that called that
+// a failure was asserting something the design does not claim.
+//
+// "Pay the toll and go around" is only a real choice when going around is
+// comparable, so the fixture has to supply one. `maxRatio` is how much longer the
+// alternative may be; 1.6 leaves the toll (worth ~2 median links) able to decide.
+function _routeFairDiamond(adj, idx, maxRatio) {
+  var ids = Object.keys(adj).sort();
+  var lim = maxRatio || 1.6;
+  for (var i = 0; i < ids.length; i++) {
+    for (var j = 0; j < ids.length; j++) {
+      var a = ids[i], dd = ids[j];
+      if (a >= dd) continue;
+      if (adj[a].indexOf(dd) >= 0) continue;
+      var mids = adj[a].filter(function (x) { return adj[dd].indexOf(x) >= 0; }).sort();
+      if (mids.length < 2) continue;
+      var cost = mids.map(function (m) {
+        var d1 = idx[a + '|' + m], d2 = idx[m + '|' + dd];
+        return (d1 && d2) ? d1 + d2 : Infinity;
+      });
+      var lo = Math.min.apply(null, cost), hi = Math.max.apply(null, cost);
+      if (!isFinite(hi) || lo <= 0) continue;
+      if (hi / lo <= lim) return { a: a, d: dd, mids: mids, cost: cost };
+    }
+  }
+  return null;
+}
+
+function _routeLinkIndex(LINKS) {
+  var idx = {};
+  for (var i = 0; i < LINKS.length; i++) {
+    idx[LINKS[i].a + '|' + LINKS[i].b] = LINKS[i].dist;
+    idx[LINKS[i].b + '|' + LINKS[i].a] = LINKS[i].dist;
+  }
+  return idx;
+}
+
 // A dead end: a station of degree 1 is reachable ONLY through its single
 // neighbour, so that neighbour is a genuine cut vertex and no detour exists.
 function _routeDeadEnd(adj) {
@@ -1970,392 +2013,365 @@ function _routeBoard(fns, seed, pid, own) {
 }
 
 function suiteSimRouting(d) {
-  var ctx = _needSim('sim / ownership-aware routing', ['newGame', 'step', 'apply']);
+  var ctx = _needSim('sim / passage', ['newGame', 'step', 'apply']);
   if (!ctx) return;
   if (typeof routeFor !== 'function') {
-    return skipSuite('sim / ownership-aware routing', 'routeFor() [sim/movement.js] not loaded');
+    return skipSuite('sim / passage', 'routeFor() [sim/movement.js] not loaded');
   }
-  if (!d.LINKS) return skipSuite('sim / ownership-aware routing', 'data/stations.js LINKS not loaded');
+  if (!d.LINKS) return skipSuite('sim / passage', 'data/stations.js LINKS not loaded');
 
-  suite('sim / ownership-aware routing');
+  suite('sim / passage');
   var fns = ctx.fns, P = ctx.data.POWERS, B = ctx.data.BAL;
   var adj = _routeAdj(d.LINKS);
   var pids = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; });
   var pid = pids[0], foe = pids[1];
 
-  test('a route detours around an enemy-held station', function () {
-    var dm = _routeDiamond(adj);
-    assert(dm, 'no two-hop diamond in the link graph to build the fixture from');
-    // Both middles are HELD: this test is about an enemy closing one of two
-    // open doors, so both doors have to be open to begin with. Leaving them
-    // neutral would make the assertion pass for the wrong reason.
-    var s = _routeBoard(fns, 41, pid, [dm.a].concat(dm.mids));
+  // ── the headline: the map opened ───────────────────────────────────────
 
-    var open = routeFor(s, pid, dm.a, dm.d);
-    assert(open && open.length === 3, 'expected a two-hop route over a clear board');
-    var blocked = open[1];
-    assert(dm.mids.indexOf(blocked) >= 0, 'route did not use one of the shared middles');
-
-    _setOwner(s, blocked, foe);
-    var got = routeFor(s, pid, dm.a, dm.d);
-    assert(got, 'no route at all around ' + blocked + ' — expected the detour');
-    assertEqual(got[got.length - 1], dm.d, 'detour did not end at the target');
-    assert(got.indexOf(blocked) < 0,
-      'route still marches through enemy-held ' + blocked + ': ' + got.join('>'));
-
-    // The geographic path is deliberately unchanged: routeBetween is the map's
-    // opinion and the AI's distance heuristics still read it.
-    var geo = routeBetween(dm.a, dm.d);
-    assert(geo.indexOf(blocked) >= 0,
-      'routeBetween() became ownership-aware — it must stay pure geography');
-  });
-
-  test('a NEUTRAL station on the path blocks — only ground you hold is passable', function () {
-    var dm = _routeDiamond(adj);
-    assert(dm, 'no diamond fixture');
-    var s = _routeBoard(fns, 42, pid, [dm.a]);
-    var mid = dm.mids[0];
-    assertEqual(s.stations[mid].owner, 'neutral', 'fixture middle was not neutral');
-
-    // Every path from a to d runs through a middle, and every middle is
-    // neutral. Under the old rule this was the map's own two-hop route.
-    assertEqual(routeFor(s, pid, dm.a, dm.d), null,
-      'routeFor marched through neutral ground to reach ' + dm.d +
-      ' — neutral is no longer a corridor');
-    // ...and the geographic route is unchanged, so this is a rule about
-    // ownership and not about the map having lost an edge.
-    var geo = routeBetween(dm.a, dm.d);
-    assert(geo && geo.length === 3,
-      'routeBetween() became ownership-aware — it must stay pure geography');
-
-    // The neutral middle is still REACHABLE: it is a legal end of a path, and
-    // walking into it is the attack that has to be fought. Blocking it as a
-    // destination too would make neutral cities unconquerable.
-    var hit = routeFor(s, pid, dm.a, mid);
-    assert(hit && hit.join('>') === [dm.a, mid].join('>'),
-      'a neutral NEIGHBOUR became unreachable — the final station is not exempt');
-
-    // Taking the middle opens exactly the route that neutrality refused.
-    _setOwner(s, mid, pid);
-    var open = routeFor(s, pid, dm.a, dm.d);
-    assert(open, 'no route to ' + dm.d + ' even after taking the middle ' + mid);
-    assertEqual(open.join('>'), [dm.a, mid, dm.d].join('>'),
-      'route did not go through the newly-held middle');
-  });
-
-  test('an enemy-held DESTINATION does not block — that is the attack', function () {
-    var dm = _routeDiamond(adj);
-    // The middles are held so the only thing under test is the DESTINATION.
-    var s = _routeBoard(fns, 43, pid, [dm.a].concat(dm.mids));
-    _setOwner(s, dm.d, foe);
-    var got = routeFor(s, pid, dm.a, dm.d);
-    assert(got, 'routeFor refused to route INTO an enemy station');
-    assertEqual(got[got.length - 1], dm.d, 'route did not reach the enemy target');
-  });
-
-  test('a target reachable only through an enemy is rejected with no-route', function () {
-    var de = _routeDeadEnd(adj);
-    assert(de, 'no degree-1 station on the map to build a cut-vertex fixture from');
-    var s = _routeBoard(fns, 44, pid, [de.src]);
-    _setOwner(s, de.gate, foe);
-    s.stations[de.gate].units.infantry = 10;
-
-    assertEqual(routeFor(s, pid, de.src, de.target), null,
-      'routeFor found a way past the only gate into ' + de.target);
-
-    var before = s.stations[de.src].units.infantry;
-    var r = fns.apply(s, { type: 'send', owner: pid, sources: [de.src], target: de.target,
-                           fraction: B.SEND_FRACTION_DEFAULT });
-    assert(r.ok === false, 'applyCommand accepted a send with no legal route');
-    assertEqual(r.rejected.length, 1, 'expected exactly one rejected source');
-    assertEqual(r.rejected[0].reason, 'no-route', 'wrong rejection reason');
-    assertEqual(r.waves.length, 0, 'a wave was created for a rejected send');
-    // "a rejected source never leaves the board half-mutated" (sim/commands.js).
-    assertClose(s.stations[de.src].units.infantry, before, 1e-9,
-      'units were subtracted for a source that was rejected');
-  });
-
-  test('a send through the gate is refused while it is neutral, accepted once held', function () {
-    var de = _routeDeadEnd(adj);
-    assert(de, 'no degree-1 station on the map to build a cut-vertex fixture from');
-    var s = _routeBoard(fns, 45, pid, [de.src]);
-    var cmd = { type: 'send', owner: pid, sources: [de.src], target: de.target,
-                fraction: B.SEND_FRACTION_DEFAULT };
-    assertEqual(s.stations[de.gate].owner, 'neutral', 'fixture gate was not neutral');
-
-    var before = s.stations[de.src].units.infantry;
-    var r = fns.apply(s, cmd);
-    assert(r.ok === false, 'a send THROUGH neutral ' + de.gate + ' was accepted');
-    assertEqual(r.rejected[0].reason, 'no-route', 'wrong rejection reason');
-    assertEqual(r.waves.length, 0, 'a wave was created for a rejected send');
-    assertClose(s.stations[de.src].units.infantry, before, 1e-9,
-      'units were subtracted for a source that was rejected');
-
-    // Same command, same board, one thing changed: the power now holds the
-    // gate. Nothing about the geography or the diplomacy moved.
-    _setOwner(s, de.gate, pid);
-    var r2 = fns.apply(s, cmd);
-    assert(r2.ok === true, 'a send over ground the power HOLDS was refused: ' +
-      JSON.stringify(r2.rejected));
-    assertEqual(r2.waves.length, 1, 'expected exactly one wave');
-    assertEqual(r2.waves[0].path.join('>'), [de.src, de.gate, de.target].join('>'),
-      'the accepted wave did not route through the held gate');
-  });
-
-  // -------------------------------------------------------------------------
-  // THE FALLBACK GIVES THE SAME VERDICT AS THE REAL RULE.
-  //
-  // commandRoute() prefers routeFor() and falls back to its own search when
-  // sim/movement.js has not loaded. That fallback's passability test had been
-  // left on the OLD rule — `owner === pid || owner === 'neutral'` — for the
-  // whole of the capital-only opening, where 101 of 108 stations are neutral,
-  // so the one configuration it exists for would have accepted a volley
-  // marching straight through unfought neutral garrisons.
-  //
-  // Nobody runs a path that only runs when something else has already failed
-  // (known-issues #20), so something has to run it on purpose. This is that.
-  // The global is restored in a `finally`: leaving routeFor undefined would
-  // silently retask every suite after this one.
-  test('commandRoute falls back to the SAME passability rule, not the old one', function () {
-    if (typeof routeFor !== 'function') return;          // nothing to shadow
-    var de = _routeDeadEnd(adj);
-    assert(de, 'no degree-1 station on the map to build a cut-vertex fixture from');
-    var s = _routeBoard(fns, 45, pid, [de.src]);
-    assertEqual(s.stations[de.gate].owner, 'neutral', 'fixture gate was not neutral');
-
-    // The authority's answer, taken first so the comparison is against a
-    // measured value rather than against a constant written down here.
-    var real = routeFor(s, pid, de.src, de.target);
-    assertEqual(real, null, 'fixture: routeFor already allows the neutral gate');
-
-    var saved = routeFor;
-    var viaFallback;
-    try {
-      globalThis.routeFor = undefined;
-      viaFallback = commandRoute(de.src, de.target, s, pid);
-    } finally {
-      globalThis.routeFor = saved;
+  test('from the capital-only opening a power can reach the whole connected graph', function () {
+    // THE ONE-LINE CHANGE THAT IS THE WHOLE OF B1. `_moveCanTraverse` was
+    // `st.owner === pid`, so a power holding one city could plan a march to its
+    // six link neighbours and nowhere else — which is why "multi-hop movement"
+    // was a claim 00-vision.md §8 made and the game did not honour, why
+    // TARGET_MAX_HOPS was dead config, and why fog was a curiosity rather than a
+    // bet.
+    //
+    // The PREVIOUS version of this test asserted the opposite and was correct to:
+    // it pinned the closed rule deliberately. It is inverted here rather than
+    // deleted, so the change of contract is visible in the history instead of
+    // looking like a test that quietly went away.
+    var s = fns.newGame(4242);
+    var home = P[pid].capital;
+    var reach = [];
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var sid = STATION_IDS[i];
+      if (sid === home) continue;
+      if (routeFor(s, pid, home, sid)) reach.push(sid);
     }
-    assertEqual(viaFallback, null,
-      'the fallback routed through neutral ' + de.gate + ' — it must mirror ' +
-      '_moveCanTraverse, which stopped treating neutral as a corridor');
+    assert(reach.length > 100,
+      pid + ' reaches only ' + reach.length + ' of ' + STATION_IDS.length +
+      ' stations from ' + home + ' — passage is still closed');
+    assert((adj[home] || []).length < 10, 'the fixture capital has too many links to be a test');
+  });
 
-    // ...and it still finds the route the real rule finds, so this is a fix to
-    // the passability test and not a fallback that now refuses everything.
-    _setOwner(s, de.gate, pid);
-    try {
-      globalThis.routeFor = undefined;
-      viaFallback = commandRoute(de.src, de.target, s, pid);
-    } finally {
-      globalThis.routeFor = saved;
+  // ── the toll: relationship, not a boolean ──────────────────────────────
+
+  test('the toll is keyed on the RELATIONSHIP, with ally a case away', function () {
+    // §6: "This is cheap to build IF the toll is written as a function of the
+    // relationship between the wave's owner and the station's owner rather than
+    // as an `owner === pid` test. Write it that way now." Retrofitting a
+    // relationship into a boolean is the expensive order, so the shape is
+    // asserted while it is still free.
+    var s = fns.newGame(4242);
+    var home = P[pid].capital;
+    var mine = null, neut = null, hostile = null;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var sid = STATION_IDS[i], o = s.stations[sid].owner;
+      if (o === pid && !mine) mine = sid;
+      else if (o === 'neutral' && !neut) neut = sid;
+      else if (o !== pid && o !== 'neutral' && !hostile) hostile = sid;
     }
-    assert(viaFallback && viaFallback.join('>') === [de.src, de.gate, de.target].join('>'),
-      'the fallback lost a route over ground the power HOLDS: ' +
-      (viaFallback ? viaFallback.join('>') : 'null'));
+    assert(mine && neut && hostile, 'the opening board lacks one of the three grounds');
+    assertEqual(movePassageRelation(s, pid, mine), 'own', 'own ground');
+    assertEqual(movePassageRelation(s, pid, neut), 'neutral', 'neutral ground');
+    assertEqual(movePassageRelation(s, pid, hostile), 'hostile', 'hostile ground');
+    assert(home, 'no capital');
   });
 
-  test('a capture bumps ownerEpoch and invalidates the route cache', function () {
+  test('own ground is free, neutral is light, hostile is heavier', function () {
+    // §6's table, and the ORDER is the design rather than the numbers: "an empty
+    // neutral village is a road. A fortified enemy citadel is a wall you would
+    // rather walk around."
+    var s = fns.newGame(4242);
+    var mine = null, other = null;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var sid = STATION_IDS[i];
+      if (s.stations[sid].owner === pid && !mine) mine = sid;
+      if (s.stations[sid].owner === 'neutral' && !other) other = sid;
+    }
+    assertEqual(movePassageToll(s, pid, mine), 0, 'own ground charged a toll');
+
+    // The SAME station, so garrison and terrain are held constant and the only
+    // variable is who holds it — otherwise this compares two different cities.
+    var asNeutral = movePassageToll(s, pid, other);
+    setStationOwner(s, other, foe);
+    var asHostile = movePassageToll(s, pid, other);
+    assert(asNeutral > 0, 'neutral ground was free');
+    assert(asHostile > asNeutral,
+      'hostile ground (' + asHostile.toFixed(2) + ') is not dearer than neutral (' +
+      asNeutral.toFixed(2) + ') at the same city with the same garrison');
+  });
+
+  test('the toll scales with the station\'s full defensive power, not its unit count', function () {
+    // §6 forbids a second toll formula derived from unit counts: known-issues #9,
+    // logged five times and twice inside the combat maths. One power function,
+    // two callers — the battle and the toll. So a station whose defence comes
+    // from TERRAIN and TYPE rather than bodies must still be expensive.
+    var s = fns.newGame(4242);
+    var a = null, b = null;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var sid = STATION_IDS[i];
+      if (s.stations[sid].owner !== 'neutral') continue;
+      if (!a) a = sid;
+      else if (!b && fortLevel(sid) !== fortLevel(a)) b = sid;
+    }
+    assert(a && b, 'no two neutral stations with different fort levels');
+    // Same garrison in both, so unit count cannot explain a difference.
+    s.stations[a].units = { infantry: 20, artillery: 0, armour: 0 };
+    s.stations[b].units = { infantry: 20, artillery: 0, armour: 0 };
+    var ta = movePassageToll(s, pid, a), tb = movePassageToll(s, pid, b);
+    assert(Math.abs(ta - tb) > 1e-9,
+      'two stations with identical garrisons and different defence cost the same ' +
+      'to pass — the toll is reading unit counts, not stationPower()');
+  });
+
+  test('the router prices a detour, so going around is a choice the player can express', function () {
+    // §6: "It also gives the player a genuine choice the current game cannot
+    // express: pay the toll and go around, or pay the battle and go through."
+    // The player picks a TARGET, never a path — so if the router does not price
+    // the toll, that choice does not exist.
+    //
+    // A FAIR diamond, not the first one: see _routeFairDiamond. The toll is worth
+    // about two median links of detour, so an alternative three times longer
+    // should NOT be taken and a test demanding it would be asserting a claim the
+    // design does not make.
+    var dm = _routeFairDiamond(adj, _routeLinkIndex(d.LINKS));
+    assert(dm, 'no comparable-length diamond in the link graph to build the fixture from');
+    var s = fns.newGame(4242);
+    setStationOwner(s, dm.a, pid);
+    setStationOwner(s, dm.d, pid);
+    setStationOwner(s, dm.mids[0], pid);
+    setStationOwner(s, dm.mids[1], pid);
+
+    var through = routeFor(s, pid, dm.a, dm.d);
+    assert(through, 'no route at all across the diamond');
+    var picked = through[1];
+    var other = (picked === dm.mids[0]) ? dm.mids[1] : dm.mids[0];
+
+    // Hand the chosen middle to an enemy and garrison it heavily. The router
+    // should now prefer the other door.
+    setStationOwner(s, picked, foe);
+    s.stations[picked].units = { infantry: 80, artillery: 0, armour: 0 };
+    var after = routeFor(s, pid, dm.a, dm.d);
+    assert(after, 'the route vanished — passage should make it dearer, not impossible');
+    // AVOIDS the expensive door, rather than "takes the other one at index 1".
+    // The detour is not required to be the two-hop alternative: on the real graph
+    // the cheapest way around osl came out as aal>got>sth>tam, which is three hops
+    // and is exactly the behaviour wanted. Asserting after[1] === other was
+    // asserting a shape, not the claim.
+    assert(after.indexOf(picked) < 0,
+      'the router still walks through heavily-held ' + picked + ' when ' + other +
+      ' is open and free: ' + after.join('>'));
+  });
+
+  test('but it is a PRICE, not a wall — a target behind an enemy is still reachable', function () {
+    // The old rule rejected this with 'no-route'. That is what made encirclement
+    // impossible and what kept the AI's horizon at one hop.
     var dm = _routeDiamond(adj);
-    // Middles held: the cache question needs a route to exist BEFORE the
-    // capture, so there is a stale answer for the second call to return.
-    var s = _routeBoard(fns, 46, pid, [dm.a].concat(dm.mids));
-
-    // Warm the cache FIRST — this test is worthless if the second call is the
-    // first one that ever ran.
-    var first = routeFor(s, pid, dm.a, dm.d);
-    assert(first && first.length === 3, 'fixture route was not the expected two hops');
-    var blocked = first[1];
-    var epochBefore = s.ownerEpoch;
-
-    setStationOwner(s, blocked, foe);
-    assert(s.ownerEpoch > epochBefore,
-      'setStationOwner did not move state.ownerEpoch (' + epochBefore + ')');
-
-    var second = routeFor(s, pid, dm.a, dm.d);
-    assert(second, 'no route after the capture');
-    assert(second.join('>') !== first.join('>'),
-      'routeFor returned the pre-capture path ' + first.join('>') + ' — cache went stale');
-    assert(second.indexOf(blocked) < 0, 'stale route still crosses ' + blocked);
+    assert(dm, 'no diamond');
+    var s = fns.newGame(4242);
+    setStationOwner(s, dm.a, pid);
+    setStationOwner(s, dm.mids[0], foe);
+    setStationOwner(s, dm.mids[1], foe);
+    var r = routeFor(s, pid, dm.a, dm.d);
+    assert(r, 'a target reachable only through enemy ground is still refused — ' +
+      'passage did not open');
+    assert(r.length >= 3, 'the route is too short to have passed through anything');
   });
 
-  test('ownerEpoch is an integer that only counts real changes', function () {
-    var s = fns.newGame(47);
-    assertEqual(s.ownerEpoch, 0, 'a fresh game must start at epoch 0');
-    var sid = Object.keys(s.stations).sort()[0];
-    var owner = s.stations[sid].owner;
-    setStationOwner(s, sid, owner);
-    assertEqual(s.ownerEpoch, 0, 'a no-op ownership write bumped the epoch');
-    setStationOwner(s, sid, owner === foe ? pid : foe);
-    assertEqual(s.ownerEpoch, 1, 'a real ownership change did not bump the epoch by one');
-  });
+  // ── enforcement: what a wave actually pays ─────────────────────────────
 
-  test('a wave is intercepted when an intermediate station flips mid-flight', function () {
+  test('a manual wave PASSES THROUGH hostile ground and pays for it', function () {
+    // The other half of the old rule. _moveIntercepts used to stop a wave at any
+    // station its owner did not hold, so opening the router alone would have
+    // changed nothing — the wave would have been halted on the ground it was now
+    // entitled to cross.
     var dm = _routeDiamond(adj);
-    // Middles held, so the send is legal at send time. The whole point is that
-    // the board changes UNDER a route that was legal when it was planned.
-    var s = _routeBoard(fns, 48, pid, [dm.a].concat(dm.mids));
-    s.stations[dm.a].units.infantry = 200;
+    assert(dm, 'no diamond');
+    var s = fns.newGame(4242);
+    s.aiEnabled = false;
+    setStationOwner(s, dm.a, pid);
+    setStationOwner(s, dm.d, pid);
+    setStationOwner(s, dm.mids[0], foe);
+    setStationOwner(s, dm.mids[1], foe);
+    s.stations[dm.mids[0]].units = { infantry: 10, artillery: 0, armour: 0 };
+    s.stations[dm.mids[1]].units = { infantry: 10, artillery: 0, armour: 0 };
+    s.stations[dm.a].units = { infantry: 200, artillery: 0, armour: 0 };
 
-    var r = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 0.9 });
-    assert(r.ok, 'setup send was refused: ' + JSON.stringify(r.rejected));
-    var w = r.waves[0];
-    assertEqual(w.path.length, 3, 'fixture needs a two-hop route so there IS an intermediate');
-    var mid = w.path[1];
+    var res = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
+    assert(res.ok, 'the send was refused: ' + JSON.stringify(res.rejected));
+    var w = s.waves[s.waves.length - 1];
+    var launched = totalUnits(w.units);
+    var guard = 0;
+    while (s.waves.indexOf(w) >= 0 && guard++ < 8000) movementTick(s);
 
-    // One tick so the wave is genuinely in the air, then the middle changes
-    // hands behind it. Its path was fixed at send time and cannot be replanned.
-    fns.step(s);
-    assert(s.waves.length === 1, 'wave resolved before it could be intercepted — fixture too short');
-    _setOwner(s, mid, foe);
-    s.stations[mid].units.infantry = 5;
-
-    for (var i = 0; i < 4000 && s.waves.length; i++) fns.step(s);
-    assertEqual(s.waves.length, 0, 'the wave never resolved');
-
-    // It fought at the interception point, not at its original destination.
-    for (var k = 0; k < 400; k++) fns.step(s);
-    assertEqual(s.stations[mid].owner, pid,
-      'the wave ghosted through enemy-held ' + mid + ' instead of fighting there');
-    assertEqual(s.stations[dm.d].owner, 'neutral',
-      'the wave reached ' + dm.d + ' — it should have been stopped at ' + mid);
+    assertEqual(s.stations[dm.d].owner, pid, 'the army never reached its own destination');
+    assert(totalUnits(w.units) < launched,
+      'the army crossed two enemy stations and lost nothing — no toll was charged');
+    // And it must have gone THROUGH rather than stopped: the middles are still
+    // the enemy's, because passage is not conquest.
+    assert(s.stations[dm.mids[0]].owner === foe || s.stations[dm.mids[1]].owner === foe,
+      'passing through captured the ground it passed over');
   });
 
-  test('a NEUTRAL intermediate intercepts too', function () {
-    // The enforcement half of the inverted routing test above. _moveIntercepts
-    // and _moveCanTraverse have to agree exactly: routing refuses to PLAN a
-    // path through neutral ground, so a wave that ends up on one anyway must be
-    // stopped at it. Neutral used to be the one intermediate that waved a wave
-    // through, which is the same bug as routing through it, only later.
+  test('a STANDING wave still stands down rather than forcing passage', function () {
+    // Unchanged, and it must be: a standing order is not a decision the player
+    // made about this march. Feeding logistics into a battle nobody clicked for,
+    // 12% of a garrison at a time, is defeat in detail committed by an automated
+    // mechanic on the player's behalf — 00-vision.md §8's defining mistake.
     var dm = _routeDiamond(adj);
-    var s = _routeBoard(fns, 49, pid, [dm.a].concat(dm.mids));
-    s.stations[dm.a].units.infantry = 200;
+    assert(dm, 'no diamond');
+    var s = fns.newGame(4242);
+    s.aiEnabled = false;
+    setStationOwner(s, dm.a, pid);
+    setStationOwner(s, dm.d, pid);
+    setStationOwner(s, dm.mids[0], pid);
+    setStationOwner(s, dm.mids[1], pid);
+    s.stations[dm.a].units = { infantry: 100, artillery: 0, armour: 0 };
+    s.stations[dm.d].units = { infantry: 1, artillery: 0, armour: 0 };
 
-    var r = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 0.9 });
-    assert(r.ok, 'setup send was refused: ' + JSON.stringify(r.rejected));
-    var w = r.waves[0];
-    assertEqual(w.path.length, 3, 'fixture needs a two-hop route so there IS an intermediate');
-    var mid = w.path[1];
-
-    fns.step(s);
-    assert(s.waves.length === 1, 'wave resolved before it could be intercepted — fixture too short');
-    // The middle is LOST behind the wave — to nobody, not to a rival. Under the
-    // old rule that was a free pass.
-    _setOwner(s, mid, 'neutral');
-    s.stations[mid].units.infantry = 5;
-
-    for (var i = 0; i < 4000 && s.waves.length; i++) fns.step(s);
-    assertEqual(s.waves.length, 0, 'the wave never resolved');
-
-    for (var k = 0; k < 400; k++) fns.step(s);
-    assertEqual(s.stations[mid].owner, pid,
-      'the wave ghosted through neutral ' + mid + ' instead of fighting there');
-    assertEqual(s.stations[dm.d].owner, 'neutral',
-      'the wave reached ' + dm.d + ' — it should have been stopped at neutral ' + mid);
-  });
-
-  // ---- the regression the suite did not have ------------------------------
-  test('a wave stops and fights a garrisoned neutral instead of marching through it', function () {
-    // THE bug, in miniature. Seed 19140628, turn zero, before neutral ground
-    // was closed: Britain sent its opening 67-unit garrison out of London and
-    // captured BERLIN, walking through Lille (6 defenders), Cologne (9) and
-    // Leipzig (8) without fighting one of them. Nothing in this suite noticed.
-    var dm = _routeDiamond(adj);
-    var s = _routeBoard(fns, 50, pid, [dm.a]);
-    var mid = dm.mids[0], far = dm.d;
-    var garrison = 100;
-    s.stations[mid].units.infantry = garrison;
-
-    // 1. It cannot be PLANNED: the far target is unroutable past the garrison.
-    assertEqual(routeFor(s, pid, dm.a, far), null,
-      'routeFor planned a march through garrisoned neutral ' + mid + ' to reach ' + far);
-
-    // 2. And a wave put on that path anyway is stopped at the garrison. Pushed
-    //    in directly, because routeFor will (correctly) no longer build it —
-    //    which is exactly why enforcement has to be checked separately.
-    var sent = 180;
-    s.waves.push({ id: 1, owner: pid, from: dm.a, to: far, path: [dm.a, mid, far],
-                   hop: 0, progress: 0,
-                   units: { infantry: sent, artillery: 0, armour: 0 } });
-
-    // Watched rather than measured at the end: `far` is a neutral station and
-    // neutral stations REGROW, so its unit count drifts up from zero on its own
-    // and cannot be used as evidence of anything.
-    var touchedFar = false;
-    for (var i = 0; i < 8000 && s.waves.length; i++) {
+    var before = s.orderStats.standDowns;
+    fns.apply(s, { type: 'order', owner: pid, stations: [dm.a], target: dm.d });
+    // Let a standing wave get moving, then take the ground under it.
+    var moved = false, guard = 0;
+    while (!moved && guard++ < 3000) {
       fns.step(s);
-      if (typeof stationAttackers === 'function' && stationAttackers(s, far).length) touchedFar = true;
+      for (var i = 0; i < s.waves.length; i++) if (s.waves[i].standing) moved = true;
     }
-    assertEqual(s.waves.length, 0, 'the wave never resolved');
-    assert(!touchedFar,
-      'the wave arrived at ' + far + ' beyond the garrison at ' + mid +
-      ' — this is the London-to-Berlin bug');
-    for (var k = 0; k < 300; k++) fns.step(s);
-
-    // The neutral garrison was fought down, not walked past.
-    assertEqual(s.stations[mid].owner, pid,
-      'the neutral garrison at ' + mid + ' was never engaged — the wave marched through it');
-    assert(totalUnits(s.stations[mid].units) < sent - 1e-9,
-      'the attacker holds ' + mid + ' at full strength (' + sent + ') — no fight happened');
-    assertEqual(s.stations[far].owner, 'neutral',
-      'the wave took ' + far + ' beyond the garrison — this is the London-to-Berlin bug');
+    assert(moved, 'no standing wave was ever created');
+    var mid = s.waves[0].path[1];
+    setStationOwner(s, mid, foe);
+    for (var t = 0; t < 2000 && s.waves.length; t++) movementTick(s);
+    assert(s.orderStats.standDowns > before || s.orderStats.fights === 0,
+      'a standing wave forced passage instead of standing down');
+    assertEqual(s.orderStats.fights, 0,
+      'a standing order started a battle — orderStats.fights is a tripwire and ' +
+      'must stay 0 forever');
   });
 
-  // ---- the cheap guard that would have caught it on day one ---------------
-  test('from the capital-only opening a power can reach only its link neighbours', function () {
-    // One assertion over the real starting board. Every power opens holding its
-    // capital and nothing else, so "how far can anybody go on move one" is
-    // exactly link degree — 6/4/6/3/6/6/5 for aut/fra/gbr/rus/ita/ott/ger on
-    // this map. Derived from LINKS rather than hard-coded so it survives a map
-    // rebuild; what it pins down is the RELATIONSHIP, which must not change.
-    var s = fns.newGame(19140628);
-    var caps = {};
-    pids.forEach(function (p) { caps[P[p].capital] = p; });
+  test('a capture still invalidates the route cache', function () {
+    // Unchanged in intent, and now it matters MORE: routes are ownership-weighted,
+    // so a stale cache does not merely allow an illegal path, it prices every
+    // detour against a board that no longer exists. Needs the fair diamond for the
+    // same reason the detour test does — an unfair one would keep the same route
+    // legitimately, and prove nothing about the cache.
+    var dm = _routeFairDiamond(adj, _routeLinkIndex(d.LINKS));
+    assert(dm, 'no comparable-length diamond');
+    var s = fns.newGame(4242);
+    setStationOwner(s, dm.a, pid);
+    setStationOwner(s, dm.d, pid);
+    setStationOwner(s, dm.mids[0], pid);
+    setStationOwner(s, dm.mids[1], pid);
+    var first = routeFor(s, pid, dm.a, dm.d);
+    assert(first, 'no route');
+    var picked = first[1];
+    var epoch = s.ownerEpoch;
+    setStationOwner(s, picked, foe);
+    s.stations[picked].units = { infantry: 90, artillery: 0, armour: 0 };
+    assert(s.ownerEpoch > epoch, 'setStationOwner did not bump ownerEpoch');
+    var second = routeFor(s, pid, dm.a, dm.d);
+    assert(second.indexOf(picked) < 0 || first.join() !== second.join(),
+      'the route still runs through ' + picked + ' and is byte-identical to the ' +
+      'pre-capture path — the cache went stale');
+  });
 
-    pids.forEach(function (p) {
-      var cap = P[p].capital;
-      var held = Object.keys(s.stations).sort().filter(function (sid) {
-        return s.stations[sid].owner === p;
-      });
-      assertEqual(held.join(','), cap,
-        p + ' does not open holding exactly its capital — this guard assumes it does');
+  // ── march attrition ────────────────────────────────────────────────────
 
-      var reach = Object.keys(s.stations).sort().filter(function (sid) {
-        return sid !== cap && routeFor(s, p, cap, sid) !== null;
-      });
-      var nb = (adj[cap] || []).slice().sort();
-      assertEqual(reach.join(','), nb.join(','),
-        p + ' reaches ' + reach.length + ' stations from ' + cap + ' but has ' +
-        nb.length + ' links — ' + reach.join(','));
+  test('march attrition is FLAT, so reach is bought with mass', function () {
+    // §2's load-bearing choice, and the one number that would quietly undo the
+    // whole design if it became fractional: a fractional rate costs a 10-unit
+    // raid and a 200-unit army the same PERCENTAGE, so mass buys nothing and
+    // distance is free to anyone.
+    var dm = _routeDiamond(adj);
+    assert(dm, 'no diamond');
 
-      // The bug stated as its consequence: nobody may touch anybody on move one.
-      var decap = reach.filter(function (sid) { return caps[sid]; });
-      assertEqual(decap.length, 0,
-        p + ' can reach a rival capital from ' + cap + ' on move one: ' + decap.join(','));
-    });
+    function marchLoss(size) {
+      var s = fns.newGame(4242);
+      s.aiEnabled = false;
+      setStationOwner(s, dm.a, pid);
+      setStationOwner(s, dm.d, pid);
+      setStationOwner(s, dm.mids[0], pid);
+      setStationOwner(s, dm.mids[1], pid);
+      s.stations[dm.a].units = { infantry: size, artillery: 0, armour: 0 };
+      var res = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
+      assert(res.ok, 'send refused at size ' + size);
+      var w = s.waves[s.waves.length - 1];
+      var launched = totalUnits(w.units);
+      var guard = 0;
+      while (s.waves.indexOf(w) >= 0 && guard++ < 8000) movementTick(s);
+      return { lost: launched - totalUnits(w.units), launched: launched };
+    }
+
+    var small = marchLoss(30), big = marchLoss(300);
+    assert(small.lost > 0, 'a march over own ground cost nothing at all');
+    // FLAT: the absolute loss is the same regardless of size. Fractional would
+    // make big.lost ten times small.lost.
+    assertClose(big.lost, small.lost, 0.5,
+      'a 300-unit army lost ' + big.lost.toFixed(2) + ' where a 30-unit column lost ' +
+      small.lost.toFixed(2) + ' — attrition is fractional, so mass buys no reach ' +
+      'and distance is free to anyone');
+    // …which means the PERCENTAGE differs enormously, and that is the point.
+    var smallPct = small.lost / small.launched, bigPct = big.lost / big.launched;
+    assert(smallPct > bigPct * 5,
+      'the small column should feel this far more than the army: ' +
+      (smallPct * 100).toFixed(1) + '% vs ' + (bigPct * 100).toFixed(1) + '%');
+  });
+
+  test('a column destroyed en route is logged, not silently gone', function () {
+    // §2: "That is a real and legible failure — you overreached — and it must
+    // appear in the ticker, not vanish silently."
+    var dm = _routeDiamond(adj);
+    assert(dm, 'no diamond');
+    var s = fns.newGame(4242);
+    s.aiEnabled = false;
+    setStationOwner(s, dm.a, pid);
+    setStationOwner(s, dm.d, pid);
+    setStationOwner(s, dm.mids[0], pid);
+    setStationOwner(s, dm.mids[1], pid);
+    s.stations[dm.a].units = { infantry: 200, artillery: 0, armour: 0 };
+    var res = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
+    assert(res.ok, 'send refused');
+    var w = s.waves[s.waves.length - 1];
+    // Starve it directly rather than marching it across the map: this is a test
+    // of the DEATH, not of how long a march has to be to cause one.
+    // Just above the annihilation floor, so it is a LIVE wave that this tick
+    // kills — not one movementTick would have discarded anyway. That distinction
+    // is the bug this test found: death was written as "falls to zero", which
+    // with MARCH_LOSS_PER_TICK (0.004) under ANNIHILATION_EPSILON (0.01) could
+    // never happen, so a starving column vanished with no ticker line at all.
+    w.units = { infantry: B.ANNIHILATION_EPSILON * 1.2, artillery: 0, armour: 0 };
+    var before = s.log.length;
+    movementTick(s);
+    assert(s.waves.indexOf(w) < 0, 'the dead wave is still on the board');
+    assert(s.log.length > before, 'a column died en route and wrote nothing to the log');
+    var e = s.log[s.log.length - 1];
+    assertEqual(e.kind, 'lost', 'the log entry is not a loss');
+    assert(/never arrived|marching/.test(e.text), 'the entry does not say what happened: ' + e.text);
+  });
+
+  test('a wave crossing its OWN ground pays no toll, only attrition', function () {
+    var dm = _routeDiamond(adj);
+    assert(dm, 'no diamond');
+    var s = fns.newGame(4242);
+    s.aiEnabled = false;
+    [dm.a, dm.d, dm.mids[0], dm.mids[1]].forEach(function (x) { setStationOwner(s, x, pid); });
+    s.stations[dm.a].units = { infantry: 100, artillery: 0, armour: 0 };
+    fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
+    var w = s.waves[s.waves.length - 1];
+    var launched = totalUnits(w.units);
+    var ticks = 0, guard = 0;
+    while (s.waves.indexOf(w) >= 0 && guard++ < 8000) { movementTick(s); ticks++; }
+    var lost = launched - totalUnits(w.units);
+    // Everything lost must be explained by attrition alone. A toll on own ground
+    // would show up as an unexplained lump.
+    assertClose(lost, ticks * B.PASSAGE.MARCH_LOSS_PER_TICK, 0.5,
+      'a march entirely over friendly ground lost ' + lost.toFixed(3) + ' over ' +
+      ticks + ' ticks, where attrition alone accounts for ' +
+      (ticks * B.PASSAGE.MARCH_LOSS_PER_TICK).toFixed(3) + ' — something is ' +
+      'tolling own ground');
   });
 }
 
-// ===========================================================================
-// sim / beachhead landings   (02-visibility-and-sea.md §3b)
-//
-// A wave whose FINAL hop is a sea link comes ashore in echelons over
-// BAL.LANDING_TICKS instead of arriving all at once; units still at sea are not
-// in station.attackers and so cannot be hit. A LAND final hop is unchanged.
-//
-// Every fixture is derived from the live link graph — one sea link and one land
-// link into the SAME station, so the amphibious and overland runs differ in
-// nothing but the water. Hard-coding beach ids would rot with the map, and
-// worse, would let the two arms of the comparison drift apart.
-//
-// None of the assertions below hard-code an odds threshold either. The one test
-// that has to know where the break-even sits FINDS it, by searching for the
-// smallest overland attacker that wins and then re-running exactly that force
-// over the sea. That claim stays true and stays meaningful whatever COMBAT_RATE
-// and LANDING_TICKS are later retuned to.
-// ===========================================================================
-
-// A sea link, plus a land link into the same landing station. Lowest ids win so
-// the fixture is stable across runs.
 function _beachFixture(LINKS) {
   var sea = LINKS.filter(function (l) { return l.sea === true; })
     .sort(function (a, b) { return (a.a + '|' + a.b) < (b.a + '|' + b.b) ? -1 : 1; });
@@ -2508,23 +2524,48 @@ function suiteSimBeachhead(d) {
     // is passable, so a neutral `src` would intercept the wave one hop early
     // and the fixture would never reach the water at all — that would be a
     // fixture measuring the routing rule, not the sea toll.
+    // NO LONGER BUILT BY INTERCEPTION — B1 removed it for manual waves.
+    //
+    // This fixture used to hand the wave a four-station path and let
+    // _moveIntercepts truncate it at a hostile beach. Since passage opened, a
+    // manual wave walks THROUGH hostile ground and pays the toll, so that
+    // truncation cannot happen and the premise is unreachable.
+    //
+    // What the test is actually for survives untouched: when a path's FINAL hop is
+    // a sea link, the landing rules and the sea toll apply, and the toll is
+    // charged exactly once. So the path is given directly, still with a leading
+    // LAND hop — that part is the point of the fixture, because it makes w.from a
+    // station with no link to the beach at all, so an implementation deciding
+    // sea-ness from w.from/w.to instead of from the path cannot accidentally pass.
     var s = _beachBoard(fns, 22);
     _setOwner(s, fx.pre, '_atk');
     _setOwner(s, fx.src, '_atk');
     _setOwner(s, fx.beach, '_foe');
     s.stations[fx.beach].units.infantry = 1;
     var art = 40;
-    var w = { id: 1, owner: '_atk', from: fx.pre, to: fx.land,
-              path: [fx.pre, fx.src, fx.beach, fx.land], hop: 0, progress: 0,
+    var w = { id: 1, owner: '_atk', from: fx.pre, to: fx.beach,
+              path: [fx.pre, fx.src, fx.beach], hop: 0, progress: 0,
               units: { infantry: 60, artillery: art, armour: 0 } };
     s.waves.push(w);
 
     for (var t = 0; t < 20000 && !w.landing; t++) movementTick(s);
-    assert(w.landing, 'an intercepted wave on the far side of a sea link never began a landing');
-    assertEqual(w.path.length, 3, 'path was not truncated at the interception point');
-    assertEqual(w.path[2], fx.beach, 'truncated somewhere other than the beach');
-    assertClose(w.landing.total, (60 + art * (1 - B.SEA_ARTILLERY_LOSS)),
-      1e-9, 'landing strength — the crossing toll was not applied exactly once');
+    assert(w.landing, 'a wave whose final hop is a sea link never began a landing');
+    assertEqual(w.path.length, 3, 'the fixture path is the wrong length');
+    assertEqual(w.path[2], fx.beach, 'the fixture does not end at the beach');
+    // AS A RATIO, NOT AS AN ABSOLUTE TOTAL. Since B1 the wave also pays flat march
+    // attrition for every tick in transit, and a sea crossing is the slowest thing
+    // on the board — about 8 units on this fixture. That is a different mechanic
+    // and it would swamp the one being measured.
+    //
+    // Attrition is PROPORTIONAL across the bundle, so it cancels out of the
+    // artillery:infantry ratio exactly; the sea toll is artillery-only, so it does
+    // not. The ratio therefore isolates "was the crossing toll applied, and once".
+    // Charged twice would give (1 - loss)^2 and this fails by a wide margin.
+    var landed = w.landing.per || w.landing;
+    var ratio = landed.artillery / landed.infantry;
+    assertClose(ratio, (art * (1 - B.SEA_ARTILLERY_LOSS)) / 60, 1e-9,
+      'landing composition — the crossing toll was not applied exactly once ' +
+      '(twice would be ' + ((art * Math.pow(1 - B.SEA_ARTILLERY_LOSS, 2)) / 60).toFixed(5) + ')');
   });
 
   // ---- units at sea are not in the battle ---------------------------------
@@ -2868,12 +2909,22 @@ function _ordBoard(fns, d, seed, pid, n) {
 // The two stations this power holds that are furthest apart over its OWN
 // ground, and the legal route between them. The stand-down race needs a march
 // long enough to have an intermediate station to fall back to.
+// THE STANDING-ORDER ROUTE, i.e. own ground only.
+//
+// `routeFor(s, pid, a, b)` opened up in B1 and now walks through anybody's
+// ground, so this helper was silently returning paths that ran through hostile
+// territory — and every fixture built on it (cut the middle, expect
+// 'unreachable') then cut a corridor the supply line was never using. Five tests
+// in the standing-order suite failed as a group, all of them correct.
+//
+// `true` is the standingOnly flag. Supply lines never take passage: see the note
+// at routeFor() in sim/movement.js.
 function _ordLongestOwnPath(s, pid, own) {
   var best = null;
   for (var i = 0; i < own.length; i++) {
     for (var j = 0; j < own.length; j++) {
       if (i === j) continue;
-      var p = routeFor(s, pid, own[i], own[j]);
+      var p = routeFor(s, pid, own[i], own[j], true);
       if (p && (!best || p.length > best.length)) best = p;
     }
   }
@@ -3116,11 +3167,22 @@ function suiteStandingOrders(d) {
 
     // THE CLAIM. Same total outflow, divided two ways instead of three — so each
     // surviving stream is 3/2 of what it was, and the totals match.
+    // TOLERANCE IS TWO TICKS OF MARCH ATTRITION, derived rather than loosened.
+    // The two totals are read a step apart, and since B1 every wave in transit
+    // pays BAL.PASSAGE.MARCH_LOSS_PER_TICK per tick, so the later measurement is
+    // legitimately smaller by roughly one tick. The failure this guards against —
+    // a dropped third of the outflow — is about 7.9 units on this fixture, three
+    // orders of magnitude above the tolerance.
     var perOpen = a.total / 3, perFull = b2.total / 2;
-    assertClose(b2.total, a.total, 1e-6,
+    assertClose(b2.total, a.total, d.BAL.PASSAGE.MARCH_LOSS_PER_TICK * 2,
       'the skipped destination\'s share was dropped rather than redistributed: ' +
       b2.total.toFixed(4) + ' shipped in total against ' + a.total.toFixed(4));
-    assertClose(perFull, perOpen * 1.5, 1e-6,
+    // Same derived tolerance as the total above: the two measurements are a step
+    // apart and since B1 each wave pays MARCH_LOSS_PER_TICK per tick in transit,
+    // so 1.5x is exact in intent and off by a tick of attrition in practice. The
+    // failure guarded against — a share dropped rather than redistributed — would
+    // put perFull at perOpen, a third of the way off.
+    assertClose(perFull, perOpen * 1.5, d.BAL.PASSAGE.MARCH_LOSS_PER_TICK * 2,
       'the two surviving streams were not 3/2 the size of the three-way shares');
   });
 

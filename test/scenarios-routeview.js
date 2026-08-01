@@ -130,7 +130,10 @@ function _rvwAdjacent(fns, d, seed, pid) {
   for (var i = 0; i < b.own.length && !best; i++) {
     for (var j = 0; j < b.own.length && !best; j++) {
       if (i === j) continue;
-      var p = routeFor(b.s, pid, b.own[i], b.own[j]);
+      // STANDING-ORDER ROUTING (own ground only). routeFor opened up in B1 and now
+      // walks through anybody's ground; a supply-line fixture built on the open
+      // route cuts corridors the line was never using.
+      var p = routeFor(b.s, pid, b.own[i], b.own[j], true);
       if (p && p.length === 2) best = p;
     }
   }

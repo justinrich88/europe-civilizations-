@@ -206,10 +206,26 @@ must observe the unarmed state.
 
 ## Phase B — the keystone
 
-### B1. Passage and attrition
+### ~~B1. Passage and attrition~~ — SHIPPED 2026-07
 
-`06-movement-and-attrition.md`. **Everything below is blocked on this**, and
-several things previously scoped as separate work turn out to *be* this:
+`06-movement-and-attrition.md`. **Everything below was blocked on this**, and
+several things previously scoped as separate work turned out to *be* this.
+
+What landed: `_moveCanTraverse` opened, a passage toll scaled by
+`stationPower(state, sid, 'defender')` and charged once on entering ground the
+wave does not own, flat per-tick march attrition, and route weights so the router
+can price a detour. **Standing orders keep the closed rule** — passage is for
+armies, not logistics; a supply line routed through hostile country is an
+unattended trickle that stands down forever.
+
+**Read §7 of that document before tuning anything here.** Its named instrument —
+mean hops from border to target — turned out not to discriminate, because its
+premise was wrong: that number was never 1, it was already 2.16. The measure that
+does work is the share of marches crossing ground the sender does not hold, and it
+went 0% → 3.4%. It is low because **B3 has not happened**, not because the
+constants are wrong.
+
+Fixed by it, as promised:
 
 - Multi-hop movement becomes true, as §8 always claimed.
 - **The AI's missing horizon is fixed** — it was never an AI bug, it was the

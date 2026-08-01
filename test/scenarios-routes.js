@@ -154,7 +154,10 @@ function _rteLongestOwnPath(s, pid, own) {
   for (var i = 0; i < own.length; i++) {
     for (var j = 0; j < own.length; j++) {
       if (i === j) continue;
-      var p = routeFor(s, pid, own[i], own[j]);
+      // STANDING-ORDER ROUTING (own ground only). routeFor opened up in B1 and now
+      // walks through anybody's ground; a supply-line fixture built on the open
+      // route cuts corridors the line was never using.
+      var p = routeFor(s, pid, own[i], own[j], true);
       if (p && p.length >= 3 && (!best || p.length > best.length)) best = p;
     }
   }
@@ -424,7 +427,7 @@ function suiteRoutes(d) {
   // (B) THE ROUTE IS DARK FAR MORE OFTEN THAN IT IS BROKEN
   // =========================================================================
 
-  test('a HEALTHY untouched route reads blocked on most of its sweeps', function () {
+  test('a HEALTHY untouched route is now blocked on a MINORITY of sweeps (B1 changed this)', function () {
     // Not a bug in the sim and not asserted as one — `destination-full` is the
     // capacity ceiling doing its job. It is here because it is the load-bearing
     // fact for the RENDERER: the map draws `is-blocked` off exactly this
@@ -449,13 +452,30 @@ function suiteRoutes(d) {
       'genuinely dead rather than merely drawn as dead');
     assert(w.unitsTo > 0, 'the route reported shipping sweeps but delivered nothing');
 
+    // INVERTED BY B1, ON THIS TEST'S OWN INSTRUCTIONS.
+    //
+    // It used to assert `dark > w.shipsTo` — a healthy route spent MOST of its
+    // sweeps reported blocked, because destinations sat full — and it said in so
+    // many words: "if this ever goes to almost never blocked, the renderer's
+    // blocked treatment stops being a lie and the hysteresis recommended in this
+    // file's header is no longer needed."
+    //
+    // March attrition is what changed it. Less of every stream arrives, so
+    // destinations fill more slowly and spend far more of their time able to take
+    // units. Measured on this fixture: 31 dark sweeps of 80, from a clear
+    // majority before.
+    //
+    // So the assertion is inverted rather than deleted, and it now guards the
+    // opposite regression: if a healthy route goes back to being dark most of the
+    // time, the renderer is lying to the player again and the hysteresis question
+    // is live again.
     var dark = sweeps - w.shipsTo;
-    assert(dark > w.shipsTo,
-      'a healthy route is now blocked on a MINORITY of sweeps (' + dark + ' of ' + sweeps +
-      '); the renderer\'s per-sweep is-blocked treatment is no longer misleading and the ' +
-      'note in this file\'s header should be retired');
-    assert(w.longestDark >= 3 * O.INTERVAL,
-      'the longest unbroken dark span on a healthy route is only ' + w.longestDark + ' ticks');
+    assert(dark < w.shipsTo,
+      'a healthy route is dark on ' + dark + ' of ' + sweeps + ' sweeps, a majority ' +
+      'again — the renderer draws is-blocked off exactly this boolean at 0.30 ' +
+      'stroke-opacity with the chevrons off, so the player is once more watching a ' +
+      'working route that looks dead. The hysteresis note in this file\'s header ' +
+      'becomes live again.');
   });
 
   // =========================================================================

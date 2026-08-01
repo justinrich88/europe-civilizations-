@@ -357,8 +357,8 @@ function suiteExact() {
     var s100 = newGame(100);
     for (var i = 0; i < 2000; i++) stepTick(s100);
     var h100 = _exatStateHash(s100);
-    assertEqual(h100.hash, 728090591, 'seed 100 diverged after 2000 ticks — state is now ' +
-      h100.bytes + ' bytes of JSON against a pinned 132440. READ THE BYTE COUNT CAREFULLY: ' +
+    assertEqual(h100.hash, 3903657434, 'seed 100 diverged after 2000 ticks — state is now ' +
+      h100.bytes + ' bytes of JSON against a pinned 126784. READ THE BYTE COUNT CAREFULLY: ' +
       'it moves for BOTH kinds of change and cannot tell them apart on its own. A new field ' +
       'on the state moves it by a fixed amount on every seed (A3 moved it +76 on all four); ' +
       'different arithmetic moves it by a different amount on each seed, because a different ' +
@@ -368,8 +368,8 @@ function suiteExact() {
     var s101 = newGame(101);
     for (var j = 0; j < 2000; j++) stepTick(s101);
     var h101 = _exatStateHash(s101);
-    assertEqual(h101.hash, 3595343226, 'seed 101 diverged after 2000 ticks — state is now ' +
-      h101.bytes + ' bytes of JSON against a pinned 130732');
+    assertEqual(h101.hash, 3149818761, 'seed 101 diverged after 2000 ticks — state is now ' +
+      h101.bytes + ' bytes of JSON against a pinned 127284');
   });
 
   test('the pin would notice a one-bit change — it is not hashing a constant', function () {

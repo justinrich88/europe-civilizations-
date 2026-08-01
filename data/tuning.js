@@ -1138,4 +1138,65 @@ const BAL = {
     // freezing. It is one constant and it is isolated.
     FORT_APPROACH_LOSS: 0.0005,
   },
+
+  // -------------------------------------------------------------------------
+  // 13. Passage and march attrition — 06-movement-and-attrition.md, roadmap B1
+  //
+  // THE KEYSTONE. Before this, `_moveCanTraverse` was `st.owner === pid`: a wave
+  // could only walk on ground its owner already held, so "multi-hop" was a claim
+  // §8 made and the game did not honour. Opening it is what makes the AI's
+  // horizon real, makes fog load-bearing (you can march where you cannot see),
+  // and makes encirclement reachable for the first time.
+  // -------------------------------------------------------------------------
+  PASSAGE: {
+    // THE TOLL, charged ONCE on ENTERING a station the wave does not own, as a
+    // multiple of that station's full defensive power.
+    //
+    // WRITTEN AS A RELATIONSHIP, NOT A BOOLEAN (§6). `own` and `hostile` are the
+    // only cases that exist, `neutral` sits between them, and `ally` is where a
+    // future team system plugs in at zero cost. Retrofitting a relationship into
+    // an `owner === pid` test is the expensive order, so it is written this way
+    // now while it is free.
+    //
+    // ABSOLUTE, NOT FRACTIONAL, for exactly the reason §2 gives for march
+    // attrition: a fractional toll costs every stack the same PERCENTAGE, so mass
+    // buys nothing and distance is free to anyone. An absolute toll kills the raid
+    // and barely troubles the army. Reach is bought with mass.
+    TOLL_OWN: 0,
+    TOLL_NEUTRAL: 0.05,
+    TOLL_HOSTILE: 0.15,
+
+    // How much a unit of expected toll is worth in ROUTE distance.
+    //
+    // The router has to price the detour or "pay the toll and go around" is not a
+    // choice the player can express — they pick a target, not a path. 6.0 makes
+    // crossing a typical held front worth roughly a two-hop detour.
+    //
+    // COARSE ON PURPOSE, and this is the load-bearing implementation note:
+    // routing weight depends on OWNERSHIP ALONE, never on garrison size, because
+    // the route cache is keyed by `ownerEpoch` and garrisons change every single
+    // tick. A weight that read stationPower() would either be stale on every
+    // route or throw the cache away sixty times a second. The toll actually
+    // CHARGED does scale with the real garrison; only the router's estimate is
+    // blunt.
+    TOLL_ROUTE_WEIGHT: 6.0,
+
+    // MARCH ATTRITION — flat units per tick in transit, never a fraction.
+    //
+    // §2 is emphatic and the reasoning is the whole design: fractional attrition
+    // costs a 10-unit raid and a 200-unit army the same 8%, so distance is free
+    // to anyone. Flat costs them the same absolute amount — the raid dies, the
+    // army arrives at 95%. Deep strikes become a thing armies do, and a long
+    // march is a commitment whose size you can see before making it.
+    //
+    // This is also what deletes the sea as a special system (§3): a sea link is
+    // already 3.2x slower, so it already costs 3.2x the attrition, with no sea
+    // rule at all.
+    //
+    // 0.004/tick is ~0.4 units over a 100-tick hop. A 10-unit raid loses 4% on a
+    // short hop and cannot cross the map; a 200-unit army will not notice.
+    // UNTUNED — §7 says the tell is the mean hops from border to target, and if
+    // that is still 1 after this ships the numbers are wrong, not the design.
+    MARCH_LOSS_PER_TICK: 0.004,
+  },
 };

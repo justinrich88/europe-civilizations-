@@ -109,7 +109,29 @@ function linkBetween(a, b) {
 // never appear in the middle of one. That single asymmetry is the whole of the
 // traversal rule -- "the final station is exempt" falls out of it rather than
 // being special-cased at the end.
-function _moveSearch(from, canPass) {
+// Extra route distance for entering `sid`, so the router can price a detour.
+//
+// "Pay the toll and go around, or pay the battle and go through" (§6) is only a
+// choice the player can express if the ROUTER makes it — the player picks a
+// target, never a path. So the toll has to be in the edge weight.
+//
+// OWNERSHIP ONLY, NEVER GARRISON SIZE, and this is the load-bearing constraint
+// rather than an approximation I settled for. The route cache is keyed on
+// `state.ownerEpoch`, which changes on capture; garrisons change every tick. A
+// weight that read stationPower() would be stale on every cached route, or would
+// throw the cache away sixty times a second. The toll actually CHARGED still
+// scales with the real garrison — only the router's estimate is blunt, and it is
+// blunt in the direction that matters: own ground free, neutral cheap, hostile
+// dear.
+function _moveRouteWeight(state, pid, sid) {
+  if (!state || typeof pid !== 'string') return 0;
+  var rel = movePassageRelation(state, pid, sid);
+  if (rel === 'own') return 0;
+  var rate = (rel === 'neutral') ? BAL.PASSAGE.TOLL_NEUTRAL : BAL.PASSAGE.TOLL_HOSTILE;
+  return rate * BAL.PASSAGE.TOLL_ROUTE_WEIGHT * 100;
+}
+
+function _moveSearch(from, canPass, weight) {
   var adj = stationAdjacency();
   var idx = linkIndex();
   var dist = {}, prev = {}, done = {};
@@ -135,7 +157,7 @@ function _moveSearch(from, canPass) {
       var to = nb[i];
       if (done[to]) continue;
       var l = idx[_linkKey(best, to)];
-      var d = dist[best] + (l ? l.dist : 1);
+      var d = dist[best] + (l ? l.dist : 1) + (weight ? weight(to) : 0);
       if (d < dist[to]) { dist[to] = d; prev[to] = best; }
     }
   }
@@ -173,10 +195,82 @@ function _dijkstra(from) {
 // is exempt by construction in _moveSearch: a station that fails this test can
 // still be REACHED, it just cannot be expanded from. So attacking your
 // neighbour always works; only marching through them does not.
-function _moveCanTraverse(state, pid, sid) {
+// ---------------------------------------------------------------------------
+// PASSAGE — 06-movement-and-attrition.md, roadmap B1
+//
+// This function used to be `st.owner === pid`, and that one line was the reason
+// "multi-hop movement" was a claim 00-vision.md §8 made and the game did not
+// honour. Opening it is what makes the AI's horizon real, makes fog
+// load-bearing (you can now march somewhere you cannot see), and makes
+// encirclement reachable — bypassing a fortress to cut the ground behind it,
+// which connection decay has always rewarded and no player has ever been able
+// to attempt.
+// ---------------------------------------------------------------------------
+
+// The RELATIONSHIP between a wave's owner and the ground it is entering, as a
+// string rather than a boolean.
+//
+// §6 asks for exactly this and gives the reason: with explicit teams, passage
+// through an ally's ground must cost nothing, and "retrofitting a relationship
+// check into a boolean is the more expensive order". `own` and `hostile` are the
+// only cases that exist today; `neutral` sits between them; `ally` is a case
+// statement away and needs no other change.
+function movePassageRelation(state, pid, sid) {
   var st = state.stations[sid];
-  if (!st) return false;
-  return st.owner === pid;
+  if (!st) return 'hostile';
+  if (st.owner === pid) return 'own';
+  if (st.owner === 'neutral') return 'neutral';
+  return 'hostile';
+}
+
+// Units a wave of `pid` loses ENTERING `sid`, charged once.
+//
+// Scaled by the station's FULL defensive power — garrison, terrain, `defensive`
+// type and fortification tier — through the canonical
+// stationPower(state, sid, 'defender'). §6 is explicit that this must not derive
+// a second toll formula from unit counts: that is known-issues #9, logged five
+// times and twice inside the combat maths specifically. One power function, two
+// callers — the battle and the toll.
+//
+// An empty neutral village is a road. A fortified enemy citadel is a wall you
+// would rather walk around.
+function movePassageToll(state, pid, sid) {
+  var rel = movePassageRelation(state, pid, sid);
+  var rate = (rel === 'own') ? BAL.PASSAGE.TOLL_OWN
+    : (rel === 'neutral') ? BAL.PASSAGE.TOLL_NEUTRAL
+    : BAL.PASSAGE.TOLL_HOSTILE;
+  if (!(rate > 0)) return 0;
+  if (typeof stationPower !== 'function') return 0;
+  var p = stationPower(state, sid, 'defender');
+  return (p > 0) ? rate * p : 0;
+}
+
+// Everything is passable now. Kept as a function rather than deleted because it
+// is the seam a future rule goes through — impassable ground (a blockade, a
+// closed strait) has somewhere to live, and every caller already asks.
+function _moveCanTraverse(state, pid, sid) {
+  return !!state.stations[sid];
+}
+
+// The CLOSED search — own ground only. What _moveOwnSearch used to be, kept for
+// standing orders (see routeFor). No route weight: on ground you hold there is
+// no toll to price.
+var _heldRouteCache = null, _heldRouteState = null, _heldRouteEpoch = -1;
+
+function _moveHeldSearch(state, pid, from) {
+  if (_heldRouteState !== state || _heldRouteEpoch !== (state.ownerEpoch || 0)) {
+    _heldRouteCache = {};
+    _heldRouteState = state;
+    _heldRouteEpoch = state.ownerEpoch || 0;
+  }
+  if (!_heldRouteCache[pid]) _heldRouteCache[pid] = {};
+  var byFrom = _heldRouteCache[pid];
+  if (byFrom[from]) return byFrom[from];
+  var out = _moveSearch(from, function (sid) {
+    return state.stations[sid] && state.stations[sid].owner === pid;
+  });
+  byFrom[from] = out;
+  return out;
 }
 
 function _moveOwnSearch(state, pid, from) {
@@ -188,7 +282,9 @@ function _moveOwnSearch(state, pid, from) {
   if (!_ownRouteCache[pid]) _ownRouteCache[pid] = {};
   var byFrom = _ownRouteCache[pid];
   if (byFrom[from]) return byFrom[from];
-  var out = _moveSearch(from, function (sid) { return _moveCanTraverse(state, pid, sid); });
+  var out = _moveSearch(from,
+    function (sid) { return _moveCanTraverse(state, pid, sid); },
+    function (sid) { return _moveRouteWeight(state, pid, sid); });
   byFrom[from] = out;
   return out;
 }
@@ -217,11 +313,29 @@ function routeBetween(fromSid, toSid) {
 // The route a wave of `pid` may legally walk, or null when every path to the
 // target runs through ground somebody else holds. Same shape and same tie-break
 // as routeBetween; it is the passability rule that differs.
-function routeFor(state, pid, fromSid, toSid) {
+// `standingOnly` keeps the CLOSED rule: own ground and nothing else.
+//
+// PASSAGE IS FOR ARMIES, NOT FOR LOGISTICS, and this distinction is the one thing
+// B1 must not blur. A standing order is a supply line between two cities one
+// power holds; routing it through hostile ground would send an unattended trickle
+// into somebody else's country, where _moveIntercepts halts it and it stands down
+// — over and over, forever, with the player never having asked for any of it.
+//
+// Found by test/runner.js's standing-order tripwire the moment traversal opened:
+// "a standing wave was routed over ground its owner does not hold — bil->par via
+// bdx". The suite was right and the first version of this change was wrong.
+//
+// A separate cache, because the two searches answer different questions from the
+// same (state, epoch, power) key and sharing one would hand a standing order the
+// army's route or the reverse.
+function routeFor(state, pid, fromSid, toSid, standingOnly) {
   if (!state || !state.stations) return routeBetween(fromSid, toSid);
   if (typeof STATIONS === 'undefined' || !STATIONS[fromSid] || !STATIONS[toSid]) return null;
   if (fromSid === toSid) return [fromSid];
-  return _moveWalkBack(_moveOwnSearch(state, pid, fromSid), fromSid, toSid);
+  var search = standingOnly
+    ? _moveHeldSearch(state, pid, fromSid)
+    : _moveOwnSearch(state, pid, fromSid);
+  return _moveWalkBack(search, fromSid, toSid);
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +404,22 @@ function _chargeSeaCrossing(w, from, to) {
 // and fights, whether that ground is a rival's or neutral's. If routing and
 // interception ever disagree, a wave either walks through a garrison it should
 // have fought (the bug above) or halts on ground it was entitled to cross.
+// Does entering `sid` STOP this wave short of its destination?
+//
+// THIS USED TO BE "ANY GROUND YOU DO NOT OWN", AND THAT WAS THE OTHER HALF OF
+// THE CLOSED TRAVERSAL RULE. With passage open, a manual wave walking through
+// hostile ground is the whole point — it pays the toll and keeps going. Stopping
+// it would make encirclement impossible again through a different door.
+//
+// A STANDING wave still halts, and the reasoning below is unchanged: it is not a
+// decision the player made about this march. Feeding logistics into a battle
+// nobody clicked for, 12% of a garrison at a time, is defeat in detail committed
+// by an automated mechanic on the player's behalf — which 00-vision.md §8 names
+// as the defining mistake of the game.
 function _moveIntercepts(state, w, sid) {
   var st = state.stations[sid];
   if (!st) return false;
+  if (!w.standing) return false;
   return st.owner !== w.owner;
 }
 
@@ -408,6 +535,11 @@ function _advanceWave(state, w) {
     }
 
     _chargeSeaCrossing(w, from, to);
+    // THE PASSAGE TOLL, charged ONCE on entering ground the wave does not own
+    // (§6). This is the mid-path case only: the destination is not tolled,
+    // because entering the destination IS the battle and charging both would
+    // bill one arrival twice.
+    _chargePassage(state, w, to);
     w.hop++;
     w.progress = 0;
   }
@@ -675,6 +807,11 @@ function movementTick(state) {
 
     if (totalUnits(w.units) <= BAL.ANNIHILATION_EPSILON) continue;
 
+    // MARCH ATTRITION — 06-movement-and-attrition.md §2. Charged once per wave
+    // per tick, BEFORE advancing, so a wave that dies this tick never moves on
+    // strength it no longer has.
+    if (_chargeMarch(state, w)) continue;                // destroyed en route
+
     _advanceWave(state, w);
 
     if (w.dead) continue;                                // stood down mid-march
@@ -686,6 +823,83 @@ function movementTick(state) {
   // hold references to state.waves.
   state.waves.length = 0;
   for (var k = 0; k < kept.length; k++) state.waves.push(kept[k]);
+}
+
+// Charge the passage toll for entering `sid`. Nothing on your own ground.
+//
+// The wave may die here, and that is correct: running the gauntlet past a
+// fortress with a raiding party should lose the raiding party.
+function _chargePassage(state, w, sid) {
+  var toll = movePassageToll(state, w.owner, sid);
+  if (!(toll > 0)) return;
+  var held = totalUnits(w.units);
+  if (held <= 0) return;
+  if (held - toll <= (BAL.ANNIHILATION_EPSILON || 0)) {
+    w.units = emptyUnits();
+    w.dead = true;
+    if (typeof logEvent === 'function') {
+      logEvent(state, 'lost', POWERS[w.owner].name + ' lost a column forcing passage at ' +
+        STATIONS[sid].name, sid);
+    }
+    if (state.orderStats) state.orderStats.unitsLost += held;
+    return;
+  }
+  w.units = splitUnits(w.units, (held - toll) / held);
+}
+
+// A wave loses strength for every tick it is in transit. Returns true if this
+// tick destroyed it.
+//
+// FLAT UNITS PER TICK, NEVER A FRACTION, and §2 is emphatic about why. A
+// fractional rate costs a 10-unit raid and a 200-unit army the same PERCENTAGE,
+// so mass buys nothing and distance is free to anyone. A flat rate costs them
+// the same ABSOLUTE amount: the raid dies, the army arrives at 95%.
+//
+// That produces the rule the design wants — REACH IS BOUGHT WITH MASS. Deep
+// strikes become something armies do rather than something anyone can do, and a
+// long march is a commitment whose size you can see before you make it. It also
+// gives 00-vision.md §5's "overwhelming force" principle a geographic dimension
+// it has never had.
+//
+// The historical case §2 cites: the German marches into Russia in both wars were
+// not lost to battles at the far end, they were lost to the front outrunning what
+// could sustain it.
+//
+// DESTROYED EN ROUTE IS A REAL AND LEGIBLE FAILURE — you overreached — so it is
+// logged. §2: "it must appear in the ticker, not vanish silently."
+//
+// Proportional across the bundle through splitUnits(), so the arithmetic is
+// unchanged when the three unit types collapse to one (04-development.md §9).
+function _chargeMarch(state, w) {
+  var rate = BAL.PASSAGE ? BAL.PASSAGE.MARCH_LOSS_PER_TICK : 0;
+  if (!(rate > 0)) return false;
+  var held = totalUnits(w.units);
+  if (held <= 0) return false;
+
+  // DEATH IS "WOULD FALL TO THE ANNIHILATION FLOOR", NOT "WOULD FALL TO ZERO".
+  //
+  // The first version tested `held <= rate` and that branch was UNREACHABLE:
+  // MARCH_LOSS_PER_TICK is 0.004 and ANNIHILATION_EPSILON is 0.01, so a wave
+  // whittled below the floor was silently discarded by movementTick's epsilon
+  // check on the NEXT tick — no log, no ticker line, no unitsLost. §2 is explicit
+  // that a column destroyed en route "is a real and legible failure — you
+  // overreached — and it must appear in the ticker, not vanish silently."
+  //
+  // Found by a test asserting the log entry, not by reading the code: the numbers
+  // that make it unreachable live in a different file from the branch.
+  var floor = BAL.ANNIHILATION_EPSILON || 0;
+  if (held - rate <= floor) {
+    w.units = emptyUnits();
+    w.dead = true;
+    if (typeof logEvent === 'function') {
+      logEvent(state, 'lost', POWERS[w.owner].name + ' lost a column marching on ' +
+        STATIONS[w.to].name + ' — it never arrived', w.to);
+    }
+    if (state.orderStats) state.orderStats.unitsLost += held;
+    return true;
+  }
+  w.units = splitUnits(w.units, (held - rate) / held);
+  return false;
 }
 
 // A fortified station bleeds a hostile assault while it closes.
@@ -1273,7 +1487,7 @@ function _ordPlanPower(state, pid) {
       // nothing the send was not going to pay anyway — and there is exactly one
       // authority on whether a path exists rather than a cheaper approximation
       // that can disagree with it.
-      if (!routeFor(state, pid, from, to)) { edges.push(_ordBlocked(to, 'unreachable')); live.push(null); continue; }
+      if (!routeFor(state, pid, from, to, true)) { edges.push(_ordBlocked(to, 'unreachable')); live.push(null); continue; }
       edges.push(null);
       live.push(to);
       if (_ordHeadroom(state, to, inbound) >= minSend) open++;

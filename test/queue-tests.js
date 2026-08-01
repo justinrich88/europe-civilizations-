@@ -256,10 +256,19 @@ function suiteQueue() {
 
     // The wave has already stepped once, but its payload does not change in
     // flight, so this is the launch amount.
-    assertClose(totalUnits(launched[0].units), seen * 0.5, 1e-9,
+    // MINUS ONE TICK OF MARCH ATTRITION. The wave is read after the stepTick that
+    // created it, and since B1 every wave in transit pays BAL.PASSAGE
+    // .MARCH_LOSS_PER_TICK per tick — including the one it launched on. Written
+    // out rather than absorbed into a loose tolerance, because the quantity this
+    // test exists to protect is 0.004-sized itself: the whole point is that a
+    // volley is priced against pre-growth units, and growth on a 20-unit garrison
+    // is the same order as one tick of attrition.
+    var expect = seen * 0.5 - BAL.PASSAGE.MARCH_LOSS_PER_TICK;
+    assertClose(totalUnits(launched[0].units), expect, 1e-9,
       'the volley carried ' + totalUnits(launched[0].units) + ' from a garrison of ' +
-      seen + ' at half — so it was priced against a board the player never saw. ' +
-      'Check that commandsTick is still ahead of growthTick.');
+      seen + ' at half (expected ' + expect + ' after one tick of march attrition) ' +
+      '— so it was priced against a board the player never saw. Check that ' +
+      'commandsTick is still ahead of growthTick.');
   });
 
   // ── 4. snapshot carries the queue ──────────────────────────────────────
