@@ -421,16 +421,59 @@ call. One mitigation found by accident: **fog cuts the density hard.** On a
 mid-game board with 42 developments, Germany could see 3 of them, because the pips
 are gated at belief level 2. The 108-stations-of-mush case does not arise.
 
+#### The type glyph is gone, and type is no longer on the map at all — 2026-08
+
+Player report: *"the development dots are the same for fortifications vs port or
+factory — should there be any visual difference to help the attacker know what
+they're up against?"*
+
+They were the same, and the glyph that was supposed to distinguish them had two
+faults that the 2 × 3 px measurement above understates:
+
+1. At 2 × 3 CSS pixels an F, a P and a K are the same speck.
+2. **It was drawn on top of the city name.** The glyph sat at `devY + 1.2` and
+   the label sits just above the pip row, so any name long enough to reach the
+   centre overprinted it: Berlin rendered as *"Berfin"*, Aalborg swallowed its P
+   whole. The one surface naming the type was also corrupting the label.
+
+**A shape per kind was then tried and rejected on measurement** — square fort,
+round port, triangular factory. Screenshotted at `deviceScaleFactor: 1`, because
+a high-dpi capture flatters a shape the player's pixel grid never receives: at
+four pixels the three silhouettes are the same blob. And **zoom cannot rescue
+it.** `CAM_SYMBOL_EXP` is 1, so every symbol on this board holds a *constant
+on-screen size*; a pip is four pixels at 1× and four pixels at the camera's 4×
+ceiling. Colour would work and is not available — §8 spends colour on ownership.
+
+So the map answers a smaller question honestly rather than a bigger one badly:
+**it marks only developments that have an effect**, read off `DEV_LIVE`. Today
+that is forts and nothing else — and a fort is exactly what the report was
+asking about, because fortification is the only development that touches a fight
+(`sim/combat.js`'s additive block and the approach interdiction in
+`sim/movement.js`, both reading the OPERATING tier). A pip row on the board now
+*means* "fortified, this hard", with no kind to decode.
+
+A port or a factory therefore draws nothing. That is consistent rather than
+missing: the rail already tells its builder *"no effect yet"* in words, from the
+same `DEV_LIVE`. When a port does something its pips appear here with no code
+change, and telling two live kinds apart becomes worth solving — with a reason to
+solve it, and with this measurement already in hand.
+
+Guarded by `test/devmark-tests.js` in `tests-ui.html` (5 tests, four mutations,
+each caught). **That suite cannot see legibility** — both faults above rendered
+exactly the elements they were asked to and would have passed any DOM assertion.
+Only a screenshot found them, and only a screenshot will find the next one.
+
 ### Still open from this section's own list
 
 - **§10.1 effect magnitudes.** `FORT_POWER_PER_TIER` is 0.5, derived against
   `DEFENSE_BONUS_POWER` (6.0) rather than picked — a tier-2 fort adds one full
   point of fort level, a tier-3 capital 1.5, half a citadel. Untuned.
-- **§10.3 does the AI build? NO, AND THIS MATTERS MORE THAN IT LOOKS.** `aiTick`
-  is untouched, so development is currently a player-only mechanic. The visible
-  consequence: the balance hashes did not move at all, because nothing in a
-  headless run ever builds. Milestone 6 would measure a game the player is not
-  playing.
+- ~~**§10.3 does the AI build? NO, AND THIS MATTERS MORE THAN IT LOOKS.**~~
+  **Closed at B3.** It builds — see §10.3. The consequence named here was
+  correct and is now reversed: the hashes moved a very long way, and 96 games
+  measured before and after put the win-rate spread at 84.4 → 70.8 points with
+  games running 21% longer, the latter being fortification making cities harder
+  to take.
 
 ---
 

@@ -98,6 +98,10 @@ var TEST_FILES = [
   // deliberately absent from TEST_SUITES below so they do not run twice.
   'test/scenarios-routes.js',
   'test/scenarios-routeview.js',
+  // render/map.js's development mark. Same argument as the two above: the node
+  // harness loads no render/ file that draws a station, so a green there says
+  // nothing about this code at all.
+  'test/devmark-tests.js',
 ];
 
 // Suite entry points to call, in order. Named rather than discovered so a suite
@@ -110,7 +114,7 @@ var TEST_FILES = [
 // this loop moved on without waiting. Silently, with the totals still adding
 // up. Awaiting a non-promise is free, so the rule is simply: always wait.
 var TEST_SUITES = ['suiteSelect', 'suiteSelectSafety', 'suiteRouteView', 'suiteCamera',
-                   'suiteOrdersWhy'];
+                   'suiteOrdersWhy', 'suiteDevMark'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');

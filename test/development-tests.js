@@ -429,6 +429,50 @@ function suiteDevelopment() {
     assert(!c.ok && c.reason === 'unknown-kind', 'an invented kind was accepted');
   });
 
+  test('an illegal kind stays illegal after something else is built there', function () {
+    // REPORTED FROM PLAY. The Ruhr is a producer and inland, so its options are
+    // fort and factory and a port has never been available. Pressing `b` there
+    // after fortifying it offered PORT, blocked with "already developed".
+    //
+    // The cause was ordering, not legality: developmentPlan asked "is something
+    // already built here?" before it asked "was this kind ever legal here?", so an
+    // impossible development came back merely BLOCKED, and render/select.js
+    // (correctly) only drops a row whose reason is 'not-legal-here'. The row then
+    // pushed factory from digit 2 to digit 3 the instant a fort went up — the
+    // chooser's "the digit for a given development does not move" comment,
+    // defeated by a moment rather than by a city.
+    //
+    // Asserted on BOTH kinds and BOTH orderings, because a fix that only reorders
+    // one arm would still be wrong for the other.
+    var pro = P.producer;                       // producer, inland: no port
+    var hold = P.plainHolding;                  // holding, inland: no port, no factory
+    assert(developmentOptions(pro).indexOf('port') < 0,
+      'the fixture station ' + pro + ' is coastal after all — nothing to prove');
+
+    var s = _devtBoard('ger', pro, STATIONS[pro].capacity * 3);
+    assertEqual(developmentPlan(s, pro, 'ger', 'port').reason, 'not-legal-here',
+      'a port at inland ' + pro + ' was not refused as illegal BEFORE anything was built');
+    assert(applyCommand(s, { type: 'build', owner: 'ger', stations: [pro], kind: 'fort' }).ok,
+      'the fixture could not fortify ' + pro);
+    assertEqual(developmentPlan(s, pro, 'ger', 'port').reason, 'not-legal-here',
+      'a port at inland ' + pro + ' became merely "already-developed" once a fort ' +
+      'stood there — the build chooser then lists a development that has never ' +
+      'been available, and every digit after it moves');
+    // The control that keeps this from passing for the wrong reason: a kind that
+    // IS legal here must still report already-developed, or the fix has simply
+    // made every blocked kind illegal.
+    assertEqual(developmentPlan(s, pro, 'ger', 'factory').reason, 'already-developed',
+      'factory is legal at producer ' + pro + ', so a fort standing there must ' +
+      'block it as already-developed, not as illegal');
+
+    var t = _devtBoard('ger', hold, STATIONS[hold].capacity * 3);
+    assert(applyCommand(t, { type: 'build', owner: 'ger', stations: [hold], kind: 'fort' }).ok,
+      'the fixture could not fortify ' + hold);
+    assertEqual(developmentPlan(t, hold, 'ger', 'factory').reason, 'not-legal-here',
+      'a factory at non-producer ' + hold + ' became "already-developed" once a ' +
+      'fort stood there');
+  });
+
   // ── the effect ─────────────────────────────────────────────────────────
 
   test('an operating fortification raises defence; an unmanned one does not', function () {

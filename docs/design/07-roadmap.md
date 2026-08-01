@@ -300,6 +300,34 @@ renders as a build. Unfixed, the panel showed the fortification of Beauce as one
 of eleven assaults — checked against the shipped page, not a copy of it, because
 no harness covers that file.
 
+**DID IT FIX DEFEAT IN DETAIL? PARTLY, AND NOWHERE NEAR ENOUGH.** 96 games,
+seeds 100–195, run on the B1 commit and again on B3:
+
+| | before (B1) | after (B3) |
+|---|---|---|
+| French Republic | **84.4%** | **70.8%** |
+| Russian Empire | 4.2% | 7.3% |
+| Austria-Hungary | 3.1% | 4.2% |
+| British / German / Italian | 2.1 / 1.0 / 1.0% | 2.1 / 1.0 / 1.0% |
+| Ottoman Empire | 0.0% | 0.0% |
+| win-rate spread | 84.4 pts | **70.8 pts** |
+| mean game length | 20,839 ticks | **25,308 ticks** (+21%) |
+
+The spread closed by 13.6 points and games got a fifth longer, which is the
+right direction and the size of effect a *decision-making* change should have.
+It is not a balance fix and must not be read as one: France still wins seven
+games in ten, and three powers are still under 2%. **The residue is positional,
+not tactical** — B3 changed how well a power fights with what it has, and every
+power got the same change. What is left is what the opening deals them, which is
+Phase D's problem and is still blocked on the owner's answer to *"is equal win
+rate even the target?"*
+
+The +21% game length is fortification working: cities are harder to take. B1's
+approach interdiction is the release valve and it is not fully paying for the
+walls yet — worth a look when Phase D opens, and NOT worth tuning before then,
+because the constants would be tuned against a board whose openings are known to
+be unequal.
+
 ---
 
 ## Phase C — combat and investment

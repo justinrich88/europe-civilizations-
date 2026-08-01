@@ -3420,15 +3420,14 @@ kbd.help-key {
    borrowed (§8). Type is the single-letter glyph; these are neutral ink. */
 .station-dev { pointer-events: none; }
 
-.station-dev-glyph {
-  fill: #8b949e;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 600;
-  letter-spacing: 0;
-  /* An SVG presentation attribute on the element loses to any rule here
-     (known-issues #15), so font-size is deliberately NOT set in this block —
-     render/map.js writes it per node and this rule must not beat it. */
-}
+/* .station-dev-glyph is GONE. It was a 4.4px F / P / K naming the development's
+   type, and screenshotting the shipped page at 800x900 measured it at 2 x 3 CSS
+   pixels — drawn on top of the city name, so Berlin read as "Berfin". Replacing
+   the letter with a SHAPE per kind was tried next and measured at
+   deviceScaleFactor 1, where a square, a circle and a triangle at four pixels
+   are the same blob; CAM_SYMBOL_EXP is 1, so zoom never rescues it. The board
+   now marks only developments with an effect and does not name the kind at all
+   (render/map.js, above _mapDevDraw). */
 
 .station-dev-pip {
   fill: none;

@@ -252,6 +252,24 @@ function developmentPlan(state, sid, owner, kind) {
   if (!st) { out.reason = 'unknown-station'; return out; }
   if (st.owner !== owner) { out.reason = 'not-owned'; return out; }
 
+  // LEGALITY BEFORE OCCUPANCY. A kind that was never legal at this station is
+  // 'not-legal-here' whatever is already standing in it, and the order of these
+  // two checks is not a style question — it decides what the build chooser shows.
+  //
+  // Reported from play: pressing `b` at The Ruhr, which is a producer and not
+  // coastal, offered PORT with the reason "already developed". A virgin Ruhr
+  // answered 'not-legal-here' for port and render/select.js correctly dropped the
+  // row; the moment a fortification went up, the already-developed arm below fired
+  // FIRST and port came back as merely blocked, so the chooser listed a
+  // development that has never been available there. Worse, it listed it SECOND —
+  // so the digit for factory moved from 2 to 3 the instant a fort was built, which
+  // is precisely what the chooser's own "the digit for a given development does
+  // not move" comment exists to prevent.
+  if (kind && developmentOptions(sid).indexOf(kind) < 0) {
+    out.reason = 'not-legal-here';
+    return out;
+  }
+
   var have = developmentKind(state, sid);
   if (have) {
     // §5: one per station, and it can never be CHANGED — only lost with the
