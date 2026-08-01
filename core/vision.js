@@ -156,8 +156,9 @@ function stationVision(sid) {
 // What `pid` may read on this board, as { stationId: level }.
 //
 //   2  visible — held by pid, within stationVision() hops of a station it
-//                holds counted over LINKS, or standing in a TERRITORY pid has
-//                a station in
+//                holds counted over LINKS, standing in a TERRITORY pid has
+//                a station in, or an endpoint of the hop one of pid's WAVES is
+//                currently walking (06-movement-and-attrition.md §5)
 //   0  hidden  — everything else
 //
 // THIS FUNCTION NEVER RETURNS 1, and that is permanent rather than unfinished.
@@ -203,13 +204,84 @@ function visibleTo(state, pid) {
     if (v > budget[sid]) budget[sid] = v;
     if (v > reach) reach = v;
   }
-  if (!reach) return out;                 // holds nothing: sees nothing
-
-  if (typeof LINKS !== "undefined" && LINKS) _visRelax(out, budget, reach);
+  // `reach` of 0 means pid holds nothing, and the two rules below are then
+  // no-ops for the first and NOT for the second: a power whose last city fell
+  // this tick can still have armies on the road, and they can still see.
+  // (There was an early `return out` here before wave vision; it was correct
+  // only while every source of sight was a station.)
+  if (reach && typeof LINKS !== "undefined" && LINKS) _visRelax(out, budget, reach);
   // PRESENCE, after the hop walk and deliberately not folded into it. A country
   // you stand in is known; it does not become a lookout tower.
-  _visOwnCountries(out, stations, pid);
+  if (reach) _visOwnCountries(out, stations, pid);
+  // WAVES. Last, for the same reason presence is not folded into the walk:
+  // an army is not a lookout tower either.
+  _visWaves(out, state, pid);
   return out;
+}
+
+// Your armies see the road they are on.
+//
+// 06-movement-and-attrition.md §5, and it is the whole of B2: **a wave grants
+// level 2 to BOTH ENDPOINTS of the hop it is currently on** — `path[hop]`, the
+// station it is leaving, and `path[hop + 1]`, the one it is walking towards.
+//
+// WHY IT WAS NOT BUILT WHEN IT WAS ASKED FOR. The request — *"when your army
+// approaches a station it should remove the fog"* — predates B1, and until B1 a
+// wave could only ever traverse ground its own owner held, so every station on
+// every path was already level 2 by the first rule in visibleTo. The feature
+// was a measured no-op and was deferred rather than shipped as a decoration.
+// B1 opened passage; the intermediate stations of a multi-hop march are now
+// routinely ground the sender does not hold and cannot otherwise see, and this
+// function is what makes them visible while the army is on them.
+//
+// WHAT IT BUYS: **scouting**, using a verb that already exists. Send a small
+// force down a road to find out what is on it, at the cost of the force —
+// which flat march attrition already prices, since a scout is cheap to send and
+// unlikely to come home.
+//
+// IT DOES NOT PROJECT SIGHT, exactly as presence does not. Endpoints are
+// written straight into `out` and never into `budget`, so a column does not
+// light up the countryside around it — it lights the two ends of its own road
+// and stops. That keeps the rule statable in one sentence, keeps it cheap, and
+// keeps a marching army from being worth more as a lookout than a fortress.
+//
+// NO BRANCH ON `standing`. A supply trickle sees what an assault column sees;
+// the design has one kind of army on the map and this file is not the place to
+// invent a second. That is very nearly a no-op by construction — standing
+// orders keep B1's closed traversal rule, so both endpoints of a standing
+// wave's hop are ground its owner holds, hence already level 2 — and the "very
+// nearly" is real and correct: a route whose ground changed hands mid-transit
+// has a foreign endpoint for the ticks before the wave stands down, and the
+// trickle is physically there to see it.
+//
+// SYMMETRIC, without exception (02-visibility-and-sea.md §1). There is no
+// `pid`-dependent branch here and the AI reads this through the same call the
+// renderer does: it can scout, and it can be scouted.
+//
+// PURE, like everything else in this file: it writes into the `out` object
+// visibleTo built and touches neither `state` nor the waves themselves.
+//
+// Iterates `state.waves` in ARRAY ORDER, which is deterministic (it is an
+// array, and sim/movement.js rebuilds it in order). Set-to-2 is idempotent, so
+// no ordering could change the answer regardless.
+function _visWaves(out, state, pid) {
+  var waves = (state && state.waves) ? state.waves : null;
+  if (!waves || !waves.length) return;
+
+  for (var i = 0; i < waves.length; i++) {
+    var w = waves[i];
+    if (!w || w.owner !== pid) continue;
+    var path = w.path;
+    if (!path || path.length < 2) continue;
+    var h = w.hop;
+    if (typeof h !== "number" || h < 0 || h + 1 >= path.length) continue;
+    // `out[x] !== undefined` rather than a truth test: 0 is the ordinary value
+    // for a station this power cannot otherwise see, which is the whole point,
+    // and the guard is against a path naming a station the live board has no
+    // record of (a restored snapshot taken across a map regeneration).
+    if (out[path[h]] !== undefined) out[path[h]] = 2;
+    if (out[path[h + 1]] !== undefined) out[path[h + 1]] = 2;
+  }
 }
 
 // You know your own countries.

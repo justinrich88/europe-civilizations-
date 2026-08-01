@@ -573,16 +573,27 @@ const MAP_FOG_FILL_OP = '0.42';
 // not an optimisation of vision.js (core/vision.js: "DO NOT ADD A CACHE"), it
 // is this file declining to ask the same question 108 times in one frame.
 //
-// The key is (state identity, tick, ownerEpoch, pid). ownerEpoch alone is the
-// exact and total invalidation signal for visibility — vision.js names it as
-// the sanctioned key — and `tick` is carried as well so this can never outlive
-// a tick even if some future path moves a station without the epoch. A PAUSED
-// board therefore recomputes nothing at all, and a running one recomputes at
-// most once per tick against a 671us tick.
+// The key is (state identity, tick, ownerEpoch, pid, waves). ownerEpoch alone
+// was the exact and total invalidation signal while every source of sight was a
+// station — vision.js names it as the sanctioned key — and `tick` is carried as
+// well so this can never outlive a tick even if some future path moves a
+// station without the epoch. A PAUSED board therefore recomputes nothing at
+// all, and a running one recomputes at most once per tick against a 671us tick.
+//
+// B2 ADDED A FIFTH COMPONENT AND IT IS NOT DECORATION. A wave grants sight
+// (core/vision.js, _visWaves), and a wave can appear with the tick and the
+// epoch both unmoved: sends from render/select.js are immediate, so a player
+// who marches out of a PAUSED board would otherwise see the fog stay shut until
+// they unpaused. `nextWaveId` catches every creation and `waves.length` every
+// removal, which between them cover a create and an arrival landing in the same
+// tick. A wave ADVANCING a hop cannot be missed by either, because a hop only
+// ever advances inside movementTick and `tick` moves with it.
 let _mapFogState = null;
 let _mapFogTick = -1;
 let _mapFogEpoch = -1;
 let _mapFogPid = null;
+let _mapFogWaveId = -1;
+let _mapFogWaveN = -1;
 let _mapFogVis = null;
 let _mapFogBoard = null;
 
@@ -600,12 +611,17 @@ function mapFogLevels(state) {
   if (!pid || typeof visibleTo !== 'function') return null;
   const tick = state.tick || 0;
   const epoch = state.ownerEpoch || 0;
+  const waveId = state.nextWaveId || 0;
+  const waveN = state.waves ? state.waves.length : 0;
   if (_mapFogState === state && _mapFogTick === tick &&
-      _mapFogEpoch === epoch && _mapFogPid === pid) return _mapFogVis;
+      _mapFogEpoch === epoch && _mapFogPid === pid &&
+      _mapFogWaveId === waveId && _mapFogWaveN === waveN) return _mapFogVis;
   _mapFogState = state;
   _mapFogTick = tick;
   _mapFogEpoch = epoch;
   _mapFogPid = pid;
+  _mapFogWaveId = waveId;
+  _mapFogWaveN = waveN;
   _mapFogVis = visibleTo(state, pid);
   _mapFogBoard = null;                 // derived from it; recompute on demand
   return _mapFogVis;

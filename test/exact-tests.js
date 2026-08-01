@@ -366,6 +366,24 @@ function suiteExact() {
     // count moved +20,763 on seed 100 and +23,240 on seed 101 — different
     // amounts, which is the signature of the second. The commit message carries
     // the board diff.
+    //
+    // NOT re-pinned at B2, and that is a MEASURED fact rather than a lucky one.
+    // Wave vision changes what a power can see, so a green here looks like
+    // evidence the change did nothing. It is not evidence either way, and the
+    // probe is in the commit record: sampling every 10th tick of seeds 100-103,
+    // a column reveals a station its owner could not otherwise see ZERO times
+    // in the first 2,000 ticks. Powers are still small, marches are still
+    // short, and everything a wave stands on is already lit by a city.
+    //
+    // Over a full 12,000 ticks it does fire — 8,555 station-ticks across the
+    // four seeds — and the 12,000-tick balance hashes moved on all four. What
+    // moved was `state.seen` and NOTHING ELSE: 0 of 108 cities have a different
+    // owner and every garrison is bit-identical, because not one of those
+    // 8,555 reveals was of a station its power had never seen. See
+    // 07-roadmap.md B2 for why that is structural rather than accidental.
+    //
+    // So this pin is silent about B2 by construction. Anyone tempted to quote
+    // it as "wave vision changed nothing" should quote the measurement instead.
     var s100 = newGame(100);
     for (var i = 0; i < 2000; i++) stepTick(s100);
     var h100 = _exatStateHash(s100);

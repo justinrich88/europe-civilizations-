@@ -229,6 +229,25 @@ The three levels are a **composition, not a fourth thing**:
 the only function that can mint a 1; `visibleTo()` returns only 0 and 2 and its
 contract is unchanged from before fog memory existed.
 
+**`visibleTo()` reads `state.waves`** as of B2 — a wave grants level 2 to both
+endpoints of the hop it is on, `path[hop]` and `path[hop+1]`
+(`06-movement-and-attrition.md` §5). It is still a claim about the present and
+still pure: sight moves with the army and the ground behind it goes dark again,
+which is what leaves level 1 reachable for anywhere a column has been. Waves
+are **not** vision sources — the two endpoints are written into the result and
+never into the hop budget — so a column lights its own road and nothing beside
+it. There is no branch on `wave.standing`.
+
+> One consequence for anything that memoises visibility: **`ownerEpoch` is no
+> longer the total invalidation signal.** It was exact while every source of
+> sight was a station, since nothing could change what a station sees without
+> moving a station. A wave can appear with `tick` and `ownerEpoch` both unmoved
+> — sends from `render/select.js` are immediate, so a march ordered on a paused
+> board does exactly that. `render/map.js`'s memo therefore also keys on
+> `nextWaveId` (every creation) and `waves.length` (every removal); `core/vision.js`
+> itself still holds no cache and its "sanctioned memo key" note is amended by
+> this paragraph.
+
 `wave.standing` is present **only on a wave created by a standing order**, and
 only ever as `true`. An ordinary send produces a wave with no such property, so
 a `send` command that predates the mechanic still yields a byte-identical wave.

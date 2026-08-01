@@ -164,6 +164,7 @@ function suiteFog(d) {
   _fogSuiteVisionData(d);
   _fogSuiteVisibleTo(d);
   _fogSuiteOwnCountries(d);
+  _fogSuiteWaves(d);
   _fogSuiteMemory(d);
   _fogSuiteAiSymmetry(d);
   _fogSuiteLayering(d);
@@ -630,6 +631,409 @@ function _fogSuiteOwnCountries(d) {
       'visibleTo changed the SIZE of the state — the presence rule wrote something');
     assert(after === before,
       'visibleTo mutated the state while revealing ' + pick.tid);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// fog / wave vision  —  B2
+//
+// 06-movement-and-attrition.md §5: *a wave grants level 2 to both endpoints of
+// the hop it is currently on.*
+//
+// THE REASON THIS SUITE IS HARD TO WRITE HONESTLY is the same reason the
+// feature waited for B1. Before passage, every station a wave touched was
+// ground its owner already held, so an implementation that revealed nothing
+// whatsoever would have passed any test written on an ordinary board — the
+// stations would have been level 2 anyway, by the first rule in visibleTo. So
+// every assertion here is made on a station the fixture has PROVEN dark first,
+// and the fixture itself asserts that it found one.
+//
+// The fixture is a power reduced to a single city, with a land path leading out
+// of it whose stations from index 2 onward are all level 0. Scanned from the
+// live map at test time like everything else in this file: no station id is
+// written down here.
+// ---------------------------------------------------------------------------
+
+// The first BFS-tree path out of `from`, `want` stations long, whose tail
+// (index 2 onward — index 1 is adjacent to `from` and is visible by the
+// ordinary hop rule) is entirely dark for whoever `vis` belongs to.
+//
+// Returns null when the map cannot supply one, and every caller asserts on that
+// rather than quietly measuring nothing.
+function _fogDarkPath(from, adj, vis, want) {
+  var prev = {}, seen = {}, q = [from], i, j;
+  seen[from] = true;
+  while (q.length) {
+    var cur = q.shift(), nb = adj[cur] || [];
+    for (j = 0; j < nb.length; j++) {
+      if (seen[nb[j]]) continue;
+      seen[nb[j]] = true;
+      prev[nb[j]] = cur;
+      q.push(nb[j]);
+    }
+  }
+  for (i = 0; i < STATION_IDS.length; i++) {      // sorted, so this is stable
+    var sid = STATION_IDS[i];
+    if (!seen[sid] || sid === from) continue;
+    var path = [sid], c = sid;
+    while (c !== from) { c = prev[c]; path.unshift(c); }
+    if (path.length !== want) continue;
+    var dark = true;
+    for (j = 2; j < path.length; j++) if (vis[path[j]] !== 0) dark = false;
+    if (dark) return path;
+  }
+  return null;
+}
+
+// { seed, pid, home, path, adj } or null. NO STATE — see _fogWaveBoard.
+//
+// Land links only (`_fogAdj(false)`): a sea hop is a different arrival rule
+// (the beachhead remainder, 02-visibility-and-sea.md §3b) and mixing it in
+// would make a failure here ambiguous between two subsystems.
+function _fogWaveFixture(seed) {
+  var adj = _fogAdj(false);
+  var powers = _fogPowers();
+  var base = newGame(seed);
+  for (var p = 0; p < powers.length; p++) {
+    var pid = powers[p];
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var home = STATION_IDS[i];
+      if (base.stations[home].owner !== pid) continue;
+      var s = _fogOnly(seed, pid, home);
+      var path = _fogDarkPath(home, adj, visibleTo(s, pid), 6);
+      if (path) return { seed: seed, pid: pid, home: home, path: path, adj: adj };
+    }
+  }
+  return null;
+}
+
+// A FRESH board per test, and that is not tidiness.
+//
+// These tests share a fixture and the first draft shared its STATE, so the
+// memory test's observeTick left a level-1 record of the scouted city behind
+// and the AI test that ran next found it already a candidate with no column on
+// the board — its control failed, which is the only reason it was caught. A
+// suite whose tests can see each other's side effects is a suite whose passes
+// mean whatever the run order happens to make them mean.
+//
+// AI-quiet by construction, so nothing moves between an assertion and the board
+// it is about, and observeTick only ever runs where a test calls it.
+function _fogWaveBoard(f) {
+  var s = _fogOnly(f.seed, f.pid, f.home);
+  s.aiEnabled = false;
+  return s;
+}
+
+// One wave, standing on `hop`, pushed straight onto state.waves.
+//
+// Hand-built rather than routed, and that is deliberate: the router's choice of
+// path, the passage toll and march attrition are all B1's subject and all of
+// them can change what a wave is standing on. This suite is about what a wave
+// SEES, so it states where the wave is. The end-to-end test at the bottom is
+// the one that goes through applyCommand and the real movement phase, and it
+// exists because a hand-built wave could in principle have a shape the game
+// never produces.
+//
+// The shape is 01-data-schema.md's, field for field, and the schema explicitly
+// sanctions tests pushing waves onto state.waves.
+function _fogWavePush(f, s, hop, progress) {
+  var w = {
+    id: s.nextWaveId++,
+    owner: f.pid,
+    from: f.path[0],
+    to: f.path[f.path.length - 1],
+    path: f.path.slice(),
+    hop: hop,
+    progress: progress || 0,
+    units: { infantry: 12, artillery: 0, armour: 0 },
+    launchTick: s.tick,
+    eta: 100,
+  };
+  s.waves.push(w);
+  return w;
+}
+
+function _fogSuiteWaves(d) {
+  if (typeof visibleTo !== 'function') {
+    return skipSuite('fog / wave vision', 'core/vision.js not loaded');
+  }
+  if (typeof newGame !== 'function' || typeof setStationOwner !== 'function' || !d.STATIONS) {
+    return skipSuite('fog / wave vision', 'core/state.js or data/ not loaded');
+  }
+  suite('fog / wave vision');
+
+  var f = _fogWaveFixture(5730);
+
+  test('the fixture found a power with a dark road out of it', function () {
+    assert(!!f, 'no power on this map has a six-station land path whose far end ' +
+      'it cannot already see — every assertion below would be measuring a station ' +
+      'that was level 2 anyway, which is exactly the trap that made this feature ' +
+      'a no-op before B1');
+    if (!f) return;
+    var vis = visibleTo(_fogWaveBoard(f), f.pid);
+    var lit = [];
+    for (var i = 2; i < f.path.length; i++) if (vis[f.path[i]] !== 0) lit.push(f.path[i]);
+    assertNone(lit, 'the fixture claims a dark road and the board disagrees');
+  });
+
+  test('a wave lights BOTH ends of the hop it is standing on', function () {
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+    var before = visibleTo(s, f.pid);
+    assertEqual(before[f.path[2]], 0, f.path[2] + ' was already visible');
+    assertEqual(before[f.path[3]], 0, f.path[3] + ' was already visible');
+
+    _fogWavePush(f, s, 2, 0.4);
+    var after = visibleTo(s, f.pid);
+    assertEqual(after[f.path[2]], 2,
+      'the wave is LEAVING ' + f.path[2] + ' and cannot see it — an army knows ' +
+      'the ground it is standing on');
+    assertEqual(after[f.path[3]], 2,
+      'the wave is walking towards ' + f.path[3] + ' and cannot see it — this is ' +
+      'the whole of B2, and without it scouting does not exist');
+  });
+
+  test('and lights nothing else on its own path', function () {
+    // The lazy implementation — reveal `w.path` — passes the test above and is
+    // a different game: a march would light the whole route the instant it left,
+    // and scouting would cost nothing because you would already know.
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+    _fogWavePush(f, s, 2, 0.4);
+    var vis = visibleTo(s, f.pid);
+    var leaked = [];
+    for (var i = 4; i < f.path.length; i++) if (vis[f.path[i]] === 2) leaked.push(f.path[i]);
+    assertNone(leaked, 'ground further along the route than the wave has walked is ' +
+      'lit — the reveal is following the PATH rather than the army');
+  });
+
+  test('the light moves with the army — ground behind it goes dark again', function () {
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+    var w = _fogWavePush(f, s, 2, 0.4);
+    var atTwo = visibleTo(s, f.pid);
+
+    w.hop = 3;
+    var atThree = visibleTo(s, f.pid);
+
+    assertEqual(atTwo[f.path[2]], 2, 'fixture: ' + f.path[2] + ' was not lit at hop 2');
+    assertEqual(atThree[f.path[4]], 2,
+      'the wave moved on and did not light the ground ahead of it');
+    assertEqual(atThree[f.path[2]], 0,
+      f.path[2] + ' is still lit after the army left it — sight is not memory, ' +
+      'and memory is state.seen\'s job. A visibleTo that accumulated would make ' +
+      'level 1 unreachable for anywhere a wave has ever been.');
+  });
+
+  test('a marching army is not a lookout tower — it lights no third station', function () {
+    // Presence has the same rule and the same comment: the endpoints go into
+    // `out` and never into `budget`. The obvious "make the wave a vision
+    // source" implementation reveals a ring around the column, which would make
+    // a cheap scout worth more than a fortress.
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+
+    var onPath = {};
+    for (var i = 0; i < f.path.length; i++) onPath[f.path[i]] = true;
+    var dark0 = visibleTo(s, f.pid);
+    var nb = f.adj[f.path[3]] || [], side = null;
+    for (i = 0; i < nb.length; i++) {
+      if (!onPath[nb[i]] && dark0[nb[i]] === 0) { side = nb[i]; break; }
+    }
+    assert(!!side, 'no dark neighbour beside ' + f.path[3] + ' — nothing to leak into');
+    if (!side) return;
+
+    _fogWavePush(f, s, 2, 0.4);
+    var vis = visibleTo(s, f.pid);
+    assertEqual(vis[f.path[3]], 2, 'fixture: the hop endpoint is not lit');
+    assertEqual(vis[side], 0, side + ' is next to the road and not on it, and the ' +
+      'column has revealed it — a wave is projecting sight');
+  });
+
+  test('somebody else\'s army lights nothing for you, and everything for them', function () {
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+    var other = null, powers = _fogPowers();
+    for (var i = 0; i < powers.length; i++) if (powers[i] !== f.pid) { other = powers[i]; break; }
+    assert(!!other, 'only one power');
+
+    // state.human IS SET, and that is the whole point of this test rather than a
+    // detail of the fixture. The first draft left it undefined and a mutation
+    // that gated the rule on `pid === state.human` — the exact asymmetry
+    // 02-visibility-and-sea.md §1 forbids — SURVIVED the entire suite, because
+    // with no human on the board the extra clause is inert. A fog rule can only
+    // be shown to be symmetric on a board that has somebody to be asymmetric
+    // towards.
+    s.human = f.pid;
+    var w = _fogWavePush(f, s, 2, 0.4);
+    w.owner = other;
+    var mine = visibleTo(s, f.pid);
+    var theirs = visibleTo(s, other);
+
+    assertEqual(mine[f.path[3]], 0, 'a rival\'s column is lighting MY fog');
+    assertEqual(theirs[f.path[3]], 2,
+      other + ' owns the column and cannot see the road it is on. ' +
+      other + ' is an AI power and ' + f.pid + ' is the human, so the likely ' +
+      'cause is a rule that reads state.human — which hands the player a fog ' +
+      'the AI never gets, on precisely the axis fog exists to create.');
+  });
+
+  test('a power with no cities left still sees the road its last army is on', function () {
+    // visibleTo used to `return out` early on "holds nothing: sees nothing",
+    // which was exactly right while every source of sight was a station and is
+    // wrong the moment an army is one. The board is reachable: a wave outlives
+    // the city that sent it, and the ticks between the last capital falling and
+    // the column landing are ticks a power is still playing.
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+    _fogWavePush(f, s, 2, 0.4);
+    setStationOwner(s, f.home, 'neutral');           // the last city falls
+
+    var own = 0;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      if (s.stations[STATION_IDS[i]].owner === f.pid) own++;
+    }
+    assertEqual(own, 0, 'fixture: ' + f.pid + ' still holds ground');
+
+    var vis = visibleTo(s, f.pid);
+    assertEqual(vis[f.path[3]], 2,
+      f.pid + ' holds nothing and therefore sees nothing — but its column is ' +
+      'still on the road, and a rule that short-circuits on the station count ' +
+      'blinds an army that is standing right there');
+    assertEqual(vis[f.home], 0,
+      'the city it just lost is still visible — the short-circuit went the other way');
+  });
+
+  test('visibleTo stays pure with a wave on the board', function () {
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    var s = _fogWaveBoard(f);
+    _fogWavePush(f, s, 2, 0.4);
+
+    var before = JSON.stringify(snapshot(s));
+    var v = visibleTo(s, f.pid);
+    var after = JSON.stringify(snapshot(s));
+    var fired = (v[f.path[3]] === 2);
+
+    assert(fired, 'the wave rule did not fire — purity was measured on a path ' +
+      'that did not run');
+    assertEqual(after.length, before.length,
+      'visibleTo changed the SIZE of the state — the wave rule wrote something, ' +
+      'and the likely something is a scratch field on the wave');
+    assert(after === before, 'visibleTo mutated the state while a wave was in flight');
+  });
+
+  test('what a scout saw is REMEMBERED after it dies', function () {
+    // The payoff, and the reason this is worth building at all: a station lit
+    // only by a passing column composes with state.seen exactly as one lit by a
+    // city does, so the intelligence outlives the army. Without this the scout
+    // learns something for as long as it is standing there and then forgets it,
+    // which is not a strategic action.
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    if (typeof observeTick !== 'function' || typeof believedStation !== 'function') return;
+    var s = _fogWaveBoard(f);
+
+    var target = f.path[3];
+    var truth = s.stations[target].owner;
+    assertEqual(believedStation(s, f.pid, target).level, 0,
+      target + ' is already known before the scout set out');
+
+    _fogWavePush(f, s, 2, 0.4);
+    observeTick(s);
+    var seen = believedStation(s, f.pid, target);
+
+    s.waves.length = 0;                       // the column is destroyed
+    var remembered = believedStation(s, f.pid, target);
+
+    assertEqual(seen.level, 2, 'the scout was standing on the road and saw nothing');
+    assertEqual(remembered.level, 1,
+      'the scout died and took what it knew with it — a wave-lit station must ' +
+      'age into level 1 like any other, or scouting buys nothing');
+    assertEqual(remembered.owner, truth,
+      'the remembered owner of ' + target + ' is not who was holding it');
+  });
+
+  test('a station only a column can see becomes a legal AI target', function () {
+    // The other half of the payoff, and the half that is invisible from
+    // render/: ai/score.js filters candidates through the same visibleTo, so
+    // the AI can scout and can be scouted. If this ever goes red while the
+    // tests above stay green, the filter has grown its own copy of the rule.
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    if (typeof aiContext !== 'function' || typeof aiCandidates !== 'function') return;
+    var s = _fogWaveBoard(f);
+    if (typeof observeTick === 'function') observeTick(s);
+
+    var target = f.path[3];
+    function offered() {
+      var ctx = aiContext(s, f.pid);
+      ctx.hops = {};
+      for (var i = 0; i < ctx.own.length; i++) ctx.hops[ctx.own[i]] = 0;
+      ctx.hops[target] = 2;                   // reachable; the filter is the subject
+      var cands = aiCandidates(s, f.pid, ctx);
+      for (i = 0; i < cands.length; i++) if (cands[i].sid === target) return true;
+      return false;
+    }
+
+    var blind = offered();
+    _fogWavePush(f, s, 2, 0.4);
+    var scouted = offered();
+
+    assert(!blind, target + ' was already a candidate with no column near it — ' +
+      'the control is broken and the assertion below proves nothing');
+    assert(scouted, target + ' is lit by this power\'s own column and is still ' +
+      'not a candidate — the AI cannot act on what it scouted');
+  });
+
+  test('a REAL march, routed and stepped, lights the road it is on', function () {
+    // Everything above stands a wave where it wants it. This one sends through
+    // applyCommand and lets movementTick move it, because a hand-built wave can
+    // have a shape the game never produces — and because the render cache, the
+    // AI and the readout all read visibleTo against waves the SIM built.
+    assert(!!f, 'no fixture');
+    if (!f) return;
+    if (typeof applyCommand !== 'function' || typeof stepTick !== 'function') return;
+
+    var s = _fogWaveBoard(f);
+    s.stations[f.home].units = { infantry: 6000, artillery: 0, armour: 0 };
+    var dark0 = visibleTo(s, f.pid);
+
+    var res = applyCommand(s, {
+      type: 'send', owner: f.pid, sources: [f.home],
+      target: f.path[f.path.length - 1], fraction: 1,
+    });
+    assert(res && res.ok, 'the send was rejected: ' + (res && res.reason));
+    assert(s.waves.length > 0, 'the send produced no wave');
+
+    // Step until the column is at least two hops out, so what it lights cannot
+    // be explained by the home city's own sight cone.
+    var deep = null;
+    for (var t = 0; t < 4000 && !deep; t++) {
+      stepTick(s);
+      for (var i = 0; i < s.waves.length; i++) {
+        if (s.waves[i].owner === f.pid && s.waves[i].hop >= 2) { deep = s.waves[i]; break; }
+      }
+    }
+    assert(!!deep, 'no wave of ' + f.pid + ' ever reached hop 2 — it was destroyed ' +
+      'or arrived first, and this test measured nothing');
+    if (!deep) return;
+
+    var ahead = deep.path[deep.hop + 1];
+    assert(!!ahead, 'the wave is on its last hop with nothing ahead');
+    var vis = visibleTo(s, f.pid);
+    assertEqual(vis[ahead], 2, 'a marching column cannot see the city it is ' +
+      'walking into: ' + ahead);
+    // Vacuity guard. If `ahead` was visible from the start, the assertion above
+    // would hold with the whole feature deleted.
+    assertEqual(dark0[ahead], 0, ahead + ' was visible before the march began — ' +
+      'this run proved nothing about wave vision');
   });
 }
 

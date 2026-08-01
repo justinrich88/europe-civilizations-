@@ -194,23 +194,70 @@ different.
 
 ---
 
-## 5. Wave vision — build it *after*, not before
+## 5. ~~Wave vision — build it *after*, not before~~ — SHIPPED 2026-08
 
 > *"When your army approaches a station it should remove the fog."*
 
-Correct, and currently a no-op: `core/vision.js` never mentions waves, and
-adding it would change nothing, because every station a wave passes through is
-one the owner already sees. Verified — see §1.
+~~Correct, and currently a no-op~~: `core/vision.js` never mentioned waves, and
+adding it would have changed nothing, because every station a wave passed
+through was one the owner already saw. Verified — see §1. **B1 ended that, and
+this landed on top of it.**
 
-Once passage exists, the rule is: **a wave grants level 2 to both endpoints of
-the hop it is currently on.** Your army is on that road; it can see both ends.
-Symmetric for the AI, without exception.
+The rule, as written and as implemented in `_visWaves`: **a wave grants level 2
+to both endpoints of the hop it is currently on** — `path[hop]` and
+`path[hop + 1]`. Your army is on that road; it can see both ends. Symmetric for
+the AI, without exception, and there is no branch on `wave.standing`.
 
-The emergent behaviour is **scouting**, which becomes possible for the first
+Three properties it does **not** have, each of which is the obvious
+implementation and each of which is a different game:
+
+- **It does not light the route.** Only the hop. A march that revealed its whole
+  path on departure would make scouting free — you would already know.
+- **It does not project sight.** The endpoints go into the result and never into
+  the hop budget, exactly as the presence rule does not. A column that lit a
+  ring around itself would be worth more as a lookout than a fortress is.
+- **It does not accumulate.** Sight moves with the army and the ground behind it
+  goes dark again. A `visibleTo` that remembered would make level 1 unreachable
+  for anywhere a wave had ever been, and level 1 is the whole feature.
+
+The emergent behaviour is **scouting**, which is now possible for the first
 time: send a small force down a road to see what is there, at the cost of the
 force. That is a real strategic action, using the existing verb, with no new
 machinery — and it is exactly what flat march attrition prices correctly, since
-a scout is cheap to send and unlikely to come home.
+a scout is cheap to send and unlikely to come home. What the scout learns
+survives it: a wave-lit station goes through `observeTick` like any other, so it
+ages into level 1 rather than being forgotten when the column dies.
+
+> **For the player. The AI does not scout, and this rule is not what stops it.**
+> Measured every tick of seeds 100–103 to 12,000 ticks: columns revealed 8,555
+> station-ticks of ground no city could see, and **not one** was a station its
+> power had never seen. `TARGET_MAX_HOPS` is 2, so the single intermediate
+> station of any AI march is adjacent to ground it holds and is already level 2
+> before a wave exists. What the 8,555 are is sight a power would otherwise have
+> *lost* — the source falls mid-march, or a `SOURCE_MAX_HOPS: 3` staging route
+> detours, and the column is the only thing still watching that road. The board
+> at 12,000 ticks is identical on all four seeds: same owner for every one of
+> the 108 cities, garrisons bit-identical. Raising the horizon would activate
+> this; that constant belongs to Phase D and must not be moved here.
+
+**Verification.** `fog / wave vision` in `test/fog-tests.js`, 11 tests, headless.
+Ten mutations of `core/vision.js`, each caught — including the two that are
+invisible from a board: an owner check written against `state.human` (which
+would hand the player a fog the AI never gets) and a truthy guard in place of
+`!== undefined` (which would light only what was already lit). Every assertion
+is made on a station the fixture has proven dark first, because before B1 an
+implementation that did nothing at all would have passed any test written on an
+ordinary board.
+
+**One thing it broke that is not in this document.** `render/map.js` memoises
+visibility on `(state, tick, ownerEpoch, pid)`, and that key was exact while
+every source of sight was a station. A wave is not: a send is immediate, so a
+march ordered on a paused board creates one with the tick and the epoch both
+unmoved, and the memo would have served the fog from before the army existed —
+with the sim right, `visibleTo` right, and nothing anywhere going red
+(known-issue #18). The key now also carries `nextWaveId` and `waves.length`.
+`test/wavefog-tests.js` holds it, from `tests-ui.html`, because the node harness
+loads no `render/` file that draws a board.
 
 *"Anything tied by a direct path if you own the tied station"* is **already the
 behaviour** and needs no change: measured, Berlin has six links and exactly

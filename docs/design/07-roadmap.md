@@ -246,11 +246,76 @@ Fixed by it, as promised:
 - Encirclement becomes reachable, which connection decay has always rewarded
   and no player has ever been able to attempt.
 
-### B2. Wave vision
+### ~~B2. Wave vision~~ — SHIPPED 2026-08
 
 Requested, and a **provable no-op until B1** — armies never travel anywhere
 already dark. Afterwards it enables scouting, which is a genuinely new
 strategic action using the existing verb.
+
+`06-movement-and-attrition.md` §5, closed. A wave grants level 2 to both
+endpoints of the hop it is on, and to nothing else: not the rest of its route,
+not the ground beside it, and not after it has moved on. 11 headless tests, ten
+mutations, each caught.
+
+**The half that was not in the spec.** `render/map.js` memoises visibility on
+`(state, tick, ownerEpoch, pid)` — an exact key for as long as every source of
+sight was a station, and wrong the moment an army is one. Sends are immediate,
+so a march ordered on a **paused** board creates a wave with the tick and the
+epoch both unmoved; the memo would have kept serving the fog from before the
+army existed, with the sim right and nothing going red. `test/wavefog-tests.js`
+in `tests-ui.html` now holds the fixed key, and the node suite cannot see any of
+it — that file is not loaded there.
+
+**AND IT DOES NOT CHANGE HOW THE AI PLAYS. THAT IS MEASURED, AND IT IS THE
+MOST IMPORTANT THING IN THIS ENTRY.**
+
+The prediction above — *"it enables scouting, which is a genuinely new strategic
+action"* — is true for the **player** and, today, **false for the AI**. What was
+measured, every tick of seeds 100–103 to 12,000 ticks, comparing `visibleTo`
+against the same board with `state.waves` emptied:
+
+| | |
+|---|---|
+| station-ticks a column revealed something a city could not | **8,555** |
+| of those, stations the power had **never seen** | **0** |
+| cities with a different owner at t=12,000 | **0 of 108**, all four seeds |
+| worst relative garrison drift | **0.0** — bit-identical |
+| full-state hashes | **all four moved** |
+
+The hashes moved and the game did not. What changed is `state.seen` alone: a
+column refreshes the remembered garrison of ground its power already knew, so
+the memory record's tick and units are newer and nothing downstream reads a
+different number. Byte counts moved 0, −2, +3, 0 — the signature of a value
+edit, not a shape change and not a different war.
+
+**Why zero, and why it is structural.** `TARGET_MAX_HOPS` is 2. A two-hop march
+has exactly one intermediate station, and that station is adjacent to the source
+the power holds — so it is already level 2 by the one-hop rule, before any wave
+exists. The AI therefore *cannot* reveal new ground by marching, whatever the
+wave rule says. The 8,555 reveals are the sight a power would otherwise have
+lost mid-march: the source falls, or a `SOURCE_MAX_HOPS: 3` staging route
+detours, and the column is the only thing still looking at that road.
+
+So B2 is complete and correct and its AI-facing payoff is **gated on the
+horizon, not on this code**. Two honest options, both for later: raise
+`TARGET_MAX_HOPS` (Phase D owns that constant, and it is exactly the sort of
+thing that must not be tuned against openings we already know are unequal), or
+give the AI an explicit scout action. Neither is in scope here, and neither
+should be done to make this entry look better.
+
+**The player half is not conditional on any of that.** A human can send an army
+anywhere reachable, including down a road nobody has ever looked at, which is
+the request this feature came from. That path is covered by
+`a REAL march, routed and stepped, lights the road it is on` and by
+`test/wavefog-tests.js`.
+
+**The 96-game sweep is not the instrument here and is not quoted.** The board
+diff above is a stronger statement than a win-rate table could be: identical
+owners and bit-identical garrisons on four seeds is *the same game*, not a game
+that scored the same. A sweep over seeds 100–195 would add coverage of 92 more
+openings and nothing else, and it takes an hour; if B2 is ever suspected of
+moving play, the cheap check is to re-run the four-seed board diff, which would
+have caught it.
 
 ### ~~B3. AI target selection~~ — SHIPPED 2026-08
 
