@@ -3606,3 +3606,50 @@ kbd.help-key {
   font-size: 10px;
   color: var(--warn, #d8a657);
 }
+
+/* ── selected and loaded (05-command-clarity.md §1, accepted fix 2) ───────
+   The dangerous state is "sources are selected, so my next click on anything I
+   do not own launches an army". Carets mark the selected nodes — but at the 3x
+   home zoom you can see 12% of the board, so the sources picked two minutes ago
+   are very likely off-screen when you click the enemy city you meant to LOOK at.
+
+   AN INSET RING ON THE BOARD WRAPPER, NOT AN OVERLAY ELEMENT, and that is the
+   whole reason this is safe rather than the sixth occurrence of the same bug:
+   anything painted over the board that accepts pointer events silently swallows
+   the click that commits an attack, with no error and no console output
+   (known-issues #5, five times). A box-shadow creates no element at all, so
+   there is nothing to hit-test and nothing to forget `pointer-events: none` on.
+
+   Deliberately quiet. This is peripheral vision's job — the rail's selection
+   line carries the actual statement. A ring loud enough to read directly would
+   be competing with the board for the same attention. */
+.app.is-loaded .board-wrap {
+  box-shadow: inset 0 0 0 1px rgba(216, 166, 87, 0.32);
+}
+
+/* Armed for a supply line or a build: same signal, warmer, because the next
+   click means something more specific than "commit". Sharing the ring rather
+   than inventing a second treatment is §1's accepted fix (2) — "reuse the same
+   visual language" — and it keeps the board's vocabulary at one idea. */
+.app.is-arming .board-wrap {
+  box-shadow: inset 0 0 0 2px rgba(216, 166, 87, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app.is-loaded .board-wrap,
+  .app.is-arming .board-wrap { transition: none; }
+}
+
+/* ── the rail's selection line ────────────────────────────────────────────
+   First section in the rail, and the only one that is about what the NEXT CLICK
+   WILL DO rather than about what something IS. It survives the pointer leaving
+   the board, which every other section does not and must not. */
+.rdo-sel-what .rdo-v {
+  color: var(--ink, #c9d1d9);
+  font-family: var(--font-num, ui-monospace, monospace);
+}
+
+.rdo-sel-hint .rdo-v {
+  font-size: 10px;
+  color: var(--warn, #d8a657);
+}

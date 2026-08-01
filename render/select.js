@@ -1063,6 +1063,33 @@ function selRedraw() {
   if (!SEL_STATE.selected.size) SEL_STATE.hoverTarget = null;
   selDrawPreview(SEL_STATE.hoverTarget);
   if (!SEL_STATE.hoverTarget) selDrawCarets(null);
+  _selPaintLoaded();
+}
+
+// THE BOARD SAYS IT IS LOADED — 05-command-clarity.md §1, accepted fix (2).
+//
+// The dangerous state is "sources are selected, so the next click on anything I
+// do not own launches an army". Carets mark the selected nodes, and at the 3x
+// home zoom you can see 12% of the board — so the sources you picked two minutes
+// ago are very likely off-screen when you click the enemy city you meant to
+// LOOK at. §1 is blunt about it: "you cannot inspect an enemy city without
+// attacking it, and there is no state on screen that warns you which of the two
+// you are about to do."
+//
+// A class on `.app`, exactly like `is-arming`, and the treatment is an INSET RING
+// on the board wrapper — not an overlay element. That is deliberate and it is the
+// whole reason this is safe: an overlay over the board with default
+// pointer-events silently eats the click that commits an attack, with no error
+// and no console output, and this project has hit that five times
+// (known-issues #5). A box-shadow creates no element and cannot be hit-tested.
+//
+// Called from selRedraw(), which is the one function every selection change
+// already funnels through — thirteen call sites, so hooking anywhere else would
+// have meant finding all of them.
+function _selPaintLoaded() {
+  const app = document.querySelector('.app');
+  if (!app) return;
+  app.classList.toggle('is-loaded', SEL_STATE.selected.size > 0);
 }
 
 // ── the commit ──────────────────────────────────────────────────────────
@@ -2079,6 +2106,7 @@ function clearSelection() {
   _selDisarm();
   SEL_STATE.selected.clear();
   SEL_STATE.hoverTarget = null;
+  _selPaintLoaded();
   selClearNode(selLayer('sel-carets', 'sel-carets'));
   selClearNode(selLayer('sel-preview', 'sel-preview'));
   selClearNode(selLayer('sel-marquee', 'sel-marquee'));

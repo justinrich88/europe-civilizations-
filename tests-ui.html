@@ -101,7 +101,8 @@ var TEST_FILES = [
 // is asynchronous — would file its assertions under the NEXT suite's name if
 // this loop moved on without waiting. Silently, with the totals still adding
 // up. Awaiting a non-promise is free, so the rule is simply: always wait.
-var TEST_SUITES = ['suiteSelect', 'suiteRouteView', 'suiteCamera', 'suiteOrdersWhy'];
+var TEST_SUITES = ['suiteSelect', 'suiteSelectSafety', 'suiteRouteView', 'suiteCamera',
+                   'suiteOrdersWhy'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');

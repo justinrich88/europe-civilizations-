@@ -162,13 +162,33 @@ Note the consequence for the design: `00-vision.md` §1's *"orders can be issued
 while paused"* stops being true, and the board must be readable **while
 moving**. That raises the stakes on `05-command-clarity.md`.
 
-### A5. Selection safety
+### ~~A5. Selection safety~~ — SHIPPED 2026-07, all three accepted fixes
 
-`05-command-clarity.md` §1. **You cannot currently inspect an enemy city
-without attacking it** — the same click either opens a readout or launches your
-army, decided by selection state that is usually off-screen. It is the only
-open item a player is actively losing games to, and it is the cheapest thing
-here. A4 makes it worse, so it should not land after A4.
+`05-command-clarity.md` §1. ~~**You cannot currently inspect an enemy city
+without attacking it**~~ — the same click either opened a readout or launched
+your army, decided by selection state that is usually off-screen. It was the only
+open item a player was actively losing games to, and it was the cheapest thing
+here.
+
+§1's three accepted fixes, in its own order of value:
+
+1. **The rail's selection line**, first section in the rail, present whenever
+   anything is selected: *"3 cities · 90.0 units · click a target to commit · Esc
+   to clear"*. §1 said this alone removes the surprise, and it costs no gesture
+   change. The hint tracks the armed state, so it never advertises the volley
+   while a supply order or the build chooser is live.
+2. **The board edge reads as loaded** — an inset ring on `.board-wrap`, sharing
+   the `is-arming` language and intensifying when armed. **Not an overlay
+   element**: a box-shadow creates nothing to hit-test, which is the only version
+   of this that cannot become the sixth occurrence of known-issue #5.
+3. **Escape backs out one step, then clears** — already true, now pinned by a
+   test.
+
+Six tests in `test/select-tests.js`'s new `select / selection safety` suite, which
+is separate from the armed-supply one because that fixture arms an order and these
+must observe the unarmed state.
+
+**A4 makes this worse, so it did not land after A4** — the ordering held.
 
 ---
 
@@ -301,6 +321,6 @@ almost none of this — only letting the human power switch.
 available and simply has to be used: the next thing anyone changes in `render/`
 should be handed to a tester rather than reasoned about.
 
-**What gates the rest of Phase A now is A5**, and its own note says why: it is
-the only open item a player is actively losing games to, it is the cheapest, and
-A4 makes it worse, so it must not land after A4.
+~~**What gates the rest of Phase A now is A5**~~ — A5 shipped, and A4 with it.
+Phase A is complete. What gates everything now is **B1**, which is what the
+document said from the start: "everything below is blocked on this".

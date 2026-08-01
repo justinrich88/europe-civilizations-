@@ -69,8 +69,8 @@ python3 tools/serve.py             dev server on 8761 — SEE #16 BELOW
 `tests.html` is the browser sim suite. **`tests-ui.html` is the one that
 matters for anything under `render/`** — it loads `index.html` itself in an
 800×900 iframe and injects the test files, so it tests the shipped page rather
-than a copy of its script list. 44 tests there that `node test/node.js` cannot
-run. A **SKIP is a FAILURE** on that page, and so is a suite that records zero
+than a copy of its script list. 50 tests, 5 suites, that `node test/node.js`
+cannot run. A **SKIP is a FAILURE** on that page, and so is a suite that records zero
 tests — **and so is a suite that records FEWER tests than it has**, which is how
 #23 hid for weeks. `select / armed supply order` must read 11/11; at 0/1 or 1/1
 something is covering the board and the other ten never registered.

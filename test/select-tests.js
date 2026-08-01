@@ -444,3 +444,181 @@ function selectTestsRun() {
   suiteSelect(typeof collectData === 'function' ? collectData() : {});
   return { summary: summarizeTests(), results: TEST_RESULTS };
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// SELECTION SAFETY — 05-command-clarity.md §1, roadmap A5
+// ═══════════════════════════════════════════════════════════════════════
+//
+// The problem, in §1's words: "the same click on the same city either opens a
+// readout or launches your army, and the only thing that decides which is state
+// that may be entirely off-screen." At the 3x home zoom you can see 12% of the
+// board, so the sources you selected two minutes ago are very likely not visible
+// when you click the enemy city you meant to LOOK at.
+//
+// §1 rejected the obvious fix — two-click arm-then-commit for volleys — because
+// 00-vision.md §8 is explicit that a volley is ONE click, and doubling the clicks
+// on the game's primary verb to defend against an edge case is the wrong trade.
+// What it accepted instead was to make the dangerous state impossible to miss.
+// These test that, not the gesture.
+//
+// A SEPARATE SUITE from the armed-supply one above, because its fixture arms an
+// order and these must observe the UNARMED state. Sharing a fixture would have
+// meant every assertion here ran against a board that was already armed.
+//
+// Private helpers are `_sfy…`.
+
+function _sfySelected() {
+  return (typeof selectedSources === 'function') ? selectedSources() : [];
+}
+
+function _sfyRailLine() {
+  var s = document.querySelector('[data-rail-section="selection"]');
+  // offsetParent is null for a display:none ancestor, which is how _rdoShow
+  // hides a row — so this distinguishes "section present but empty" from "the
+  // player can actually read it", and only the second one counts.
+  if (!s || s.offsetParent === null) return null;
+  return s.innerText.replace(/\s+/g, ' ').trim();
+}
+
+function _sfyPump() {
+  if (typeof renderReadout === 'function' && typeof GAME !== 'undefined') renderReadout(GAME);
+}
+
+function suiteSelectSafety(d) {
+  var NAME = 'select / selection safety';
+
+  if (typeof SEL_STATE === 'undefined' || typeof selSet !== 'function') {
+    return skipSuite(NAME, 'render/select.js not loaded');
+  }
+  if (typeof document === 'undefined' || !document.getElementById('board')) {
+    return skipSuite(NAME, 'no #board — this suite needs the live game page');
+  }
+  if (typeof renderReadout !== 'function') {
+    return skipSuite(NAME, 'render/readout.js not loaded');
+  }
+
+  var me = selPlayer();
+  if (!me) return skipSuite(NAME, 'no player power');
+
+  var mine = [];
+  for (var i = 0; i < STATION_IDS.length && mine.length < 2; i++) {
+    if (GAME.stations[STATION_IDS[i]].owner === me) mine.push(STATION_IDS[i]);
+  }
+  if (!mine.length) return skipSuite(NAME, me + ' owns nothing on this board');
+
+  suite(NAME);
+
+  var prev = _sfySelected();
+
+  test('with nothing selected the rail says nothing', function () {
+    clearSelection();
+    _sfyPump();
+    assertEqual(_sfyRailLine(), null,
+      'the selection line is on screen with an empty selection — it would be ' +
+      'permanent chrome rather than a warning, and a warning that is always ' +
+      'there is not read');
+    assert(!document.querySelector('.app').classList.contains('is-loaded'),
+      'the board reads as loaded with nothing selected');
+  });
+
+  test('selecting a city puts the count, the units and the verb in the rail', function () {
+    // §1: "3 cities selected · 47 units · click a target to commit · Esc to
+    // clear". The rail is always on screen; the carets are not. This is the fix
+    // §1 says removes the surprise on its own.
+    selSet([mine[0]]);
+    _sfyPump();
+    var line = _sfyRailLine();
+    assert(line, 'nothing appeared in the rail after selecting a city');
+    assert(/1 city/.test(line), 'the line does not say how many cities: ' + line);
+    assert(/units/.test(line), 'the line does not say how many units: ' + line);
+    assert(/commit/.test(line),
+      'the line does not say what the next click DOES, which is the entire ' +
+      'point of it: ' + line);
+    assert(/Esc/.test(line),
+      'the line does not name Escape — §1 calls this the discoverability fix, ' +
+      'because it names Escape at the moment Escape is relevant: ' + line);
+  });
+
+  test('the count is the sim\'s unit total, not a second way of adding up', function () {
+    // A rail that printed a different number from the one the volley sends is
+    // known-issues #18, and summing a bundle by hand is #9.
+    selSet([mine[0]]);
+    _sfyPump();
+    var line = _sfyRailLine();
+    var shown = Number((line.match(/·\s*([0-9.]+)\s*units/) || [])[1]);
+    var real = totalUnits(GAME.stations[mine[0]].units);
+    assert(isFinite(shown), 'no unit count could be read out of: ' + line);
+    // The rail rounds for display; a whole unit of slack is the format, not drift.
+    assert(Math.abs(shown - real) < 1,
+      'the rail says ' + shown + ' units where the station holds ' + real);
+  });
+
+  test('the board itself reads as loaded, and it is not an overlay', function () {
+    // §1's accepted fix (2): reuse the is-arming visual language on the board
+    // edge so the state reads peripherally, not only in the rail.
+    //
+    // AND IT MUST NOT BE AN ELEMENT. Anything painted over the board that accepts
+    // pointer events silently eats the click that commits an attack — five
+    // occurrences (known-issues #5). The treatment is an inset box-shadow on
+    // .board-wrap, so this asserts BOTH that the signal exists and that the thing
+    // carrying it cannot be hit-tested.
+    clearSelection();
+    _sfyPump();
+    var wrap = document.querySelector('.board-wrap');
+    var off = getComputedStyle(wrap).boxShadow;
+
+    selSet([mine[0]]);
+    _sfyPump();
+    var app = document.querySelector('.app');
+    assert(app.classList.contains('is-loaded'), 'the board does not read as loaded');
+    var on = getComputedStyle(wrap).boxShadow;
+    assert(on !== off, 'the board edge looks identical loaded and unloaded');
+    assert(/inset/.test(on),
+      'the loaded treatment is not an inset shadow — if it became an overlay ' +
+      'element it can swallow the click that commits an attack: ' + on);
+  });
+
+  test('the hint changes to match what the next key or click actually does', function () {
+    // A line that said "click a target to commit" while a supply order was armed
+    // would be describing a gesture that is not the one about to happen — the
+    // same class of lie the whole section exists to remove.
+    selSet([mine[0]]);
+    _sfyPump();
+    assert(/commit/.test(_sfyRailLine()), 'unarmed hint is wrong');
+
+    _selArmOrder();
+    _sfyPump();
+    var armed = _sfyRailLine();
+    assert(/route|city/.test(armed) && !/commit/.test(armed),
+      'the hint still advertises the volley while a supply order is armed: ' + armed);
+
+    _selDisarm();
+    _sfyPump();
+    assert(/commit/.test(_sfyRailLine()), 'the hint did not come back after disarming');
+  });
+
+  test('Escape backs out one step, then clears everything', function () {
+    // §1's accepted fix (3). It was already true before A5 — asserted here
+    // because nothing pinned it, and it is the "get me out of this" case.
+    selSet([mine[0]]);
+    _selArmOrder();
+    assertEqual(SEL_STATE.armed, 'supply', 'the fixture did not arm');
+
+    selOnKeyDown({ key: 'Escape', preventDefault: function () {} });
+    assertEqual(SEL_STATE.armed, null, 'the first Escape did not disarm');
+    assertEqual(_sfySelected().length, 1,
+      'the first Escape also cleared the group — you almost certainly want to ' +
+      'give the same group a different order rather than rebuild it');
+
+    selOnKeyDown({ key: 'Escape', preventDefault: function () {} });
+    assertEqual(_sfySelected().length, 0, 'the second Escape did not clear the selection');
+    _sfyPump();
+    assertEqual(_sfyRailLine(), null, 'the rail still shows a selection after clearing');
+  });
+
+  // Leave the page as it was found: this suite runs alongside others on the same
+  // live board, and a selection left behind changes what they measure.
+  clearSelection();
+  if (prev.length) selSet(prev);
+  _sfyPump();
+}

@@ -233,11 +233,13 @@ var RDO_EMPIRE_EVERY = 6;
 // between any two of these without renumbering anything.
 //
 //   5   empire    always on screen, nothing selected
+//    2  selection what is selected and what the next click will do to it
 //   10  station   what you asked for by hovering
 //   11  supply    an alarm, and it invalidates half of the station block
 //   12  fight     what decides an assault, both directions
 //   13  orders    standing supply lines
 //   14  build     what may be built here, and what it is running at
+var RDO_SELECTION_ORDER = 2;
 var RDO_HEADER_ORDER = 5;
 var RDO_SECTION_ORDER = 10;
 var RDO_SUPPLY_ORDER = 11;
@@ -2853,11 +2855,80 @@ function _rdoSetIcon(svg, name, key) {
   if (path) path.setAttribute('d', RDO_ICONS[name] || '');
 }
 
+
+// ── the selection line (05-command-clarity.md §1) ────────────────────────
+//
+// THE HIGHEST-VALUE FIX IN THAT DOCUMENT, and the cheapest: "a persistent
+// selection line at the top of the right rail, present whenever anything is
+// selected. The rail is always on screen; the carets are not. **This alone
+// removes the surprise**, and it costs no gesture change."
+//
+// The problem it answers, in §1's words: the same left-click on the same enemy
+// city either opens a readout or launches your army, and the only thing that
+// decides which is selection state that may be entirely off-screen. At the 3x
+// home zoom you can see 12% of the board.
+//
+// FIRST IN THE RAIL, above the empire header, because it is the only section
+// that is about what the NEXT CLICK WILL DO rather than about what something is.
+//
+// It reads selectedSources(), NOT the hover focus — every other section here
+// hides itself when nothing is hovered, and this one must survive the pointer
+// travelling to the rail or to the enemy city being considered. That is the
+// entire point of it.
+function _rdoSelBuild(host) {
+  _rdoForget('sel');
+  var n = {};
+  n.what = _rdoRow(host, 'rdo-mod rdo-sel-what', '');
+  n.hint = _rdoRow(host, 'rdo-mod rdo-sel-hint', '');
+  return n;
+}
+
+function _rdoSelUpdate(state, n) {
+  if (typeof selectedSources !== 'function') return false;
+  var sel = selectedSources();
+  if (!sel.length) return false;                 // nothing selected: no section
+
+  // Units are summed through totalUnits(), never spelled out — a second way to
+  // add up a bundle is the defect logged five times, and this one would print a
+  // different number from the one the volley actually sends.
+  var units = 0, mine = 0;
+  var me = (typeof PLAYER === 'string') ? PLAYER : null;
+  for (var i = 0; i < sel.length; i++) {
+    var st = state.stations[sel[i]];
+    if (!st || (me && st.owner !== me)) continue;
+    mine++;
+    units += totalUnits(st.units);
+  }
+
+  _rdoSet(n.what.v, 'selwhat', mine + (mine === 1 ? ' city' : ' cities') +
+    ' · ' + _rdoNum(units) + ' units');
+  _rdoShow(n.what, 'selwhat', true);
+
+  // WHAT THE NEXT CLICK DOES, and it changes with the armed state — a line that
+  // said "click a target to commit" while a supply order was armed would be
+  // describing a gesture that is not the one about to happen.
+  var armed = (typeof SEL_STATE !== 'undefined' && SEL_STATE) ? SEL_STATE.armed : null;
+  var hint;
+  if (armed === 'supply') hint = 'click a city to route · Esc to cancel';
+  else if (armed === 'build') hint = '1/2/3 to build · Esc to cancel';
+  else hint = 'click a target to commit · Esc to clear';
+  _rdoSet(n.hint.v, 'selhint', hint);
+  _rdoShow(n.hint, 'selhint', true);
+  return true;
+}
+
 // ── registration ────────────────────────────────────────────────────────
 //
 // Every section registers through the same public seam any later one will use —
 // there is no privileged path — so if these calls work, so will the next one.
 // None of them passes a `title`: see the note in the file header.
+
+railAddSection({
+  id: 'selection',
+  order: RDO_SELECTION_ORDER,
+  build: _rdoSelBuild,
+  update: _rdoSelUpdate,
+});
 
 railAddSection({
   id: 'empire',
