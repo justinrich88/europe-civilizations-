@@ -155,55 +155,39 @@ function suiteHelp(d) {
     assertEqual(helpFacts().stationCount, Object.keys(d.STATIONS).length, 'the headline count');
   });
 
-  // The factory line names what factories make. tools/build-stations.js decides
-  // that, so the guide reads it rather than repeating 00-vision.md §4.
-  test('the factory blurb names every unit a factory actually makes', function () {
-    if (!d.STATIONS) return skipTest('producer output', 'data/stations.js not loaded');
-    var made = {}, sid;
-    for (sid in d.STATIONS) {
-      var st = d.STATIONS[sid];
-      if (st && st.type === 'producer' && st.produces) made[st.produces] = true;
-    }
+  // WAS 'the factory blurb names every unit a factory actually makes'. Factories
+  // no longer make anything (C1), so the check is inverted: the guide must NOT
+  // name a unit type, because the one thing worse than an unexplained station
+  // type is a guide promising an output the sim stopped producing.
+  test('the factory blurb does not promise a unit type factories no longer make', function () {
     var blurb = '';
     var types = helpStationTypes();
     for (var i = 0; i < types.length; i++) {
       if (types[i].type === 'producer') blurb = types[i].blurb;
     }
     assert(blurb.length > 0, 'no producer entry in the guide');
-    var missing = Object.keys(made).filter(function (u) { return blurb.indexOf(u) === -1; });
-    assertNone(missing, 'a unit type factories make that the guide does not name');
+    var named = ['infantry', 'artillery', 'armour'].filter(function (u) {
+      return blurb.toLowerCase().indexOf(u) !== -1;
+    });
+    assertNone(named, 'the guide still promises a unit type that no longer exists');
   });
 
   // --- units ---------------------------------------------------------------
 
-  test('every unit in BAL.UNITS has a line in the guide', function () {
-    var rows = helpUnitRows();
-    var listed = {}, bad = [];
-    for (var i = 0; i < rows.length; i++) {
-      listed[rows[i].type] = true;
-      if (!rows[i].blurb) bad.push(rows[i].type + ' has no character line');
-      // The stats printed beside each unit are the real multipliers, not a
-      // remembered version of them.
-      var u = B.UNITS[rows[i].type];
-      if (!u) { bad.push(rows[i].type + ' is not in BAL.UNITS'); continue; }
-      if (rows[i].atk !== u.atk) bad.push(rows[i].type + ' atk ' + rows[i].atk + ' vs ' + u.atk);
-      if (rows[i].def !== u.def) bad.push(rows[i].type + ' def ' + rows[i].def + ' vs ' + u.def);
-      if (rows[i].speed !== u.speed) bad.push(rows[i].type + ' speed ' + rows[i].speed + ' vs ' + u.speed);
-    }
-    var absent = Object.keys(B.UNITS).filter(function (k) { return !listed[k]; });
-    assertNone(absent, 'a unit type the guide never mentions');
-    assertNone(bad, 'a unit stat drifted');
-  });
-
-  test('the unit order is the sim order', function () {
+  // Was two tests: one walked BAL.UNITS checking every type had a line with the
+  // right numbers, the other checked the guide listed them in BAL.UNIT_ORDER.
+  // There is one unit and no order, so they collapse into the half that still
+  // carries weight — the printed stats must be the LIVE ones. A guide that
+  // remembers what the sim used to do is known-issue #18 on a page the player
+  // opens to resolve exactly that confusion.
+  test('the stats beside the unit are the live BAL numbers, not remembered ones', function () {
     var rows = helpUnitRows(), bad = [];
-    for (var i = 0; i < B.UNIT_ORDER.length; i++) {
-      if (!rows[i] || rows[i].type !== B.UNIT_ORDER[i]) {
-        bad.push('slot ' + i + ' is ' + (rows[i] ? rows[i].type : '(none)') +
-                 ', BAL.UNIT_ORDER says ' + B.UNIT_ORDER[i]);
-      }
-    }
-    assertNone(bad, 'the guide lists units in a different order from sim/');
+    assertEqual(rows.length, 1, 'the guide lists a number of units other than one');
+    assert(!!rows[0].blurb, 'the unit has no character line');
+    if (rows[0].atk !== B.UNIT.atk) bad.push('atk ' + rows[0].atk + ' vs ' + B.UNIT.atk);
+    if (rows[0].def !== B.UNIT.def) bad.push('def ' + rows[0].def + ' vs ' + B.UNIT.def);
+    if (rows[0].speed !== B.UNIT.speed) bad.push('speed ' + rows[0].speed + ' vs ' + B.UNIT.speed);
+    assertNone(bad, 'a unit stat drifted');
   });
 
   // --- everything else the guide prints ------------------------------------

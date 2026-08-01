@@ -253,20 +253,12 @@ function growthMultiplier(state, sid) {
 // Growth
 // ---------------------------------------------------------------------------
 
-function _scaleUnits(units, f) {
-  units.infantry *= f;
-  units.artillery *= f;
-  units.armour *= f;
-}
-
-// Which unit type a station's growth lands in. Producers make their own thing;
-// everything else makes infantry (00-vision.md §4 -- infantry is the only
-// thing holding stations produce).
-function growthType(sid) {
-  var d = STATIONS[sid];
-  if (d.type === 'producer' && d.produces) return d.produces;
-  return 'infantry';
-}
+// TOMBSTONE — C1. `_scaleUnits()` and `growthType()` stood here. growthType
+// was the ONLY reader of a station's `produces` field, and with it gone the
+// field left data/stations.js entirely: every station now grows the same
+// undifferentiated army, so a `producer` is a station type holding a factory
+// it cannot yet use rather than a station that makes something. See
+// 04-development.md §9c for why that gap is real and who owns it.
 
 function growthTick(state) {
   computeConnectivity(state);
@@ -281,9 +273,8 @@ function growthTick(state) {
     var sid = STATION_IDS[i];
     var st = state.stations[sid];
     var d = STATIONS[sid];
-    var units = st.units;
 
-    var total = totalUnits(units);
+    var total = st.units;
 
     // A station with hostile forces standing in it is not recruiting. Skipping
     // growth here is also what keeps battle duration independent of army size
@@ -297,15 +288,13 @@ function growthTick(state) {
         // relieved, not waited out"), and decay once the grace period lapses.
         var since = (st.discSince === undefined || st.discSince < 0) ? state.tick : st.discSince;
         if (state.tick - since >= BAL.DISCONNECT_GRACE && total > 0) {
-          _scaleUnits(units, 1 - BAL.DISCONNECT_DECAY);
+          st.units *= (1 - BAL.DISCONNECT_DECAY);
           // Exponential decay asymptotes; sweep the dust so a pocket actually
           // dies rather than holding on with 1e-9 infantry. Deliberately only
           // here: sweeping every station every tick would also erase the
           // sub-epsilon GROWTH_SEED trickle that lets a scoured city recover,
           // which looks like "emptied stations never come back".
-          if (units.infantry < BAL.ANNIHILATION_EPSILON) units.infantry = 0;
-          if (units.artillery < BAL.ANNIHILATION_EPSILON) units.artillery = 0;
-          if (units.armour < BAL.ANNIHILATION_EPSILON) units.armour = 0;
+          if (st.units < BAL.ANNIHILATION_EPSILON) st.units = 0;
         }
         if (BAL.DISCONNECT_GROWTH > 0) {
           _applyGrowth(state, sid, st, d, total, BAL.DISCONNECT_GROWTH);
@@ -318,7 +307,7 @@ function growthTick(state) {
         // decay and growth pulling on the same units in opposite directions
         // for the whole band between the two.
         var excess = total - d.capacity * BAL.GROWTH_OVERFLOW_CEIL;
-        _scaleUnits(units, (total - excess * BAL.OVERSTACK_DECAY) / total);
+        st.units *= (total - excess * BAL.OVERSTACK_DECAY) / total;
       } else {
         // Everything below the hard ceiling grows, including a station at or
         // over capacity. The rate is decided inside _applyGrowth by the room
@@ -398,5 +387,5 @@ function _applyGrowth(state, sid, st, d, total, extraMul) {
   var seed = total < BAL.GROWTH_SEED ? BAL.GROWTH_SEED : total;
   var g = BAL.GROWTH_BASE * d.rate * mul * capture * extraMul * seed * _growthRoom(total, cap);
   if (g <= 0) return;
-  st.units[growthType(sid)] += g;
+  st.units += g;
 }

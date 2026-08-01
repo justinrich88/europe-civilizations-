@@ -10,15 +10,11 @@
 // Three commands: the many-to-one volley from 00-vision.md §8, the standing
 // supply order, and `build` (04-development.md). The volley first:
 //
-//     { type:'send', owner, sources:[stationId,…], target:stationId, fraction,
-//       types?:['infantry',…] }
+//     { type:'send', owner, sources:[stationId,…], target:stationId, fraction }
 //
-// `types` is OPTIONAL and omitting it means "all of them", which is what every
-// existing caller — the AI, every test, every replay written before it existed —
-// already means. It narrows the SAME per-source proportion to a subset of unit
-// kinds; it is not a second fraction. Filtering happens before the
-// MIN_SEND_UNITS check, so a source that holds only artillery and is asked for
-// infantry is rejected as 'too-few-units' rather than sending an empty wave.
+// There used to be an optional `types` narrowing the send to a subset of unit
+// kinds. It went with the kinds themselves (C1); a send is now a fraction and
+// nothing else.
 //
 // Design properties that are deliberate and must not be "fixed":
 //
@@ -150,21 +146,13 @@ function commandRoute(fromSid, toSid, state, pid, standingOnly) {
 // the authority on where a wave actually is; this must never be used to move
 // one.
 //
-// A wave travels at the speed of its SLOWEST type, so mixed stacks stay
-// together and the stagger comes from different SOURCES, not from a stack
-// coming apart mid-march (data/tuning.js §6).
+// TOMBSTONE — C1. `_cmdSlowestSpeed()` stood here and walked a stack for its
+// slowest type, so that mixed stacks stayed together and the stagger in a
+// volley came from different SOURCES rather than from a stack coming apart
+// mid-march. With one profile every army moves at BAL.UNIT.speed, so the
+// stagger now comes from source distance ALONE — which is what §8 always
+// claimed it came from, and is now true without qualification.
 // ---------------------------------------------------------------------------
-
-function _cmdSlowestSpeed(units) {
-  var order = BAL.UNIT_ORDER, slowest = null;
-  for (var i = 0; i < order.length; i++) {
-    var t = order[i];
-    if (!units[t] || units[t] <= 0) continue;
-    var sp = BAL.UNITS[t].speed;
-    if (slowest === null || sp < slowest) slowest = sp;
-  }
-  return slowest === null ? BAL.UNITS.infantry.speed : slowest;
-}
 
 function _cmdTerrainMove(sid) {
   if (typeof STATIONS === 'undefined' || !STATIONS[sid]) return 1;
@@ -181,19 +169,20 @@ function _cmdLinkOf(a, b) {
   return null;
 }
 
-function routeEtaTicks(path, units) {
+// TAKES NO STACK. It used to take the units being sent, because a stack's ETA
+// depended on what was in it; every army now walks at the same speed, so the
+// path is the whole question. The parameter is REMOVED rather than kept and
+// ignored — an argument that no longer affects the answer is how a caller comes
+// to believe it is asking a question it is not (known-issue #18).
+function routeEtaTicks(path) {
   if (!path || path.length < 2) return 0;
-  var speed = _cmdSlowestSpeed(units);
-  var hasArtillery = units && units.artillery > 0;
+  var speed = BAL.UNIT.speed;
   var ticks = 0;
   for (var i = 1; i < path.length; i++) {
     var link = _cmdLinkOf(path[i - 1], path[i]);
     if (!link) return Infinity;                       // path disagrees with LINKS
     var perTick = BAL.MOVE_BASE * speed * _cmdTerrainMove(path[i]);
-    if (link.sea) {
-      perTick *= BAL.SEA_SPEED_MUL;
-      if (hasArtillery) perTick *= BAL.SEA_ARTILLERY_SPEED_MUL;
-    }
+    if (link.sea) perTick *= BAL.SEA_SPEED_MUL;
     if (!(perTick > 0)) return Infinity;
     ticks += link.dist / perTick;
   }
@@ -204,48 +193,40 @@ function routeEtaTicks(path, units) {
 // applyCommand
 // ---------------------------------------------------------------------------
 
-// Zero every unit kind the command did not ask for. `types` absent, empty or
-// not an array means "all kinds" — the pre-existing behaviour, unchanged.
-// Returns a NEW bundle; nothing here mutates its argument.
-function _cmdFilterTypes(units, types) {
-  if (!Array.isArray(types) || !types.length) return units;
-  var keep = {};
-  for (var i = 0; i < types.length; i++) keep[types[i]] = true;
-  var order = BAL.UNIT_ORDER, out = emptyUnits();
-  for (var j = 0; j < order.length; j++) {
-    var t = order[j];
-    if (keep[t]) out[t] = units[t];
-  }
-  return out;
-}
-
+// TOMBSTONE — C1. `_cmdFilterTypes()` stood here and zeroed every unit kind a
+// `send` did not ask for, via a `cmd.types` field. The UI filter that fed it
+// was already gone before this; the field is now gone from the command schema
+// too (01-data-schema.md), because there is nothing left to filter.
+//
 // ---------------------------------------------------------------------------
 // What a source actually hands over for a given fraction.
 //
 // THE ONE PLACE THE AMOUNT IS DECIDED. render/select.js draws its preview from
-// this same function rather than calling splitUnits() itself, because the two
-// used to be separate expressions that happened to agree — and known-issue #18
-// is exactly the failure that arrangement produces: a readout that answers a
-// different question from the one on screen and never looks wrong. Sharing a
+// this same function rather than doing the multiplication itself, because the
+// two used to be separate expressions that happened to agree — and known-issue
+// #18 is exactly the failure that arrangement produces: a readout that answers
+// a different question from the one on screen and never looks wrong. Sharing a
 // helper is not sharing a decision; this IS the decision.
+//
+// STILL TRUE AFTER C1, and worth saying because it looks like it stopped being
+// worth a function. `units * fraction` is now the whole body, and writing that
+// at the call site is precisely the two-expressions-that-agree arrangement #18
+// describes — the clamp below is the part that would go missing.
 //
 // BAL.SEND_KEEP_UNITS is held back off the top, whatever the fraction. Logistic
 // growth is proportional to `units`, so a station emptied to exactly zero is
-// dead ground that can never recover — see the constant's own comment. The
-// clamp is proportional across the three types, so what stays behind is a
-// scaled-down copy of the garrison rather than an arbitrary slice of one kind.
+// dead ground that can never recover — see the constant's own comment.
 //
-// Returns a zeroed bundle when there is nothing spare; callers already reject
-// that as 'too-few-units' against BAL.MIN_SEND_UNITS.
+// Returns 0 when there is nothing spare; callers already reject that as
+// 'too-few-units' against BAL.MIN_SEND_UNITS.
 function sendPayload(units, fraction) {
-  var total = totalUnits(units);
   var keep = (BAL && isFinite(BAL.SEND_KEEP_UNITS)) ? BAL.SEND_KEEP_UNITS : 0;
-  var spare = total - keep;
-  if (!(spare > 0)) return { infantry: 0, artillery: 0, armour: 0 };
+  var spare = units - keep;
+  if (!(spare > 0)) return 0;
   // min(): the fraction still wins whenever it asks for less than the ceiling,
   // so a 25% send from a full city is untouched by any of this.
-  var f = Math.min(fraction, spare / total);
-  return splitUnits(units, f);
+  var f = Math.min(fraction, spare / units);
+  return units * f;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,8 +346,8 @@ function applyCommand(state, cmd) {
     if (st.owner !== owner) { _cmdReject(result, src, 'not-owned'); continue; }
     if (src === target) { _cmdReject(result, src, 'self-target'); continue; }
 
-    var take = _cmdFilterTypes(sendPayload(st.units, fraction), cmd.types);
-    if (totalUnits(take) < BAL.MIN_SEND_UNITS) { _cmdReject(result, src, 'too-few-units'); continue; }
+    var take = sendPayload(st.units, fraction);
+    if (take < BAL.MIN_SEND_UNITS) { _cmdReject(result, src, 'too-few-units'); continue; }
 
     // OWNERSHIP-AWARE. A source whose only path to the target runs through
     // ground another power holds has no legal send, and is rejected here rather
@@ -389,7 +370,7 @@ function applyCommand(state, cmd) {
   for (var p = 0; p < plans.length; p++) {
     var plan = plans[p];
     var station = state.stations[plan.source];
-    subUnits(station.units, plan.units);
+    station.units -= plan.units;
 
     // Each source gets its own wave, its own route and its own ETA. They are
     // NOT synchronised — see the header.
@@ -637,18 +618,15 @@ function _cmdApplyBuild(state, cmd, result) {
     if (!plan.ok) { _cmdReject(result, id, plan.reason); continue; }
 
     var st = state.stations[id];
-    // Spend PROPORTIONALLY across the bundle, through core/state.js's existing
-    // splitUnits() rather than three multiplications written out here — a fourth
-    // implementation of "scale a bundle" is the defect logged five times
-    // (known-issues #9), and this one would be the one that goes stale when the
-    // three unit types collapse to one (04-development.md §9).
-    //
-    // Proportional rather than draining one type also means a build cannot be
-    // used to launder a stack's composition.
-    var held = totalUnits(st.units);
+    // This block used to route through splitUnits() and carried a note saying
+    // it was the copy that would go stale when the unit types collapsed
+    // (04-development.md §9). The collapse happened, the prediction held, and
+    // routing through the shared helper is exactly why the change here was two
+    // lines: subtract the cost, floor at zero.
+    var held = st.units;
     var f = (held > 0) ? ((held - plan.cost) / held) : 0;
     if (f < 0) f = 0;
-    st.units = splitUnits(st.units, f);
+    st.units = held * f;
 
     if (!st.development) st.development = { kind: plan.kind, tier: 0 };
     st.development.tier = plan.tier;

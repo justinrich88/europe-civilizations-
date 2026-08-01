@@ -45,7 +45,7 @@ function _cmtNeed(name) {
   var g = _cmtG(), missing = [];
   var fns = ['aiDecide', 'aiTick', 'aiDecisions', '_aiActPlanBuild', 'newGame',
              'stepTick', 'applyCommand', 'snapshot', 'setStationOwner',
-             'developmentPlan', 'operatingTier', 'totalUnits'];
+             'developmentPlan', 'operatingTier'];
   for (var i = 0; i < fns.length; i++) {
     if (!g || typeof g[fns[i]] !== 'function') missing.push(fns[i] + '()');
   }
@@ -83,10 +83,7 @@ function _cmtTwoFronts(pid, foeA, foeB, fill) {
     var sid = STATION_IDS[i];
     var own = (sid === keepA) ? foeA : (sid === keepB) ? foeB : pid;
     setStationOwner(s, sid, own);
-    var u = s.stations[sid].units;
-    u.infantry = STATIONS[sid].capacity * (own === pid ? f : 1);
-    u.artillery = 0;
-    u.armour = 0;
+    s.stations[sid].units = STATIONS[sid].capacity * (own === pid ? f : 1);
   }
   // War, and war that STAYS — the same trap ai-tests.js documents: the latch
   // alone is not enough, because relationsTick reseeds its drift from
@@ -143,14 +140,14 @@ function _cmtDevBoard(pid, foe) {
 
   for (var j = 0; j < STATION_IDS.length; j++) {
     setStationOwner(s, STATION_IDS[j], pid);
-    s.stations[STATION_IDS[j]].units = { infantry: 1, artillery: 0, armour: 0 };
+    s.stations[STATION_IDS[j]].units = 1;
   }
   // Two of the hub's neighbours go to the foe, so the hub has exposure 2 and
   // their other neighbours have exposure 1 — the spread the ordering test needs.
   var flipped = (adj[hub.sid] || []).slice(0, 2);
   for (var k = 0; k < flipped.length; k++) {
     setStationOwner(s, flipped[k], foe);
-    s.stations[flipped[k]].units = { infantry: STATIONS[flipped[k]].capacity, artillery: 0, armour: 0 };
+    s.stations[flipped[k]].units = (STATIONS[flipped[k]].capacity);
   }
   return { s: s, pid: pid, foe: foe, hub: hub.sid, flipped: flipped,
            exposure: _cmtExposure(s, pid) };
@@ -160,7 +157,7 @@ function _cmtDevBoard(pid, foe) {
 // growth reaches legally (GROWTH_OVERFLOW_CEIL = 1.5) and which is the only
 // place a tier-2 development could ever operate at tier 2.
 function _cmtFill(s, sid, f) {
-  s.stations[sid].units = { infantry: STATIONS[sid].capacity * f, artillery: 0, armour: 0 };
+  s.stations[sid].units = (STATIONS[sid].capacity * f);
 }
 
 // Overwrite the focus memo wholesale, so a test never depends on what a
@@ -334,7 +331,7 @@ function suiteCommitment() {
     var f = _cmtTwoFronts('ger', 'fra', 'ott');
     var unfocused = aiDecide(f.s, f.pid).target;
     var other = (unfocused === f.A) ? f.B : f.A;
-    f.s.stations[other].units.infantry = 100000;      // unbeatable, by a mile
+    f.s.stations[other].units = 100000;      // unbeatable, by a mile
     _cmtSetFocus(f.s, f.pid, other);
     var d = aiDecide(f.s, f.pid);
     assert(!(d.kind === 'attack' && d.target === other),
@@ -394,8 +391,8 @@ function suiteCommitment() {
     // rival capitals beatable the AI simply attacks, and the stageFor arm of
     // this test would never run.
     var frozen = _cmtTwoFronts('ger', 'fra', 'ott');
-    frozen.s.stations[frozen.A].units.infantry = 100000;
-    frozen.s.stations[frozen.B].units.infantry = 100000;
+    frozen.s.stations[frozen.A].units = 100000;
+    frozen.s.stations[frozen.B].units = 100000;
     frozen.s.aiEnabled = true;
     var boards = [newGame(9007), frozen.s];
     var problems = [], attacks = 0, stages = 0;
@@ -480,8 +477,8 @@ function suiteCommitment() {
     // Frozen: both rival capitals unbeatable, so the walk falls through to a
     // staging march. The build is still available and must still lose.
     var z = _cmtTwoFronts('ger', 'fra', 'ott');
-    z.s.stations[z.A].units.infantry = 100000;
-    z.s.stations[z.B].units.infantry = 100000;
+    z.s.stations[z.A].units = 100000;
+    z.s.stations[z.B].units = 100000;
     assert(!!_aiActPlanBuild(z.s, z.pid),
       'the frozen board had no build available, so it cannot show that staging ' +
       'was preferred to one');

@@ -53,7 +53,7 @@ function stationAttackers(state, sid) {
   var keys = Object.keys(st.attackers).sort();
   var out = [];
   for (var i = 0; i < keys.length; i++) {
-    if (totalUnits(st.attackers[keys[i]]) > BAL.ANNIHILATION_EPSILON) out.push(keys[i]);
+    if (st.attackers[keys[i]] > BAL.ANNIHILATION_EPSILON) out.push(keys[i]);
   }
   return out;
 }
@@ -73,9 +73,8 @@ function stationAttackers(state, sid) {
 //
 // Everything that decides a real fight must pass state, and _fortBonus below
 // does. A development contributes through THIS function rather than beside it, so
-// it goes through the existing scale-in and artillery-strip path -- an unmanned
-// development is not a ghost army, and artillery answers a built fort exactly as
-// it answers a stone one.
+// it goes through the existing scale-in path -- an unmanned development is not a
+// ghost army, and a built fort is worth exactly what a stone one is worth.
 function fortLevel(sid, state) {
   var d = STATIONS[sid];
   var lvl = (d.defense - 1) + terrainOf(sid).defense;
@@ -85,98 +84,44 @@ function fortLevel(sid, state) {
   return lvl > 0 ? lvl : 0;
 }
 
-// Per-unit strength before matchup.
-function _strength(type, defending, fort) {
-  var u = BAL.UNITS[type];
-  var s = defending ? u.def : u.atk;
-  // Armour is poor against fortifications (§4) -- it takes ground, it does not
-  // reduce forts. Scaled by how fortified the target is so open-field armour
-  // is untouched.
-  if (!defending && type === 'armour' && fort > 0) {
-    var f = fort > 1 ? 1 : fort;
-    s *= (1 - f * (1 - BAL.ARMOUR_VS_FORT));
-  }
-  return s;
+// Per-unit strength. One profile, so `fort` no longer changes it -- the
+// fortification's whole effect is now the additive block in _fortBonus().
+//
+// TOMBSTONE — C1. `_mix()` and `_matchup()` stood here and resolved the
+// attacker's type mix against the defender's. Both are gone with the types;
+// see data/tuning.js §5 for what the triangle was worth on the board.
+function _strength(defending) {
+  return defending ? BAL.UNIT.def : BAL.UNIT.atk;
 }
 
-// Power-weighted type mix of a force, for matchup resolution. Resolved against
-// the whole MIX rather than a single "dominant" type, otherwise a 51/49 split
-// flips the entire battle (BAL.MATCHUP_MIN_SHARE).
-function _mix(units, defending, fort) {
-  var raw = {}, total = 0, i, t;
-  for (i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    t = BAL.UNIT_ORDER[i];
-    var v = units[t] * _strength(t, defending, fort);
-    if (v < 0) v = 0;
-    raw[t] = v;
-    total += v;
-  }
-  if (total <= 0) return null;
-
-  var kept = 0;
-  for (i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    t = BAL.UNIT_ORDER[i];
-    if (raw[t] / total < BAL.MATCHUP_MIN_SHARE) raw[t] = 0;
-    kept += raw[t];
-  }
-  if (kept <= 0) return null;
-  for (i = 0; i < BAL.UNIT_ORDER.length; i++) raw[BAL.UNIT_ORDER[i]] /= kept;
-  return raw;
-}
-
-function _matchup(type, enemyMix) {
-  if (!enemyMix) return 1;
-  var row = BAL.MATCHUP[type];
-  var f = 0;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var e = BAL.UNIT_ORDER[i];
-    f += enemyMix[e] * row[e];
-  }
-  return f;
-}
-
-function _bodyPower(units, defending, fort, enemyMix) {
-  var p = 0;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    if (units[t] <= 0) continue;
-    p += units[t] * _strength(t, defending, fort) * _matchup(t, enemyMix);
-  }
-  return p;
+function _bodyPower(units, defending) {
+  if (units <= 0) return 0;
+  return units * _strength(defending);
 }
 
 // The additive fortress block. Scales in over the first few defenders so an
-// empty fort is not a ghost army, and is stripped by artillery in proportion
-// to artillery's share of the attacking power (§4).
+// empty fort is not a ghost army.
+//
+// `atkUnits` is still taken and still unused. It is the seam the artillery
+// strip occupied (C1 tombstone, data/tuning.js §5) and 04-development.md §7's
+// stalemate question is live again without it -- something about the ATTACKER
+// may well have to reduce a fort again, and when it does it arrives here.
+// Dropping the parameter now would mean re-threading it through every caller
+// and every test to get it back.
 function _fortBonus(sid, defUnits, atkUnits, fort) {
   if (fort <= 0) return 0;
-  var defenders = totalUnits(defUnits);
-  if (defenders <= 0) return 0;
+  if (defUnits <= 0) return 0;
 
-  var scale = defenders / BAL.DEFENSE_BONUS_FULL_AT;
+  var scale = defUnits / BAL.DEFENSE_BONUS_FULL_AT;
   if (scale > 1) scale = 1;
-  var bonus = fort * BAL.DEFENSE_BONUS_POWER * scale;
-
-  var atkTotal = 0, arty = 0;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    var v = atkUnits[t] * _strength(t, false, fort);
-    atkTotal += v;
-    if (t === 'artillery') arty = v;
-  }
-  if (atkTotal > 0) {
-    var strip = BAL.UNITS.artillery.fortStrip * (arty / atkTotal);
-    if (strip > BAL.FORT_STRIP_CAP) strip = BAL.FORT_STRIP_CAP;
-    bonus *= (1 - strip);
-  }
-  return bonus;
+  return fort * BAL.DEFENSE_BONUS_POWER * scale;
 }
 
 function _allAttackerUnits(state, sid) {
   var st = state.stations[sid];
-  var out = emptyUnits();
+  var out = 0;
   var ids = stationAttackers(state, sid);
-  for (var i = 0; i < ids.length; i++) addUnits(out, st.attackers[ids[i]]);
+  for (var i = 0; i < ids.length; i++) out += st.attackers[ids[i]];
   return out;
 }
 
@@ -186,8 +131,8 @@ function _allAttackerUnits(state, sid) {
 //   side === 'attacker'      every hostile stack combined
 //   side === <power id>      that power's stack (the garrison if it is owner)
 //
-// Includes station defense, terrain, matchup against the opposing mix, and the
-// additive fort block for the defender.
+// Includes station defense, terrain, and the additive fort block for the
+// defender.
 function stationPower(state, sid, side) {
   var st = state.stations[sid];
   if (!st) return 0;
@@ -206,11 +151,10 @@ function stationPower(state, sid, side) {
     units = atkUnits;
   } else {
     defending = false;
-    units = (st.attackers && st.attackers[side]) ? st.attackers[side] : emptyUnits();
+    units = (st.attackers && st.attackers[side]) ? st.attackers[side] : 0;
   }
 
-  var enemyMix = defending ? _mix(atkUnits, false, fort) : _mix(defUnits, true, fort);
-  var p = _bodyPower(units, defending, fort, enemyMix);
+  var p = _bodyPower(units, defending);
   if (defending) p += _fortBonus(sid, defUnits, atkUnits, fort);
   return p;
 }
@@ -233,12 +177,12 @@ function _openBattle(state, sid) {
     variance: variance,
     wobble: BAL.BATTLE_WOBBLE,
     phase: r2.value * Math.PI * 2,
-    defStart: totalUnits(state.stations[sid].units),
+    defStart: state.stations[sid].units,
     groups: {},
   };
   var ids = stationAttackers(state, sid);
   for (var i = 0; i < ids.length; i++) {
-    b.groups[ids[i]] = totalUnits(state.stations[sid].attackers[ids[i]]);
+    b.groups[ids[i]] = state.stations[sid].attackers[ids[i]];
   }
   state.battles[sid] = b;
   return b;
@@ -265,13 +209,14 @@ function _swing(state, b) {
   return 1 + b.variance + b.wobble * exactSin((2 * Math.PI * t) / BAL.BATTLE_WOBBLE_PERIOD + b.phase);
 }
 
-function _takeLosses(units, amount) {
-  var total = totalUnits(units);
-  if (total <= 0) return;
-  var f = amount >= total ? 0 : (total - amount) / total;
-  units.infantry *= f;
-  units.artillery *= f;
-  units.armour *= f;
+// Returns what is LEFT rather than mutating in place -- with a scalar there is
+// no bag to reach into, so the caller assigns. Still expressed as a surviving
+// FRACTION rather than a subtraction so a loss larger than the force floors at
+// exactly 0 instead of going negative.
+function _afterLosses(units, amount) {
+  if (units <= 0) return units;
+  var f = amount >= units ? 0 : (units - amount) / units;
+  return units * f;
 }
 
 // A side is beaten at ROUT_THRESHOLD of the force it started the engagement
@@ -315,7 +260,7 @@ function combatTick(state) {
 
     // An undefended station changes hands with no fight at all. Multiplier
     // stations, being barely garrisoned, flip fast -- as they should (§5).
-    if (totalUnits(st.units) <= BAL.ANNIHILATION_EPSILON) {
+    if (st.units <= BAL.ANNIHILATION_EPSILON) {
       _capture(state, sid, atkIds);
       continue;
     }
@@ -327,7 +272,7 @@ function combatTick(state) {
     // a starting size recorded for the rout threshold.
     for (var g = 0; g < atkIds.length; g++) {
       if (b.groups[atkIds[g]] === undefined) {
-        b.groups[atkIds[g]] = totalUnits(st.attackers[atkIds[g]]);
+        b.groups[atkIds[g]] = st.attackers[atkIds[g]];
       }
     }
 
@@ -338,16 +283,16 @@ function combatTick(state) {
     var defLoss = BAL.COMBAT_RATE * pAtk;
     var atkLoss = BAL.COMBAT_RATE * pDef;
 
-    _takeLosses(st.units, defLoss);
+    st.units = _afterLosses(st.units, defLoss);
 
     // Attacker losses are shared across the hostile stacks by headcount --
     // every unit standing at the station is equally exposed.
     var atkTotal = 0, k;
-    for (k = 0; k < atkIds.length; k++) atkTotal += totalUnits(st.attackers[atkIds[k]]);
+    for (k = 0; k < atkIds.length; k++) atkTotal += st.attackers[atkIds[k]];
     if (atkTotal > 0) {
       for (k = 0; k < atkIds.length; k++) {
         var grp = st.attackers[atkIds[k]];
-        _takeLosses(grp, atkLoss * (totalUnits(grp) / atkTotal));
+        st.attackers[atkIds[k]] = _afterLosses(grp, atkLoss * (grp / atkTotal));
       }
     }
 
@@ -355,7 +300,7 @@ function combatTick(state) {
     var alive = [];
     for (k = 0; k < atkIds.length; k++) {
       var id = atkIds[k];
-      if (totalUnits(st.attackers[id]) <= _beatenAt(b.groups[id] || 0, atkLoss)) {
+      if (st.attackers[id] <= _beatenAt(b.groups[id] || 0, atkLoss)) {
         delete st.attackers[id];
         delete b.groups[id];
       } else {
@@ -363,12 +308,12 @@ function combatTick(state) {
       }
     }
 
-    if (totalUnits(st.units) <= _beatenAt(b.defStart, defLoss)) {
+    if (st.units <= _beatenAt(b.defStart, defLoss)) {
       if (alive.length) {
         _capture(state, sid, alive);
       } else {
         // Mutual annihilation: the garrison holds the ruins with nothing left.
-        st.units.infantry = 0; st.units.artillery = 0; st.units.armour = 0;
+        st.units = 0;
         _clearAttackers(st);
         delete state.battles[sid];
       }
@@ -396,9 +341,7 @@ function _capture(state, sid, atkIds) {
 
   var won = st.attackers[winner];
   var prev = st.owner;
-  st.units.infantry = won.infantry;
-  st.units.artillery = won.artillery;
-  st.units.armour = won.armour;
+  st.units = won;
   // Through setStationOwner so state.ownerEpoch moves: a capture invalidates
   // every ownership-aware route cached against this board (sim/movement.js).
   setStationOwner(state, sid, winner);

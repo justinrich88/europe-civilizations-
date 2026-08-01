@@ -3,8 +3,10 @@
 // Waves march along links and resolve the moment they land. Two rules from the
 // design carry most of the weight here:
 //
-//   * A wave moves at the speed of its SLOWEST type (00-vision.md §8), so a
-//     mixed stack travels together and artillery drags a volley down.
+//   * Every army moves at the same speed (00-vision.md §8). There used to be
+//     three unit types and a wave took the speed of its slowest, so that a
+//     mixed stack travelled together; with one type there is nothing to
+//     reconcile and the stagger in a volley comes from source distance alone.
 //   * Stacks are NEVER synchronised. Nothing in this file waits for anything
 //     else to arrive. Defeat in detail is the defining mistake of the game and
 //     it only exists because arrivals stagger -- do not add an arrival queue.
@@ -342,37 +344,21 @@ function routeFor(state, pid, fromSid, toSid, standingOnly) {
 // Marching
 // ---------------------------------------------------------------------------
 
-function _presentTypes(units) {
-  var out = [];
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    if (units[t] > BAL.ANNIHILATION_EPSILON) out.push(t);
-  }
-  return out;
-}
-
 // Map distance covered this tick, on the link the wave is currently on.
 // Terrain is the terrain of the territory being ENTERED (data schema: terrain
 // "modifies march time along links crossing into it").
 function waveSpeed(w) {
   var from = w.path[w.hop], to = w.path[w.hop + 1];
-  var types = _presentTypes(w.units);
-  if (!types.length) return 0;
-
-  var slowest = Infinity;
-  for (var i = 0; i < types.length; i++) {
-    var sp = BAL.UNITS[types[i]].speed;
-    if (sp < slowest) slowest = sp;
-  }
+  // An empty wave does not move. Kept as an explicit zero rather than letting
+  // it drift at full speed: an annihilated stack still sits on state.waves for
+  // the rest of the tick, and a moving corpse walks into the next station.
+  if (!(w.units > BAL.ANNIHILATION_EPSILON)) return 0;
 
   var terr = terrainOf(to);
-  var v = BAL.MOVE_BASE * slowest * terr.move;
+  var v = BAL.MOVE_BASE * BAL.UNIT.speed * terr.move;
 
   var l = linkBetween(from, to);
-  if (l && l.sea) {
-    v *= BAL.SEA_SPEED_MUL;
-    if (w.units.artillery > BAL.ANNIHILATION_EPSILON) v *= BAL.SEA_ARTILLERY_SPEED_MUL;
-  }
+  if (l && l.sea) v *= BAL.SEA_SPEED_MUL;
   return v;
 }
 
@@ -380,12 +366,11 @@ function waveArrived(w) {
   return w.hop >= w.path.length - 2 && w.progress >= 1;
 }
 
-// A sea crossing costs guns outright rather than needing a transport model
-// (data schema, LINKS). Charged once, as the hop completes.
-function _chargeSeaCrossing(w, from, to) {
-  var l = linkBetween(from, to);
-  if (l && l.sea) w.units.artillery *= (1 - BAL.SEA_ARTILLERY_LOSS);
-}
+// TOMBSTONE — C1. _chargeSeaCrossing() took BAL.SEA_ARTILLERY_LOSS off a
+// wave's guns as each sea hop completed, so that shipping artillery cost
+// something without needing a transport model. There are no guns to charge.
+// A sea crossing is now purely the speed penalty (SEA_SPEED_MUL, compounded
+// with the 1.6x sea dist inflation), which is the same toll for everybody.
 
 // A wave's path is fixed at send time, but ownership is not. If an enemy takes
 // a station ON the path while the wave is in the air, letting the wave walk
@@ -474,9 +459,9 @@ function _ordStandDown(state, w, upto) {
   if (sid) {
     _moveDeposit(state, sid, w.owner, w.units, true);
   } else if (stats) {
-    stats.unitsLost += totalUnits(w.units);
+    stats.unitsLost += w.units;
   }
-  w.units = emptyUnits();
+  w.units = 0;
   w.dead = true;
   return true;
 }
@@ -534,7 +519,6 @@ function _advanceWave(state, w) {
       return;
     }
 
-    _chargeSeaCrossing(w, from, to);
     // THE PASSAGE TOLL, charged ONCE on entering ground the wave does not own
     // (§6). This is the mid-path case only: the destination is not tolled,
     // because entering the destination IS the battle and charging both would
@@ -578,24 +562,24 @@ function _advanceWave(state, w) {
 function _moveDeposit(state, sid, owner, units, standing) {
   var st = state.stations[sid];
   if (!st) return;
-  if (totalUnits(units) <= BAL.ANNIHILATION_EPSILON) return;
+  if (units <= BAL.ANNIHILATION_EPSILON) return;
 
   if (st.owner === owner) {
-    addUnits(st.units, units);
+    st.units += units;
     return;
   }
 
   if (standing) {
     if (state.orderStats) {
       state.orderStats.fights++;
-      state.orderStats.unitsLost += totalUnits(units);
+      state.orderStats.unitsLost += units;
     }
     return;
   }
 
   if (!st.attackers) st.attackers = {};
-  if (!st.attackers[owner]) st.attackers[owner] = emptyUnits();
-  addUnits(st.attackers[owner], units);
+  if (!st.attackers[owner]) st.attackers[owner] = 0;
+  st.attackers[owner] += units;
 }
 
 // ---------------------------------------------------------------------------
@@ -633,9 +617,7 @@ function _moveLandNum(n) {
 //
 //   ashore  units already committed to the beach
 //   total   strength at the moment the landing began, AFTER the sea toll
-//   per     units of each type committed per tick (total / LANDING_TICKS,
-//           split by the force's original composition, so a mixed stack lands
-//           mixed rather than landing its infantry first)
+//   per     units committed per tick (total / LANDING_TICKS)
 //
 // Fixing `per` at the start rather than recomputing it from the remainder is
 // what makes the echelon a constant fraction of ORIGINAL strength; recomputing
@@ -678,13 +660,8 @@ function _moveLandNum(n) {
 // Adding it here therefore cannot move a seeded replay: verified by running
 // `node tools/balance.js 48 --seed 100` before and after, byte-identical.
 function _moveBeginLanding(state, w) {
-  var per = emptyUnits();
   var n = BAL.LANDING_TICKS > 1 ? BAL.LANDING_TICKS : 1;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    per[t] = w.units[t] / n;
-  }
-  w.landing = { ashore: 0, total: totalUnits(w.units), per: per };
+  w.landing = { ashore: 0, total: w.units, per: w.units / n };
 
   var sid = w.path[w.path.length - 1];
   var st = state && state.stations ? state.stations[sid] : null;
@@ -716,7 +693,7 @@ function _moveLandEchelon(state, w) {
   }
 
   var L = w.landing;
-  var atSea = totalUnits(w.units);
+  var atSea = w.units;
   if (atSea <= BAL.ANNIHILATION_EPSILON) return false;
 
   // Flush the remainder on the final echelon rather than trickling a residue
@@ -726,18 +703,13 @@ function _moveLandEchelon(state, w) {
   var share = L.total / (BAL.LANDING_TICKS > 1 ? BAL.LANDING_TICKS : 1);
   var last = (atSea - share) <= BAL.MIN_SEND_UNITS;
 
-  var go = emptyUnits();
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    var take = last ? w.units[t] : Math.min(w.units[t], L.per[t]);
-    if (!(take > 0)) take = 0;
-    go[t] = take;
-    w.units[t] -= take;
-  }
+  var go = last ? w.units : Math.min(w.units, L.per);
+  if (!(go > 0)) go = 0;
+  w.units -= go;
 
-  L.ashore += totalUnits(go);
+  L.ashore += go;
   _moveDeposit(state, sid, w.owner, go, w.standing);
-  return !last && totalUnits(w.units) > BAL.ANNIHILATION_EPSILON;
+  return !last && w.units > BAL.ANNIHILATION_EPSILON;
 }
 
 // The station a wave arrives at is ALWAYS the last entry in its path — that is
@@ -766,13 +738,7 @@ function resolveArrival(state, w) {
     return false;
   }
 
-  // Charged here, once, for the whole landing — not per echelon. Charging it
-  // before the landing record is built is what makes "exactly once" structural:
-  // echelons run through _moveLandEchelon, which never touches the toll.
-  if (w.path.length >= 2) {
-    _chargeSeaCrossing(w, w.path[w.path.length - 2], sid);
-  }
-  if (totalUnits(w.units) <= BAL.ANNIHILATION_EPSILON) return false;
+  if (w.units <= BAL.ANNIHILATION_EPSILON) return false;
 
   if (!_moveIsSeaArrival(w)) {
     _moveDeposit(state, sid, w.owner, w.units, w.standing);
@@ -805,7 +771,7 @@ function movementTick(state) {
     // resolve now, never next tick.
     if (waveArrived(w)) { if (resolveArrival(state, w)) kept.push(w); continue; }
 
-    if (totalUnits(w.units) <= BAL.ANNIHILATION_EPSILON) continue;
+    if (w.units <= BAL.ANNIHILATION_EPSILON) continue;
 
     // MARCH ATTRITION — 06-movement-and-attrition.md §2. Charged once per wave
     // per tick, BEFORE advancing, so a wave that dies this tick never moves on
@@ -832,10 +798,10 @@ function movementTick(state) {
 function _chargePassage(state, w, sid) {
   var toll = movePassageToll(state, w.owner, sid);
   if (!(toll > 0)) return;
-  var held = totalUnits(w.units);
+  var held = w.units;
   if (held <= 0) return;
   if (held - toll <= (BAL.ANNIHILATION_EPSILON || 0)) {
-    w.units = emptyUnits();
+    w.units = 0;
     w.dead = true;
     if (typeof logEvent === 'function') {
       logEvent(state, 'lost', POWERS[w.owner].name + ' lost a column forcing passage at ' +
@@ -844,7 +810,7 @@ function _chargePassage(state, w, sid) {
     if (state.orderStats) state.orderStats.unitsLost += held;
     return;
   }
-  w.units = splitUnits(w.units, (held - toll) / held);
+  w.units = held * ((held - toll) / held);
 }
 
 // A wave loses strength for every tick it is in transit. Returns true if this
@@ -868,12 +834,12 @@ function _chargePassage(state, w, sid) {
 // DESTROYED EN ROUTE IS A REAL AND LEGIBLE FAILURE — you overreached — so it is
 // logged. §2: "it must appear in the ticker, not vanish silently."
 //
-// Proportional across the bundle through splitUnits(), so the arithmetic is
+// Expressed as a surviving fraction rather than a subtraction, so the arithmetic is
 // unchanged when the three unit types collapse to one (04-development.md §9).
 function _chargeMarch(state, w) {
   var rate = BAL.PASSAGE ? BAL.PASSAGE.MARCH_LOSS_PER_TICK : 0;
   if (!(rate > 0)) return false;
-  var held = totalUnits(w.units);
+  var held = w.units;
   if (held <= 0) return false;
 
   // DEATH IS "WOULD FALL TO THE ANNIHILATION FLOOR", NOT "WOULD FALL TO ZERO".
@@ -889,7 +855,7 @@ function _chargeMarch(state, w) {
   // that make it unreachable live in a different file from the branch.
   var floor = BAL.ANNIHILATION_EPSILON || 0;
   if (held - rate <= floor) {
-    w.units = emptyUnits();
+    w.units = 0;
     w.dead = true;
     if (typeof logEvent === 'function') {
       logEvent(state, 'lost', POWERS[w.owner].name + ' lost a column marching on ' +
@@ -898,7 +864,7 @@ function _chargeMarch(state, w) {
     if (state.orderStats) state.orderStats.unitsLost += held;
     return true;
   }
-  w.units = splitUnits(w.units, (held - rate) / held);
+  w.units = held * ((held - rate) / held);
   return false;
 }
 
@@ -930,7 +896,7 @@ function _chargeMarch(state, w) {
 // arriving unannounced. When B1 lands this becomes the fortification TERM of that
 // rule rather than a rule of its own.
 //
-// PROPORTIONAL across the bundle, through core/state.js's splitUnits(), so it
+// Expressed as a surviving FRACTION rather than a subtraction, so it
 // needs no change when the three unit types collapse to one (§9).
 function _chargeApproach(state, w, to, ticks) {
   if (!(ticks > 0)) return;
@@ -948,7 +914,7 @@ function _chargeApproach(state, w, to, ticks) {
   var f = 1 - BAL.DEV.FORT_APPROACH_LOSS * tier * ticks;
   if (f >= 1) return;
   if (f < 0) f = 0;
-  w.units = splitUnits(w.units, f);
+  w.units *= f;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +983,7 @@ function _chargeApproach(state, w, to, ticks) {
 function _ordAllowedFraction(state, sid) {
   var st = state.stations[sid];
   if (!st) return 0;
-  var units = totalUnits(st.units);
+  var units = st.units;
   if (units <= 0) return 0;
   var cap = (typeof STATIONS !== 'undefined' && STATIONS[sid]) ? STATIONS[sid].capacity : units;
   var spare = units - BAL.ORDERS.KEEP_FLOOR * cap;
@@ -1084,7 +1050,7 @@ function _ordInbound(state, pid) {
   for (var i = 0; i < state.waves.length; i++) {
     var w = state.waves[i];
     if (w.owner !== pid || w.dead) continue;
-    out[w.to] = (out[w.to] || 0) + totalUnits(w.units);
+    out[w.to] = (out[w.to] || 0) + w.units;
   }
   return out;
 }
@@ -1130,7 +1096,7 @@ function _ordHeadroom(state, sid, inbound) {
   var st = state.stations[sid];
   if (!st) return 0;
   var cap = (typeof STATIONS !== 'undefined' && STATIONS[sid]) ? STATIONS[sid].capacity : 0;
-  return cap * _ordCeilingMul() - totalUnits(st.units) - (inbound[sid] || 0);
+  return cap * _ordCeilingMul() - st.units - (inbound[sid] || 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,7 +1152,7 @@ function _ordMinSend() {
 function standingOrderSend(state, sid) {
   var st = state.stations[sid];
   if (!st || !st.supplyTo || !st.supplyTo.length) return 0;
-  var amount = totalUnits(st.units) * _ordAllowedFraction(state, sid);
+  var amount = st.units * _ordAllowedFraction(state, sid);
   return amount >= _ordMinSend() ? amount : 0;
 }
 
@@ -1497,7 +1463,7 @@ function _ordPlanPower(state, pid) {
     // edge-level reasons above are still computed and drawn: a city sitting at
     // its keep floor still wants to show which of its lines are cut.
     var fraction = _ordAllowedFraction(state, from);
-    var have = totalUnits(st.units);
+    var have = st.units;
     var share = (open > 0 && fraction > 0) ? (have * fraction) / open : 0;
 
     // How far this SOURCE is from being able to pay for one whole stream — the
@@ -1593,8 +1559,7 @@ function _ordPlanPower(state, pid) {
     // each successive edge is issued. Two edges out of one city are two separate
     // applyCommand calls in the same sweep, and the second one is sized against
     // what the first one left behind — so the plan has to model that shrinkage
-    // or it over-promises on every edge after the first. splitUnits scales all
-    // three unit types by one factor, so a single scalar is exact here.
+    // or it over-promises on every edge after the first.
     var factor = 1;
 
     for (j = 0; j < list.length; j++) {
@@ -1614,8 +1579,8 @@ function _ordPlanPower(state, pid) {
       openSeen++;
       if (lead >= 0 && openSeen !== lead) { edges[j] = _ordBlocked(t, 'below-min-send', shortBy); continue; }
 
-      var cur = splitUnits(st.units, factor);
-      var curTotal = totalUnits(cur);
+      var cur = st.units * factor;
+      var curTotal = cur;
       if (!(curTotal > 0)) { edges[j] = _ordBlocked(t, 'at-keep-floor', shortBy); continue; }
 
       var want = share > room ? room : share;
@@ -1631,7 +1596,7 @@ function _ordPlanPower(state, pid) {
       // happened: two expressions that agreed until one of them was tuned.
       // Asking the command layer's own function makes agreement structural.
       var amount = (typeof sendPayload === 'function')
-        ? totalUnits(sendPayload(cur, f))
+        ? sendPayload(cur, f)
         : curTotal * f;
 
       if (amount < minSend) {
@@ -1792,7 +1757,7 @@ function _ordSweepPower(state, pid) {
       if (res && res.ok) {
         sent += res.waves.length;
         for (var k = 0; k < res.waves.length; k++) {
-          if (state.orderStats) state.orderStats.unitsSent += totalUnits(res.waves[k].units);
+          if (state.orderStats) state.orderStats.unitsSent += res.waves[k].units;
         }
         if (state.orderStats) state.orderStats.sends += res.waves.length;
       }

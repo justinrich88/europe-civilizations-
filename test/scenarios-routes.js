@@ -139,9 +139,7 @@ function _rteBoard(fns, d, seed, pid, n) {
   }
   own.sort();
   for (var j = 0; j < own.length; j++) {
-    s.stations[own[j]].units = {
-      infantry: d.STATIONS[own[j]].capacity * 0.9, artillery: 0, armour: 0,
-    };
+    s.stations[own[j]].units = (d.STATIONS[own[j]].capacity * 0.9);
   }
   return { s: s, own: own };
 }
@@ -193,8 +191,8 @@ function _rteRunning(fns, d, seed, pid, warmup) {
   if (M === A || M === D) return null;
   // The destination is drained so it has headroom: the real case is a city that
   // has just been fought over, not one already full.
-  b.s.stations[D].units = { infantry: 1, artillery: 0, armour: 0 };
-  b.s.stations[M].units = { infantry: 1, artillery: 0, armour: 0 };
+  b.s.stations[D].units = 1;
+  b.s.stations[M].units = 1;
   _rteLink(b.s, pid, [A], D);
   for (var t = 0; t < (warmup || 0); t++) fns.step(b.s);
   return {
@@ -548,7 +546,7 @@ function suiteRoutes(d) {
       // same two constants the planner uses. Not a second copy of the planner —
       // it is the question the planner is being asked, deliberately expressed
       // without the division so the two can disagree.
-      var u = totalUnits(f.s.stations[f.A].units);
+      var u = (f.s.stations[f.A].units);
       var cap = d.STATIONS[f.A].capacity;
       var spare = u - O.KEEP_FLOOR * cap;
       var whole = spare > 0 ? O.SEND_FRACTION * spare : 0;
@@ -629,7 +627,7 @@ function suiteRoutes(d) {
       // Against the SOURCE's own allowance at this instant rather than against
       // `a`: the two boards diverge as soon as they ship differently, so the
       // one-line board is a sanity check and the allowance is the contract.
-      var u = totalUnits(two.s.stations[two.A].units);
+      var u = (two.s.stations[two.A].units);
       var spare = u - O.KEEP_FLOOR * d.STATIONS[two.A].capacity;
       var allow = spare > 0 ? O.SEND_FRACTION * spare : 0;
       var over = b - allow;
@@ -659,9 +657,9 @@ function suiteRoutes(d) {
     var targets = b.own.filter(function (x) { return x !== from; }).slice(0, 3).sort();
     assertEqual(targets.length, 3, 'fixture could not find three destinations');
     for (var i = 0; i < targets.length; i++) _rteLink(b.s, PID, [from], targets[i]);
-    b.s.stations[from].units = { infantry: d.STATIONS[from].capacity * 3, artillery: 0, armour: 0 };
+    b.s.stations[from].units = (d.STATIONS[from].capacity * 3);
     for (i = 0; i < targets.length; i++) {
-      b.s.stations[targets[i]].units = { infantry: 1, artillery: 0, armour: 0 };
+      b.s.stations[targets[i]].units = 1;
     }
 
     var nx = standingOrderNext(b.s, from);

@@ -32,36 +32,24 @@ function indexIds() {
   POWER_IDS = (typeof POWERS === "object" && POWERS) ? Object.keys(POWERS).sort() : [];
 }
 
-function emptyUnits() {
-  return { infantry: 0, artillery: 0, armour: 0 };
-}
-
-function totalUnits(units) {
-  return units.infantry + units.artillery + units.armour;
-}
-
-// Scale a unit bundle by a fraction, returning the taken part. Mutates nothing.
-function splitUnits(units, fraction) {
-  return {
-    infantry: units.infantry * fraction,
-    artillery: units.artillery * fraction,
-    armour: units.armour * fraction,
-  };
-}
-
-function addUnits(target, source) {
-  target.infantry += source.infantry;
-  target.artillery += source.artillery;
-  target.armour += source.armour;
-  return target;
-}
-
-function subUnits(target, source) {
-  target.infantry -= source.infantry;
-  target.artillery -= source.artillery;
-  target.armour -= source.armour;
-  return target;
-}
+// ---------------------------------------------------------------------------
+// UNITS ARE A SCALAR.  (C1, 04-development.md §9)
+//
+// `st.units` and `w.units` are plain numbers -- a count of undifferentiated
+// armies. There used to be a `{infantry, artillery, armour}` bag here and five
+// helpers to work it (emptyUnits / totalUnits / splitUnits / addUnits /
+// subUnits); all five are gone, because with one number `+`, `-` and `*` say
+// the same thing more clearly and there is nothing left to sum.
+//
+// Deleting `totalUnits()` retires a known-issue #9 hazard rather than creating
+// one. Three renderers carried load-order guards and comments warning that a
+// hand-rolled `u.infantry + u.artillery + u.armour` anywhere else would be a
+// second implementation of one rule. There is no derivation left to duplicate:
+// the total IS the field.
+//
+// Unit counts are still FLOATS -- see rule 1 above, it is unchanged and it is
+// the reason attrition works at all.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -187,14 +175,9 @@ function newGame(seed) {
 
   STATION_IDS.forEach(function (sid) {
     var setup = (typeof SETUP === "object" && SETUP) ? SETUP[sid] : null;
-    var start = setup && setup.units ? setup.units : emptyUnits();
     s.stations[sid] = {
       owner: setup ? setup.owner : "neutral",
-      units: {
-        infantry: start.infantry || 0,
-        artillery: start.artillery || 0,
-        armour: start.armour || 0,
-      },
+      units: (setup && typeof setup.units === "number") ? setup.units : 0,
       connected: true,   // recomputed each tick from the capital, sim/movement.js
       growthMul: 1,      // recomputed from multiplier stations in range
       // SUPPLY LINES — MUTABLE PLAYER INTENT, which is why they live here and
@@ -492,10 +475,10 @@ function powerStations(state, powerId) {
 function powerForces(state, powerId) {
   var total = 0;
   STATION_IDS.forEach(function (sid) {
-    if (state.stations[sid].owner === powerId) total += totalUnits(state.stations[sid].units);
+    if (state.stations[sid].owner === powerId) total += state.stations[sid].units;
   });
   state.waves.forEach(function (w) {
-    if (w.owner === powerId) total += totalUnits(w.units);
+    if (w.owner === powerId) total += w.units;
   });
   return total;
 }

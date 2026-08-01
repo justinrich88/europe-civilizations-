@@ -388,12 +388,15 @@ function _aiScoreBelief(state, pid, sid, ctx) {
 // the AI charging blind at 10:1 odds it invented. aiCandidates below refuses
 // level-0 targets outright, so this is defence in depth rather than a live
 // path; it exists so that loosening the filter cannot turn into recklessness.
+// `typeof === 'number'`, NOT a truth test. Since C1 a believed garrison is a
+// number, and a believed garrison of exactly ZERO is a real and common board
+// state — a city scoured by the fight that took it. Under `if (bel.units)`
+// that station would fall through to the pessimistic capacity guess below and
+// the AI would refuse to walk into an empty city.
 function _aiScoreBelievedUnits(state, sid, bel) {
-  if (bel && bel.units) return bel.units;
+  if (bel && typeof bel.units === 'number') return bel.units;
   var data = (typeof STATIONS !== 'undefined') ? STATIONS[sid] : null;
-  var u = emptyUnits();
-  if (data && data.capacity > 0) u.infantry = data.capacity;
-  return u;
+  return (data && data.capacity > 0) ? data.capacity : 0;
 }
 
 // A ONE-STATION PROXY STATE carrying the believed garrison, so the canonical
@@ -494,17 +497,15 @@ function _aiSources(state, pid, sid, ctx) {
 // HOME_GARRISON_FLOOR is the turtle floor that stops a power stripping its
 // interior to feed one front. The binding one is whichever sends less.
 //
-// APPROXIMATION: power is sum(units x UNITS[t].atk), which omits the matchup
-// table and armour's fort penalty. Both depend on the COMBINED mix of every
-// source in the volley against the defender's mix — a quantity only ai/ai.js
-// knows, after it has chosen sources. Since matchup factors sit near 1 and
-// apply to every candidate alike, omitting them shifts the absolute odds
-// slightly but barely reorders the candidate list. The defender side, which is
-// where the fort block lives and where errors are expensive, is exact.
+// NO LONGER AN APPROXIMATION. This used to read sum(units x UNITS[t].atk) and
+// carry a paragraph excusing the matchup table and armour's fort penalty, both
+// of which depended on the combined mix of a volley that had not been chosen
+// yet. C1 deleted both, so `send x BAL.UNIT.atk` is now the exact attacking
+// body power for this stack, and the defender side always was exact.
 function _aiSendable(state, sid) {
   var st = state.stations[sid];
   var data = STATIONS[sid];
-  var total = totalUnits(st.units);
+  var total = st.units;
   if (total <= _AI_POWER_EPS) return { units: 0, power: 0 };
 
   var floorUnits = (data ? data.capacity : 0) * BAL.AI.HOME_GARRISON_FLOOR;
@@ -513,13 +514,7 @@ function _aiSendable(state, sid) {
   var send = byFraction < byFloor ? byFraction : byFloor;
   if (send <= 0) return { units: 0, power: 0 };
 
-  var f = send / total;
-  var power = 0;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    power += st.units[t] * f * BAL.UNITS[t].atk;
-  }
-  return { units: send, power: power };
+  return { units: send, power: send * BAL.UNIT.atk };
 }
 
 // Estimated attacker:defender POWER ratio. Clamped to _AI_ODDS_CAP so an

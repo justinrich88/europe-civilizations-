@@ -108,8 +108,8 @@ function _relBorderPressure(state) {
     var oa = a.owner, ob = b.owner;
     if (oa === ob || oa === 'neutral' || ob === 'neutral') continue;
     var ka = oa + '~' + ob, kb = ob + '~' + oa;
-    mass[ka] = (mass[ka] || 0) + totalUnits(b.units);   // what ob has facing oa
-    mass[kb] = (mass[kb] || 0) + totalUnits(a.units);
+    mass[ka] = (mass[ka] || 0) + b.units;   // what ob has facing oa
+    mass[kb] = (mass[kb] || 0) + a.units;
   }
   return mass;
 }

@@ -220,12 +220,12 @@ function _seltArm(fx) {
 }
 
 // Through core/state.js, not spelled out. These suites run INSIDE the iframe's
-// index.html, so totalUnits() is the same function the renderer under test is
+// index.html, so () is the same function the renderer under test is
 // using — which is the point: a helper that sums the bundle its own way can
 // agree with a broken renderer and pass. The `|| 0` guards this used to carry
 // would have made every assertion here read 0 against a rendered 0.
 function _seltUnits(fx, sid) {
-  return totalUnits(fx.game.stations[sid].units);
+  return (fx.game.stations[sid].units);
 }
 
 function _seltBanner() {
@@ -546,7 +546,7 @@ function suiteSelectSafety(d) {
     _sfyPump();
     var line = _sfyRailLine();
     var shown = Number((line.match(/·\s*([0-9.]+)\s*units/) || [])[1]);
-    var real = totalUnits(GAME.stations[mine[0]].units);
+    var real = (GAME.stations[mine[0]].units);
     assert(isFinite(shown), 'no unit count could be read out of: ' + line);
     // The rail rounds for display; a whole unit of slack is the format, not drift.
     assert(Math.abs(shown - real) < 1,

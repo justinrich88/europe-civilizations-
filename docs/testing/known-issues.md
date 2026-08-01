@@ -781,3 +781,71 @@ is exactly why this is easy to get wrong.
 `test/node.js` loads `render/readout.js`, so no headless run could have caught it,
 and the section is only built for a station the player owns and is hovering —
 which no existing test does.
+
+
+## 26. A one-station PROXY state silently answers a different question from the real board — the AI cannot see a single fortification
+
+`ai/score.js` and `ai/ai.js` both reuse the canonical `stationPower()` by
+building a **one-station proxy state** and handing it over, rather than
+re-deriving power themselves. That is the right instinct and it is #9's rule
+working. The trap is what the proxy copies:
+
+```js
+proxy.stations[sid] = { owner, units, attackers, connected };   // and NOT development
+```
+
+`stationPower` calls `fortLevel(sid, state)`, which calls
+`developmentFortLevel(state, sid)`, which reads `state.stations[sid].development`
+— absent on the proxy, so **zero**. The AI's odds gate and its target scorer are
+blind to every fortification on the board, including the ones it has built
+itself since B3. Measured: a tier-3 fort moves `aiScoreTarget` by exactly 0.000.
+
+**Why it is invisible.** A proxy that is missing a field does not throw, does not
+warn, and does not return an obviously silly number — it returns the perfectly
+plausible answer to the question *"what would this station be worth with no
+development on it"*. Every test of the odds gate passed, because every fixture
+that varied the defender varied its **garrison**, and that field IS copied.
+
+It also hid behind a second fact for a year: until C1 a defender's unit **mix**
+changed its power too, so a test could prove the scorer read *power* rather than
+*bodies* without ever involving a fort. C1 removed the mix, and the fort became
+the only way to tell the two apart — at which point the test could not be
+written and the hole surfaced.
+
+**The lesson is about proxies, not about forts.** A proxy state is a claim that
+the fields you copied are the only ones the callee reads, and nothing checks
+that claim. When `stationPower` grew a new input, every proxy in the codebase
+silently started answering a stale question. If you build one, enumerate what
+the callee touches — or hand it a real snapshot.
+
+## 27. Owner identity at 12,000 ticks is NOT a valid check for a change that perturbs floats — the board is chaotic past ~7,000 ticks
+
+`CLAUDE.md`'s verification bar says a moved balance hash is explained by showing
+"same owner for every one of the 108 cities at 12,000 ticks, worst relative
+drift 1.9e-13". That standard is sound for a change that perturbs **no float at
+all**, and misleading for anything else.
+
+Measured at C1, on two trees that compute provably the same game and differ only
+in floating-point association (`x + 0 + 0` versus `x`):
+
+| tick | worst relative drift | cities with a different owner |
+|---|---|---|
+| 2 | 1.8e-15 (first difference) | 0 |
+| 1,000 | 8.6e-14 | 0 |
+| 3,000 | 1.9e-14 | 0 |
+| 5,000 | 3.3e-2 | 0 |
+| **6,978** | — | **first disagreement** |
+| 9,000 | 3.5e+1 | 19 |
+| 12,000 | 2.2e+1 | 13 |
+
+A one-bit difference at tick 2 becomes twenty cities by tick 9,000. So "13 of
+108 cities changed hands" is equally consistent with *a real balance change* and
+with *no change whatsoever*, and the two cannot be told apart at that horizon.
+
+**What to do instead.** If a change perturbs floats, the four-seed board diff is
+the wrong instrument: use `tools/balance.js` over enough games that the win-rate
+spread is the statistic, or construct the comparison so association CANNOT
+differ (C1 did the latter — see `04-development.md` §9c — and got a bit-identical
+board out of a ~700-site rewrite as a result). The earlier `core/exact.js` and B2
+results stand: both held drift at ~1e-13 *at* 12,000 ticks, which is the case the
+standard is actually valid for.

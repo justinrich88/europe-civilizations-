@@ -88,7 +88,7 @@ Deliberately accepted: capacity now reads as *"where it gets slow"* rather than 
 |---|---|---|
 | **Holding** — city, town | Most of the map | Pure population growth. Units accumulate up to capacity. Bigger city = higher rate and higher cap. |
 | **Multiplier** — farmland, granary | Ukraine, Po Valley, Prussia, the Beauce | Generates little itself, but **raises growth at every station in its territory and in adjacent territories.** Undefended, high-value, and its effect is visible on the map. |
-| **Producer** — factory, arsenal, works | Ruhr, Birmingham, Lombardy, Donbas | Accumulates a **specific unit type** instead of generic infantry — artillery, armour. Lower raw numbers, far better units. |
+| **Producer** — factory, arsenal, works | Ruhr, Birmingham, Lombardy, Donbas | ~~Accumulates a **specific unit type** instead of generic infantry.~~ **C1 removed the unit types and with them this station's whole purpose.** It is now a smaller, slower holding that is the only place a factory can be built — and the factory is inert. See §4 and `04-development.md` §9c. |
 | **Defensive** — fortress, citadel | Verdun, Przemyśl, Alpine forts, the Dardanelles | Low growth, large defense multiplier. Cheap to hold, expensive to take, gates a chokepoint. |
 
 **Multiplier stations are the most interesting objects on the board.** They're worth almost nothing to garrison and enormous to own, their benefit spills across borders, and taking one hurts your enemy everywhere at once rather than locally. That asymmetry is where the strategy lives.
@@ -149,19 +149,66 @@ Between stations there are **links** — roads within a territory, border crossi
 
 ---
 
-## 4. Units
+## 4. Units — ONE TYPE, as of C1 (2026-08)
 
-Three types, each from a different station type. Kept few so a stack reads at a glance.
+**One unit. There is no roster and no counter to pick.** A station holds a
+number of undifferentiated armies; a stack's only property is how big it is.
+It defends better than it attacks (1.2 vs 1.0), which is what makes "arrives in
+volume, good defending" true and gives the defender a real edge at parity.
 
-| Type | Source | Character |
+What decides a fight is **how many arrive and how fortified the city is** — so
+the decisions are where to send from and when, not what to bring.
+
+### ~~Three types, and a soft triangle~~ — CUT, and this is the reversal
+
+The original §4 read:
+
+> Three types, each from a different station type. Kept few so a stack reads at
+> a glance. **Infantry** from holding stations, the baseline. **Artillery**
+> from producer stations, which *strips fortress and terrain defense* — strong
+> attacking, weak if caught alone, slow. **Armour** from producer stations,
+> fast and strong in the open, poor against fortifications.
+>
+> Soft triangle: Artillery beats entrenched Infantry → Armour beats exposed
+> Artillery → Infantry beats Armour.
+>
+> This is what makes producer stations worth fighting for: without artillery
+> you cannot crack a fortress belt, and only a handful of places on the map
+> make artillery.
+
+**Why it went.** `04-development.md` §9: development replaces what the triangle
+was for and does it better, because *the triangle was never visible*. The
+number on a node is the interface and it never said what a stack was made of.
+Development moves the differentiation from the **stack** (mobile, unreadable)
+onto the **station** (fixed, on the map).
+
+**What it cost, measured rather than assumed.** The triangle was doing far more
+balancing work than "a soft flavour rule" suggests. 96 games either side, real
+AI, same rig:
+
+| | before | after |
 |---|---|---|
-| **Infantry** | Holding stations | The baseline. Balanced, good defending, arrives in volume. |
-| **Artillery** | Producer stations | **Strips fortress and terrain defense.** Strong attacking, weak if caught alone, slow. The answer to a defensive station. |
-| **Armour** | Producer stations | Fast, strong in the open, poor against fortifications. Takes ground quickly and cuts links. |
+| dominant power | France 70.8% | **Austria-Hungary 76.0%** |
+| runner-up | Russia 6.3% | France 13.5% |
+| win-rate spread | 70.8 points | **76.0 points** |
+| mean game length | 25,445 ticks | 16,013 ticks |
 
-Soft triangle: **Artillery** beats entrenched Infantry → **Armour** beats exposed Artillery → **Infantry** beats Armour.
+The board did not get more balanced; it changed hands and got faster. Phase D
+owns the rebalance, and it now knows the triangle was Austria's brake.
 
-This is what makes producer stations worth fighting for: without artillery you cannot crack a fortress belt, and only a handful of places on the map make artillery.
+**Two consequences are open and are NOT tidied away here:**
+
+1. **A producer station has no reason to exist.** 16 of 108 cities, mean
+   capacity 28.7 and rate 0.51 against a plain holding's 37.65 and 0.83 —
+   strictly worse at everything, with "it makes the guns" as its entire
+   justification. The designed replacement already exists and is inert:
+   `sim/development.js` gives producers exclusive access to the **factory**,
+   which does nothing yet. See `04-development.md` §9c.
+2. **Nothing cracks a fortress but mass.** Artillery was the named counter and
+   the strip is gone, so forts are strictly stronger than they were.
+   `04-development.md` §7's stalemate question is live again, and
+   `sim/combat.js`'s `_fortBonus` still takes the attacking force as a
+   parameter, unused, because that is the seam a new answer arrives at.
 
 ---
 
@@ -191,7 +238,7 @@ A station flips the instant one side has nothing left in it. Multiplier stations
 
 Square-law combat snowballs. With negotiated diplomacy cut, three systems carry that load:
 
-1. **Connection.** A station with no path back to your capital stops growing and decays. Cutting links is as powerful as taking cities, and armour is built to do it.
+1. **Connection.** A station with no path back to your capital stops growing and decays. Cutting links is as powerful as taking cities. (This used to end "and armour is built to do it"; there is no armour since C1 and no unit is specialised for the job, so cutting a link is a question of where you spend rather than of what you built.)
 2. **Balance-of-power AI** (§6). Every AI weights threat toward whoever leads. They converge on the leader without a single line of negotiation UI.
 3. **Growth is logistic, not linear.** A big empire's stations are mostly near capacity and therefore mostly *not growing*. Expansion has diminishing returns built into the curve.
 
@@ -363,7 +410,7 @@ Two properties are load-bearing rather than cosmetic. The panel is a **flex sibl
 
 Matching your two existing prototypes exactly: **zero-build vanilla JS**, plain `<script src>` tags in order, shared globals, served by `python3 -m http.server`. No npm, no bundler, no framework, no CDN. `:root` custom-property palette, flat lowercase-hyphen class names, one fixed dark theme.
 
-**State is aggregate counts.** A station holds `{infantry, artillery, armour}` as floats — 100ms attrition rounds to zero otherwise, floored only at render. Marching stacks are separate records, since in-transit position is the only thing with real identity. The whole game state prints as one console table.
+**State is aggregate counts.** A station holds `units` as a single float — it was `{infantry, artillery, armour}` until C1 — and it must stay a float, because 100ms attrition on an integer count rounds to zero and battles never resolve. Floored only at render. Marching stacks are separate records, since in-transit position is the only thing with real identity. The whole game state prints as one console table.
 
 **Fixed-timestep accumulator**, rAF only for render. Speed multiplies *time consumed*, never the timestep — 4x is literally "run more ticks", physics identical at every speed. Catch-up capped to avoid a death spiral.
 

@@ -212,10 +212,7 @@ function _aiTestLastStand(holder, foe, seed, fill) {
   for (var i = 0; i < STATION_IDS.length; i++) {
     var sid = STATION_IDS[i];
     setStationOwner(s, sid, sid === keep ? foe : holder);
-    var u = s.stations[sid].units;
-    u.infantry = STATIONS[sid].capacity * (sid === keep ? 1 : f);
-    u.artillery = 0;
-    u.armour = 0;
+    s.stations[sid].units = STATIONS[sid].capacity * (sid === keep ? 1 : f);
   }
   // War, and war that STAYS. The latch alone is not enough: relationsTick
   // seeds its drift from powers[a].relations[b], which still reads
@@ -276,7 +273,7 @@ function _aiTestSends(state, ticks) {
         var sst = st.stations[cmd.sources[i]];
         rec.sources.push({
           sid: cmd.sources[i],
-          units: sst ? totalUnits(sst.units) : 0,
+          units: sst ? (sst.units) : 0,
           capacity: STATIONS[cmd.sources[i]] ? STATIONS[cmd.sources[i]].capacity : 0,
         });
       }
@@ -918,41 +915,90 @@ function suiteAI(d) {
       'decision.minOdds must be BAL.AI.MIN_ODDS x personality.minOddsMul');
   });
 
-  test('a turtle holds at least as often as an expansionist over the same run', function () {
+  // REPLACES 'a turtle holds at least as often as an expansionist over the same
+  // run', and the reason is worth recording in full because the old test was
+  // GREEN and worthless.
+  //
+  // It ran the same power over 500 ticks under each personality and compared
+  // holds / all-decisions. On the pre-C1 tree the two runs logged BYTE-IDENTICAL
+  // decision mixes — {attack 2, hold 8, build 1} both ways — so it was passing
+  // on t === e, having measured nothing at all (known-issue #8). C1 shifted the
+  // board enough for the runs to diverge, and it promptly went red.
+  //
+  // It went red for two reasons, neither of them a defect:
+  //
+  //   1. THE DENOMINATOR INCLUDES BUILDS. B3 added `build` as a decision kind.
+  //      On seed 9019 both personalities logged the same 8 holds and the same 2
+  //      attacks; the turtle simply also built once more, and the hold FRACTION
+  //      fell from 73% to 67% with no change in caution whatsoever.
+  //   2. A RUN IS NOT A GATE. A turtle that declines a marginal attack keeps its
+  //      units, grows, and clears its higher bar later — so "attacked fewer
+  //      times over 500 ticks" was never a property the design guarantees.
+  //
+  // What the personality actually promises is a HIGHER BAR, evaluated on one
+  // board. That is what this asserts, on the board itself rather than through
+  // 500 ticks of feedback: every target a turtle would accept, an expansionist
+  // accepts too. Deterministic, and it carries its own non-vacuity guard.
+  test('a turtle accepts a strict subset of the targets an expansionist accepts', function () {
     var pid = pids[0], orig = P[pid].ai;
-    var holdRate = function (kind) {
-      var s;
+    var accepted = function (state, kind) {
+      var out = [];
       try {
         P[pid].ai = kind;
-        s = newGame(9019);
-        _aiRun(s, 500);
+        var ctx = g.aiContext(state, pid);
+        var bar = AI.MIN_ODDS * ctx.personality.minOddsMul;
+        var cands = g.aiCandidates(state, pid, ctx);
+        for (var i = 0; i < cands.length; i++) {
+          if (cands[i].odds >= bar) out.push(cands[i].sid);
+        }
       } finally { P[pid].ai = orig; }
-      var mine = g.aiDecisions(s, pid, AI.LOG_MAX);
-      if (!mine.length) return null;
-      var holds = mine.filter(function (e) { return e.kind === 'hold'; }).length;
-      return holds / mine.length;
+      return out;
     };
-    var e = holdRate('expansionist'), t = holdRate('turtle');
-    assert(e !== null && t !== null, 'no decisions logged for ' + pid);
-    assert(t >= e,
-      'as a turtle ' + pid + ' held ' + Math.round(t * 100) + '% of the time but as an ' +
-      'expansionist ' + Math.round(e * 100) + '% — the aggressive personality is the ' +
-      'more cautious one');
+
+    var everDiffered = false, seenAny = false, bad = [];
+    for (var k = 0; k < 6; k++) {
+      var st = newGame(9019 + k);
+      _aiRun(st, 400);
+      var E = accepted(st, 'expansionist');
+      var T = accepted(st, 'turtle');
+      if (E.length) seenAny = true;
+      if (T.length !== E.length) everDiffered = true;
+      for (var j = 0; j < T.length; j++) {
+        if (E.indexOf(T[j]) < 0) {
+          bad.push('seed ' + (9019 + k) + ': turtle accepted ' + T[j] +
+                   ' which the expansionist refused');
+        }
+      }
+    }
+    // BOTH guards matter. Without the first this passes on a board with no
+    // candidates at all; without the second it passes on a board where the two
+    // bars happen to admit the same set, which is exactly how the test this
+    // replaces stayed green for so long.
+    assert(seenAny, 'VACUITY: no candidate ever cleared either bar — nothing was compared');
+    assert(everDiffered,
+      'VACUITY: the turtle and the expansionist accepted the same number of targets on ' +
+      'every one of the 6 boards, so the bar is not reaching the decision');
+    assertNone(bad, 'the cautious personality accepted a fight the aggressive one would not');
   });
 
   // -------------------------------------------------------------------------
   // Odds are a POWER ratio, not a unit ratio.
   //
-  // The discriminator: infantry defends at 1.2 and artillery at 0.6, so a
-  // garrison of N artillery is far weaker than a garrison of N infantry while
-  // being the SAME NUMBER OF UNITS. A scorer that counts units cannot tell the
-  // two boards apart; a scorer that uses stationPower must.
+  // THE OLD DISCRIMINATOR IS GONE AND THIS ONE IS NOT A REPLACEMENT FOR IT.
+  // It used to score N artillery against N infantry: same unit count, very
+  // different defensive power, so a scorer that counted units could not tell
+  // the two boards apart and one that called stationPower had to. C1 deleted
+  // the types, and with one profile a garrison's power IS proportional to its
+  // count on open ground — there is no composition left to disagree about.
+  //
+  // What still separates the two is the FORT BLOCK, which is additive and
+  // therefore not proportional to anything. That is the discriminator now, and
+  // it is a weaker one: it proves the scorer reads power rather than bodies,
+  // but it can no longer prove it on a bare field. Said plainly rather than
+  // left to look like the same test with different numbers.
   // -------------------------------------------------------------------------
 
-  test('odds are a POWER ratio, not a unit ratio (same unit count, weaker composition scores higher)', function () {
-    assert(B.UNITS.artillery.def < B.UNITS.infantry.def,
-      'this test assumes artillery defends worse than infantry; UNITS changed');
-
+  test('the odds term reads defensive POWER and moves monotonically with it', function () {
     var pid = pids[0];
     var probe = newGame(9020);
     var tgt = _aiFrontierTarget(probe, pid, L);
@@ -963,20 +1009,41 @@ function suiteAI(d) {
       s.stations[tgt].units = units;
       return g.aiScoreTarget(s, pid, tgt, g.aiContext(s, pid));
     };
-    var N = 24;
-    var inf = scoreWith({ infantry: N, artillery: 0, armour: 0 });
-    var art = scoreWith({ infantry: 0, artillery: N, armour: 0 });
+    var weak = scoreWith(6), strong = scoreWith(24);
 
-    assert(art.score !== inf.score,
-      'a garrison of ' + N + ' artillery and a garrison of ' + N + ' infantry scored ' +
-      'identically (' + inf.score + ') at ' + tgt + ' — the same unit count with very ' +
-      'different defensive power. That is a UNIT ratio, and MIN_ODDS then means ' +
-      'something other than what its comment says. terms: ' + _aiJson(inf.terms));
-    assert(art.score > inf.score,
-      'the weaker-defending garrison (' + N + ' artillery, def ' + B.UNITS.artillery.def +
-      ') scored ' + art.score + ', BELOW the stronger one (' + N + ' infantry, def ' +
-      B.UNITS.infantry.def + ') at ' + inf.score + ' — the odds term has the wrong sign');
+    assert(weak.score !== strong.score,
+      'a garrison of 6 and a garrison of 24 scored identically (' + strong.score +
+      ') at ' + tgt + ' — the odds term is not reading the defender at all. ' +
+      'terms: ' + _aiJson(strong.terms));
+    assert(weak.score > strong.score,
+      'the weaker garrison (6 units) scored ' + weak.score + ', BELOW the stronger ' +
+      'one (24 units) at ' + strong.score + ' — the odds term has the wrong sign');
+    assert(weak.terms.weakness > 0,
+      'the weakness term never fired, so the difference above came from ' +
+      'somewhere other than the odds — terms: ' + _aiJson(weak.terms));
   });
+
+  // THE STRONGER VERSION OF THE TEST ABOVE CANNOT BE WRITTEN TODAY, and that is
+  // a defect rather than a limitation of the harness.
+  //
+  // Until C1 this test held the unit COUNT fixed at 24 and varied the mix —
+  // artillery defends at 0.6 against infantry's 1.2, so the same number of
+  // bodies gave very different defensive power and a scorer that counted bodies
+  // could not tell the two boards apart. With one unit type, power on open
+  // ground is proportional to count, and the version above cannot distinguish a
+  // power ratio from a unit ratio at all.
+  //
+  // The obvious replacement is a FORT: additive, so it breaks proportionality.
+  // It does not work, because ai/score.js's one-station proxy
+  // (_aiScoreBelievedAt) copies owner / units / attackers / connected and NOT
+  // `development`. fortLevel() therefore sees no fortification and the AI's
+  // odds gate is blind to every fort on the board — including the ones it built
+  // itself since B3. MEASURED, on this tree and on the pre-C1 tree alike: a
+  // tier-3 fort moves aiScoreTarget by exactly 0.000.
+  //
+  // It PREDATES C1 and is not fixed here, because fixing it changes how the AI
+  // plays and would land inside a commit whose balance numbers are already
+  // moving for another reason. See 07-roadmap.md C1b and known-issues #26.
 
   test('a fort raises the defender power the AI sees, at unchanged unit count', function () {
     var pid = pids[0];
@@ -985,7 +1052,7 @@ function suiteAI(d) {
     assert(!!tgt, 'no frontier station for ' + pid);
     var scoreWith = function (n) {
       var s = newGame(9021);
-      s.stations[tgt].units = { infantry: n, artillery: 0, armour: 0 };
+      s.stations[tgt].units = (n);
       return g.aiScoreTarget(s, pid, tgt, g.aiContext(s, pid)).score;
     };
     assert(scoreWith(6) > scoreWith(60),
@@ -1248,7 +1315,7 @@ function suiteAI(d) {
     }
     assert(village, 'could not find a station to leave neutral');
     setStationOwner(b.state, village, 'neutral');
-    b.state.stations[village].units.infantry = 1;
+    b.state.stations[village].units = 1;
 
     // The holdout is left WEAKLY GARRISONED on purpose. Fully garrisoned it is
     // unaffordable anyway, so the AI would pass it over for reasons that have
@@ -1257,7 +1324,7 @@ function suiteAI(d) {
     // nothing go red (known-issues.md #8). Weak, it is both affordable AND the
     // highest-scoring candidate on the board, so peace is the only thing that
     // can be keeping the AI off it.
-    b.state.stations[b.holdout].units.infantry = 3;
+    b.state.stations[b.holdout].units = 3;
 
     var cands = g.aiCandidates(b.state, 'fra', g.aiContext(b.state, 'fra'));
     assert(cands.length > 0 && _aiCandSid(cands[0]) === b.holdout,

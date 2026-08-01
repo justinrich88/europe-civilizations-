@@ -264,77 +264,47 @@ const BAL = {
   // is not a ghost army. Full bonus at this many defenders.
   DEFENSE_BONUS_FULL_AT: 5.0,
 
-  // Artillery strips fortification (§4). The defender's additive bonus is
-  // reduced by UNITS.artillery.fortStrip * (artillery share of attacking
-  // power), capped here. 0.85 leaves a fortress with 15% of its advantage
-  // even against a pure-artillery siege — forts stay worth building around,
-  // and artillery stays the answer rather than the erasure.
-  FORT_STRIP_CAP: 0.85,
-
   // Attackers who arrived this tick fight immediately (§8: "units fight the
   // moment they arrive"), but a stack that lands into an ongoing battle
   // inherits the engagement's existing variance roll rather than re-rolling.
   // Expressed here as a flag so sim/combat.js has no policy of its own.
   REINFORCE_INHERITS_VARIANCE: true,
 
-  // Matchup triangle (§4): artillery beats entrenched infantry, armour beats
-  // exposed artillery, infantry beats armour. MATCHUP[attacker][defender].
-  // 1.35 / 0.78 is close to reciprocal (product 1.053), so the triangle is
-  // near zero-sum — no unit type is quietly the best on average. The spread
-  // is wide enough that bringing the wrong type is a real mistake and narrow
-  // enough that a 2:1 numeric edge still beats a type edge.
-  MATCHUP: {
-    infantry:  { infantry: 1.00, artillery: 0.78, armour:    1.35 },
-    artillery: { infantry: 1.35, artillery: 1.00, armour:    0.78 },
-    armour:    { infantry: 0.78, artillery: 1.35, armour:    1.00 },
-  },
-
-  // Matchup is resolved against the enemy's power-weighted MIX, not against a
-  // single "dominant" type — otherwise a 51/49 split flips the whole battle.
-  // Below this share a type is ignored in the mix to keep one straggler from
-  // dragging the average.
-  MATCHUP_MIN_SHARE: 0.05,
+  // TOMBSTONE — the matchup triangle, C1, 2026-08.
+  //
+  // MATCHUP / MATCHUP_MIN_SHARE / ARMOUR_VS_FORT / FORT_STRIP_CAP / UNIT_ORDER
+  // and the three-row UNITS table lived here. Artillery beat entrenched
+  // infantry, armour beat exposed artillery, infantry beat armour, and
+  // artillery stripped forts. All of it is gone with the unit types
+  // (04-development.md §9, 00-vision.md §4).
+  //
+  // Worth recording because the numbers were not idle: with the triangle
+  // neutralised in data and NOTHING ELSE changed, France's 70.8% win rate
+  // collapses and Austria-Hungary takes 82-98 of 108 stations on every one of
+  // seeds 100-103, with games ending in half the time. The triangle was doing
+  // far more balancing work than "a soft flavour rule" implies, and whatever
+  // replaces it as Austria's brake is Phase D's problem, not a lost constant.
 
 
   // ===================================================================
   // 5. UNITS  (00-vision.md §4)
   //
-  // Three types, few enough that a stack reads at a glance.
+  // ONE type. `units` is a scalar count of undifferentiated armies; there is
+  // no roster to index and no per-type profile to look up.
+  //
   //   atk       power multiplier when attacking a station
   //   def       power multiplier when defending a station
   //   speed     multiplier on MOVE_BASE
-  //   fortStrip artillery only; fraction of the defender's fort bonus removed
+  //
+  // These are the OLD INFANTRY NUMBERS, deliberately and not by default.
+  // Infantry was the baseline, was what 92 of 108 stations produced, and is
+  // the profile every existing tuning constant in this file was derived
+  // against. def > atk (1.2 vs 1.0) is the one that carries weight: it is what
+  // makes "arrives in volume, good defending" true and gives the defender a
+  // real edge at parity, which is what 00-vision.md §5 rests on.
   // ===================================================================
 
-  UNITS: {
-    // The baseline, and the only thing holding stations produce. def > atk
-    // (1.2 vs 1.0) is what makes "arrives in volume, good defending" true and
-    // gives the defender a real edge at parity — attacking should need mass.
-    infantry:  { atk: 1.0, def: 1.2, speed: 1.0 },
-
-    // Strong attacking, weak if caught alone, slow. atk/def of 3:1 is the
-    // widest spread in the roster: artillery caught without escort should
-    // evaporate, which is what makes armour's counter meaningful. speed 0.6
-    // means guns arrive last in a mixed volley — the staggered-arrival
-    // mistake (§8) has teeth because of this number.
-    artillery: { atk: 1.8, def: 0.6, speed: 0.6, fortStrip: 0.5 },
-
-    // Fast, strong in the open, poor against fortifications. speed 1.8 is
-    // triple artillery's, which is what lets armour cut links and arrive
-    // before the defender can react. fortStrip is absent by design: armour
-    // takes ground, it does not reduce forts.
-    armour:    { atk: 1.5, def: 0.9, speed: 1.8 },
-  },
-
-  // Armour is poor against fortifications: its attack power is scaled by this
-  // when the defending station carries a defense bonus, scaled by how
-  // fortified that station is. 0.7 makes throwing tanks at Verdun a clear
-  // error without making it impossible.
-  ARMOUR_VS_FORT: 0.7,
-
-  // Rendering / readout order. Not cosmetic — sim/ iterates unit types in a
-  // fixed sorted order for determinism (00-vision.md §9) and this is it.
-  UNIT_ORDER: ['infantry', 'artillery', 'armour'],
+  UNIT: { atk: 1.0, def: 1.2, speed: 1.0 },
 
 
   // ===================================================================
@@ -371,31 +341,27 @@ const BAL = {
   // (+-0.02 from the Math.round). March time is dist / speed, so the two
   // penalties COMPOUND, and against a land link of identical on-screen length:
   //
-  //     infantry (or armour)      1.6 / 0.5              = 3.2x
-  //     any stack with artillery  1.6 / (0.5 x 0.6)      = 5.3x   <- below
+  //     every army      1.6 / 0.5              = 3.2x
   //
-  // plus SEA_ARTILLERY_LOSS off the guns. Measured on the live graph: dov~lil
-  // is 27 on-screen pixels and dist 44, and infantry cross it in 147 ticks
-  // (14.7 sim-seconds), a mixed stack with guns in 408 (41 sim-seconds) — long
-  // enough that Britain is safe and must plan, short enough that it can still
-  // matter, but that is 3.2x and 5.3x doing the work, not 2x.
+  // Measured on the live graph: dov~lil is 27 on-screen pixels and dist 44,
+  // and an army crosses it in 147 ticks (14.7 sim-seconds) — long enough that
+  // Britain is safe and must plan, short enough that it can still matter, but
+  // that is 3.2x doing the work, not 2x.
   //
   // The previous version of this comment read "halving speed turns Dover (dist
   // 55) into an 18-second commitment", which understated the real penalty by
   // 1.6x and quoted a dist no link on the current map has. Anyone balancing sea
   // power off 0.5 alone is tuning against a number that is 3.2x wrong.
-  SEA_SPEED_MUL: 0.5,
-
-  // ...and punishing for artillery specifically (01-data-schema.md LINKS).
-  // A further speed penalty plus a flat loss of guns per crossing. 10% is
-  // enough to make shipping artillery a deliberate cost, not a rounding
-  // error, without needing a transport system to model it.
   //
-  // Compounds with SEA_SPEED_MUL *and* with the 1.6x sea `dist` inflation, so
-  // the real march-time penalty on a gun-carrying stack is 5.3x a land link of
-  // the same on-screen length — see the block above.
-  SEA_ARTILLERY_SPEED_MUL: 0.6,
-  SEA_ARTILLERY_LOSS: 0.10,
+  // TOMBSTONE — C1, 2026-08. SEA_ARTILLERY_SPEED_MUL (0.6) and
+  // SEA_ARTILLERY_LOSS (0.10) charged a gun-carrying stack a further speed
+  // penalty and 10% of its guns per crossing, making the real toll 5.3x rather
+  // than 3.2x. Both died with the unit types. The sea therefore got CHEAPER
+  // for the one kind of stack that used to find it expensive, and the crossing
+  // is now one number for everybody -- which is what 02-visibility-and-sea.md
+  // §3 asked for in the first place ("simply slow and punishing rather than a
+  // naval system") and what the artillery clause was an exception to.
+  SEA_SPEED_MUL: 0.5,
 
   // Waves that would arrive at a station already flipped to their own side
   // simply merge into the garrison. Waves whose whole path is cut mid-march

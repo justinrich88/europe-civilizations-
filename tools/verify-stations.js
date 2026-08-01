@@ -81,10 +81,10 @@ for (const tid of Object.keys(T).sort())
 
 // --- 2. type invariants (01-data-schema.md, verbatim) -----------------------
 const SPEC = {
-  holding:    { produces: ['infantry'],            capacity: [25, 80], rate: [0.7, 1.1],   defense: [1.0, 1.0], multiplier: false },
-  producer:   { produces: ['artillery', 'armour'], capacity: [15, 35], rate: [0.4, 0.6],   defense: [1.0, 1.2], multiplier: false },
-  multiplier: { produces: ['infantry'],            capacity: [8, 15],  rate: [0.3, 0.3],   defense: [0.8, 0.8], multiplier: [1.3, 1.8] },
-  defensive:  { produces: ['infantry'],            capacity: [12, 25], rate: [0.3, 0.5],   defense: [2.0, 3.5], multiplier: false },
+  holding:    { capacity: [25, 80], rate: [0.7, 1.1],   defense: [1.0, 1.0], multiplier: false },
+  producer:   { capacity: [15, 35], rate: [0.4, 0.6],   defense: [1.0, 1.2], multiplier: false },
+  multiplier: { capacity: [8, 15],  rate: [0.3, 0.3],   defense: [0.8, 0.8], multiplier: [1.3, 1.8] },
+  defensive:  { capacity: [12, 25], rate: [0.3, 0.5],   defense: [2.0, 3.5], multiplier: false },
 };
 for (const sid of sids) {
   const st = S[sid], spec = SPEC[st.type];
@@ -96,8 +96,6 @@ for (const sid of sids) {
   band(st.capacity, spec.capacity, 'capacity');
   band(st.rate, spec.rate, 'rate');
   band(st.defense, spec.defense, 'defense');
-  if (spec.produces.indexOf(st.produces) < 0)
-    note('produces', sid + ' (' + st.type + ') produces "' + st.produces + '"');
   if (spec.multiplier) {
     if (typeof st.multiplier !== 'number') note('multiplier', sid + ' is a multiplier with no value');
     else if (st.multiplier < 1.3 - 1e-9 || st.multiplier > 1.8 + 1e-9)
@@ -107,15 +105,18 @@ for (const sid of sids) {
   }
 }
 {
-  const byType = {}, produced = {};
+  const byType = {};
   for (const sid of sids) {
     byType[S[sid].type] = (byType[S[sid].type] || 0) + 1;
-    if (S[sid].type === 'producer') produced[S[sid].produces] = true;
+    // C1: no station may still carry a produces field. The two checks that
+    // stood below — "nowhere makes artillery, so fortresses become untakeable"
+    // and the same for armour — went with the unit types.
+    if (S[sid].produces !== undefined) {
+      note('type-mix', sid + ' still carries produces="' + S[sid].produces + '"');
+    }
   }
   for (const t of ['holding', 'producer', 'multiplier', 'defensive'])
     if (!byType[t]) note('type-mix', 'no stations of type ' + t + ' exist');
-  if (!produced.artillery) note('type-mix', 'nowhere makes artillery — fortresses become untakeable');
-  if (!produced.armour) note('type-mix', 'nowhere makes armour');
   if (!(byType.holding > sids.length * 0.4)) note('type-mix', 'holdings should be most of the map');
   if (sids.length < 90 || sids.length > 110) note('count', 'station count ' + sids.length + ', design range 90-110');
 }
@@ -163,20 +164,17 @@ for (const sid of sids) if (!SU[sid]) note('setup-coverage', sid + ' has no SETU
 for (const sid of Object.keys(SU).sort()) {
   if (!S[sid]) { note('setup-coverage', 'SETUP has "' + sid + '" which is not a station'); continue; }
   if (!P[SU[sid].owner]) note('unknown-owner', sid + ' owned by "' + SU[sid].owner + '"');
-  const u = SU[sid].units;
-  if (!u) { note('garrison', sid + ' has no units block'); continue; }
-  for (const t of ['infantry', 'artillery', 'armour'])
-    if (typeof u[t] !== 'number' || u[t] < 0 || !isFinite(u[t])) note('garrison', sid + '.' + t + '=' + u[t]);
-  // Spelled out rather than routed through core/state.js's totalUnits(): this
-  // tool loads data/ ONLY (see FILES at the top), because a data reconciler
-  // that needs the sim to boot cannot be used on the day the sim is broken.
-  //
-  // Safe to leave inline only because the per-type loop directly above already
-  // rejects a bundle of the wrong shape and does it FIRST — without it this
-  // line would go quiet rather than loud when the shape changes, since
-  // `NaN > capacity` is false like every other comparison against NaN. If that
-  // loop is ever relaxed, this sum has to move.
-  const tot = u.infantry + u.artillery + u.armour;
+  // A SCALAR since C1. The shape check is `typeof === 'number'` rather than a
+  // truth test because 0 is a legal opening garrison, and it has to come FIRST:
+  // the capacity comparison below goes quiet rather than loud on a bundle of
+  // the wrong shape, since `NaN > capacity` is false like every other
+  // comparison against NaN. Deleting the shape check would leave the capacity
+  // line silently passing anything at all.
+  const tot = SU[sid].units;
+  if (typeof tot !== 'number' || tot < 0 || !isFinite(tot)) {
+    note('garrison', sid + '.units=' + tot);
+    continue;
+  }
   if (tot > S[sid].capacity + 1e-9) note('garrison', sid + ' starts with ' + tot + ' but capacity is ' + S[sid].capacity);
 }
 

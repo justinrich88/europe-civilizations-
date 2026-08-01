@@ -68,7 +68,7 @@ function _qtBoard(pid, count) {
   }
 
   for (var m = 0; m < mine.length; m++) {
-    s.stations[mine[m]].units = { infantry: 40, artillery: 0, armour: 0 };
+    s.stations[mine[m]].units = 40;
   }
   return { s: s, mine: mine, pid: pid };
 }
@@ -240,8 +240,8 @@ function suiteQueue() {
     var b = _qtBoard('aut', 3);
     var s = b.s;
     var src = b.mine[0];
-    s.stations[src].units = { infantry: 20, artillery: 0, armour: 0 };
-    var seen = totalUnits(s.stations[src].units);
+    s.stations[src].units = 20;
+    var seen = (s.stations[src].units);
 
     queueCommand(s, {
       type: 'send', owner: 'aut', sources: [src], target: b.mine[1], fraction: 0.5,
@@ -264,8 +264,8 @@ function suiteQueue() {
     // volley is priced against pre-growth units, and growth on a 20-unit garrison
     // is the same order as one tick of attrition.
     var expect = seen * 0.5 - BAL.PASSAGE.MARCH_LOSS_PER_TICK;
-    assertClose(totalUnits(launched[0].units), expect, 1e-9,
-      'the volley carried ' + totalUnits(launched[0].units) + ' from a garrison of ' +
+    assertClose((launched[0].units), expect, 1e-9,
+      'the volley carried ' + (launched[0].units) + ' from a garrison of ' +
       seen + ' at half (expected ' + expect + ' after one tick of march attrition) ' +
       '— so it was priced against a board the player never saw. Check that ' +
       'commandsTick is still ahead of growthTick.');

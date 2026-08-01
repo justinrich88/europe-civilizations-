@@ -56,14 +56,11 @@
 
 'use strict';
 
-// Stack strength is summed by core/state.js's totalUnits() — see waveTotal()
-// below. That makes core/state.js a load-order dependency of this file, and
-// known-issue #22's rule applies: guard, but loudly. A quiet guard here would
-// mean every marker on the board reading a strength of nothing.
-if (typeof totalUnits !== 'function') {
-  console.error('[render/waves] no totalUnits at load — core/state.js must come ' +
-    'BEFORE render/waves.js in index.html. Every wave marker will throw.');
-}
+// Stack strength is read straight off `w.units`, which is a scalar — see
+// waveTotal() below. This file used to carry a loud load-order guard on
+// core/state.js's totalUnits(); with the sum gone there is no cross-file
+// dependency left to guard, so the guard went with it rather than being left
+// standing as a check that can no longer fail (known-issue #8).
 
 // wave id -> { g, trail, chip, num, last… }. Nodes are created when a wave
 // appears and removed when it lands; in between, only `transform` and the two
@@ -224,7 +221,7 @@ function waveColor(ownerId) {
 // `!units` stays: that is the missing-bundle question, not the wrong-shape one.
 function waveTotal(units) {
   if (!units) return 0;
-  return totalUnits(units);
+  return (units === null || units === undefined) ? 0 : Number(units);
 }
 
 // Build one marker. Called once per wave, ever.

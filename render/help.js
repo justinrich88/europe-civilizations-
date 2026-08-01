@@ -158,16 +158,13 @@ function helpSendLadder() {
 function helpStationTypes() {
   var S = _helpStations();
   var counts = { holding: 0, multiplier: 0, producer: 0, defensive: 0 };
-  var produces = {};
   if (S) {
     for (var sid in S) {
       var st = S[sid];
       if (!st) continue;
       if (counts[st.type] !== undefined) counts[st.type]++;
-      if (st.type === 'producer' && st.produces) produces[st.produces] = true;
     }
   }
-  var made = Object.keys(produces).sort();
   return [
     {
       type: 'holding', name: 'City', count: counts.holding,
@@ -178,9 +175,14 @@ function helpStationTypes() {
       blurb: 'Raises growth at every city in its country and in the countries next door. Barely garrisoned, so it falls to one volley — and taking one hurts your enemy everywhere at once.',
     },
     {
+      // HONEST ABOUT THE GAP C1 OPENED. This used to read "grows artillery or
+      // armour instead of infantry", which was a producer's whole reason to
+      // exist. With one unit type it grows the same army every other city
+      // grows, from a smaller cap at a lower rate — so the guide says the
+      // only true thing left about it rather than repeating a promise the sim
+      // no longer keeps. See 04-development.md §9c.
       type: 'producer', name: 'Factory', count: counts.producer,
-      blurb: 'Grows ' + (made.length ? made.join(' or ') : 'better units') +
-             ' instead of infantry. Small numbers, far better units.',
+      blurb: 'The only place a factory can be built. Slower growth and a lower ceiling than a plain city, and until a factory does something that is the whole story.',
     },
     {
       type: 'defensive', name: 'Fortress', count: counts.defensive,
@@ -189,31 +191,24 @@ function helpStationTypes() {
   ];
 }
 
-// Unit characters, ordered by BAL.UNIT_ORDER — the same fixed order sim/
-// iterates for determinism, so the guide lists what the sim has rather than
-// what the design doc remembers.
+// The unit, and its real multipliers. Still a LIST of one rather than a bare
+// object: the guide renderer and its test both walk it, and the shape is what
+// makes a second unit type a data change rather than a UI change.
+//
+// The stats are read off BAL rather than authored, which is the whole point of
+// this function — a guide that remembers what the sim used to do is worse than
+// no guide (known-issue #18).
 function helpUnitRows() {
   var B = _helpBal();
-  var order = (B && B.UNIT_ORDER) || ['infantry', 'artillery', 'armour'];
-  var text = {
-    infantry:  'The baseline, and the only thing a plain city makes. Best defending, arrives in volume.',
-    artillery: 'Strips a fortress of its defence. Deadly attacking, helpless if caught alone, and slow — guns arrive last.',
-    armour:    'Fast and strong in the open, poor against forts. Takes ground and cuts links before a defender can react.',
-  };
-  var out = [];
-  for (var i = 0; i < order.length; i++) {
-    var k = order[i];
-    var u = (B && B.UNITS && B.UNITS[k]) || null;
-    out.push({
-      type: k,
-      name: k.charAt(0).toUpperCase() + k.slice(1),
-      atk: u ? u.atk : null,
-      def: u ? u.def : null,
-      speed: u ? u.speed : null,
-      blurb: text[k] || '',
-    });
-  }
-  return out;
+  var u = (B && B.UNIT) || null;
+  return [{
+    type: 'unit',
+    name: 'Army',
+    atk: u ? u.atk : null,
+    def: u ? u.def : null,
+    speed: u ? u.speed : null,
+    blurb: 'One kind, everywhere. Defends better than it attacks, so taking a city needs mass rather than the right counter.',
+  }];
 }
 
 // Every other number the guide prints, in one place so the test can read them.
@@ -580,7 +575,7 @@ function _helpBuild() {
   card.appendChild(s5);
 
   // — 6. units —
-  var s6 = _helpSection('The three units');
+  var s6 = _helpSection('The army');
   var urows = el('div', 'help-rows');
   var us = helpUnitRows();
   for (var u = 0; u < us.length; u++) {
@@ -598,9 +593,9 @@ function _helpBuild() {
   }
   s6.appendChild(urows);
   s6.appendChild(el('p', 'help-note', {
-    text: 'A soft triangle: artillery beats dug-in infantry, armour beats exposed artillery, ' +
-          'infantry beats armour. Only factories make guns and tanks, which is why they are ' +
-          'worth a war.',
+    text: 'There is one unit and no counter to pick. What decides a fight is how many ' +
+          'arrive and how fortified the city is — so the decisions are where to send from ' +
+          'and when, not what to bring.',
   }));
   card.appendChild(s6);
 

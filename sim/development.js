@@ -52,11 +52,6 @@
 
 'use strict';
 
-if (typeof totalUnits !== 'function') {
-  console.error('[sim/development] no totalUnits at load — core/state.js must come ' +
-    'BEFORE sim/development.js. Every operating tier will throw.');
-}
-
 // The three developments, in a fixed order so any UI listing them is stable.
 var DEV_KINDS = ['fort', 'port', 'factory'];
 
@@ -187,7 +182,7 @@ function operatingTier(state, sid) {
   var d = STATIONS[sid];
   var step = BAL.DEV.OPERATE_FRACTION * d.capacity;
   if (!(step > 0)) return built;
-  var held = totalUnits(state.stations[sid].units);
+  var held = state.stations[sid].units;
   var can = Math.floor(held / step);
   return can < built ? (can < 0 ? 0 : can) : built;
 }
@@ -202,7 +197,7 @@ function operatingShortBy(state, sid) {
   if (op >= built) return null;
   var step = BAL.DEV.OPERATE_FRACTION * STATIONS[sid].capacity;
   var need = (op + 1) * step;
-  var held = totalUnits(state.stations[sid].units);
+  var held = state.stations[sid].units;
   return need - held;
 }
 
@@ -234,7 +229,7 @@ function operatingAfterBuild(state, sid, tier, cost) {
   var d = STATIONS[sid];
   var step = BAL.DEV.OPERATE_FRACTION * d.capacity;
   if (!(step > 0)) return tier;
-  var left = totalUnits(state.stations[sid].units) - cost;
+  var left = state.stations[sid].units - cost;
   if (left < 0) left = 0;
   var can = Math.floor(left / step);
   return can < tier ? can : tier;
@@ -300,7 +295,7 @@ function developmentPlan(state, sid, owner, kind) {
   // decision about a city you actually built up, and it blocks the strategic
   // version where safe interior reserves are pumped into frontier developments —
   // which would make rear-area safety compound and lean hard into the snowball.
-  var held = totalUnits(st.units);
+  var held = st.units;
   if (held - out.cost < BAL.DEV.MIN_REMAINING) { out.reason = 'too-few-units'; return out; }
 
   out.ok = true;

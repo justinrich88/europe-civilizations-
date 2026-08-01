@@ -397,12 +397,64 @@ be unequal.
 
 ## Phase C — combat and investment
 
-### C1. Collapse the three unit types to one
+### ~~C1. Collapse the three unit types to one~~ — SHIPPED 2026-08
 
-`04-development.md` §9. Mechanical, large surface, and it **shrinks everything
-after it**. Development replaces what the infantry/artillery/armour triangle
-was for, and does it better — the triangle was never visible, because the
-number on a node never said what a stack was made of.
+`units` is a scalar. Five helpers, `BAL.UNITS`, `BAL.MATCHUP`, `BAL.UNIT_ORDER`,
+`ARMOUR_VS_FORT`, `FORT_STRIP_CAP`, both `SEA_ARTILLERY_*` constants, the
+`produces` field on all 108 stations and the `types?` narrowing on a `send` are
+all gone. 34 files. Full write-up in `04-development.md` §9c; `00-vision.md` §4
+carries the reversal.
+
+**The headline is not "it shrank the surface".** The triangle was load-bearing
+balance, and removing it moved the board a long way — 96 games either side, same
+rig:
+
+| | before | after |
+|---|---|---|
+| dominant power | France 70.8% | **Austria-Hungary 76.0%** |
+| runner-up | Russia 6.3% | France 13.5% |
+| win-rate spread | 70.8 points | **76.0 points** |
+| mean game length | 25,445 ticks | 16,013 ticks |
+
+The board did not get more balanced. It **changed hands and got 37% faster**,
+and Phase D now knows the triangle was what was holding Austria-Hungary down.
+
+**The refactor half is separately proven to have moved nothing**, which is the
+method worth reusing: the rule deletion was staged in `data/tuning.js` alone,
+then the same tree was folded into one bucket so no float association could
+differ, and the real scalar refactor reproduces that board **bit for bit** —
+same owner for all 108 cities, all 432 garrison floats identical, seeds 100–103
+at 12,000 ticks. A ~700-site rewrite with an exact acceptance test.
+
+**Two gaps are open and named rather than papered over:**
+
+- **A producer station has no reason to exist** (16 of 108; cap 28.7 / rate 0.51
+  against a holding's 37.65 / 0.83, strictly worse at everything). Its designed
+  replacement is the **factory**, which `DEV_LIVE` says does nothing. That is now
+  the strongest argument for making it live.
+- **Nothing cracks a fortress but mass.** `04-development.md` §7's stalemate
+  question is live again.
+
+### C1b. The AI cannot see a fortification — PRE-EXISTING, found at C1
+
+`ai/score.js`'s one-station proxy (`_aiScoreBelievedAt`, and its twin
+`_aiActBelievedAt` in `ai/ai.js`) copies `owner`, `units`, `attackers` and
+`connected` — and **not `development`**. `fortLevel()` therefore sees no
+fortification, so the AI's odds gate and target scorer are blind to every fort
+on the board, **including the ones it has built itself since B3**. Measured: a
+tier-3 fort moves `aiScoreTarget` by exactly 0.000, on this tree and on the
+pre-C1 tree alike.
+
+**It predates C1 and was deliberately not fixed there**, because fixing it
+changes how the AI plays and would have landed inside a commit whose balance
+numbers were already moving for another reason. It matters much more now than it
+did: before C1 a defender's unit *mix* also varied its power, and the fort is
+now the only thing that makes two equal-sized garrisons different.
+
+The fix is small and has one real decision in it — memory (`state.seen`) records
+`{o,u,c,t}` and no development, so the proxy can only carry a fort at belief
+level 2, which is what `render/map.js` already does with the pips. Do it as its
+own change, with its own before/after sweep.
 
 ### C2. Development — FIRST PROTOTYPE SHIPPED 2026-07, out of order, on request
 

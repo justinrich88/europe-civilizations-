@@ -25,7 +25,7 @@ function _devtBoard(pid, sid, units) {
   var s = newGame(90210);
   s.aiEnabled = false;
   if (s.stations[sid].owner !== pid) setStationOwner(s, sid, pid);
-  s.stations[sid].units = { infantry: units, artillery: 0, armour: 0 };
+  s.stations[sid].units = (units);
   return s;
 }
 
@@ -159,7 +159,7 @@ function suiteDevelopment() {
     var s = _devtBoard('ger', sid, cap);
     var res = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     assert(res.ok, 'a full station could not afford tier 1: ' + JSON.stringify(res.rejected));
-    assertClose(totalUnits(s.stations[sid].units), cap / 2, 1e-9,
+    assertClose((s.stations[sid].units), cap / 2, 1e-9,
       'tier 1 from full did not land on cap/2 — the peak-growth property is gone');
   });
 
@@ -171,24 +171,24 @@ function suiteDevelopment() {
     var s = _devtBoard('ger', sid, cap * 2.5);
     // Buy 1 and 2 first — tiers are sequential.
     applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
-    s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap);
     applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     assertEqual(builtTier(s, sid), 2, 'tier 2 did not build');
 
     // At exactly capacity, tier 3 is unaffordable.
-    s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap);
     var no = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid] });
     assert(!no.ok, 'tier 3 was affordable from exactly capacity — the overflow ' +
       'requirement is gone and the overflow band has no purpose again');
     assertEqual(no.rejected[0].reason, 'too-few-units', 'wrong rejection reason');
 
     // In the overflow band it is affordable, and lands at about half capacity.
-    s.stations[sid].units = { infantry: cap * 1.5, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap * 1.5);
     var yes = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid] });
     assert(yes.ok, 'tier 3 was unaffordable even from the overflow band: ' +
       JSON.stringify(yes.rejected));
     assertEqual(builtTier(s, sid), 3, 'tier 3 did not build');
-    assertClose(totalUnits(s.stations[sid].units), cap * 0.5, 1e-9,
+    assertClose((s.stations[sid].units), cap * 0.5, 1e-9,
       'paying tier 3 from 1.5x capacity should leave half capacity');
     // …and therefore it OPERATES at 2, not 3. The delay is the feature.
     assertEqual(operatingTier(s, sid), 2,
@@ -209,23 +209,30 @@ function suiteDevelopment() {
     var s2 = _devtBoard('ger', sid, developmentCost(sid, 1) + BAL.DEV.MIN_REMAINING);
     var ok = applyCommand(s2, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     assert(ok.ok, 'exactly cost + floor should be affordable: ' + JSON.stringify(ok.rejected));
-    assertClose(totalUnits(s2.stations[sid].units), BAL.DEV.MIN_REMAINING, 1e-9,
+    assertClose((s2.stations[sid].units), BAL.DEV.MIN_REMAINING, 1e-9,
       'the floor is not what remained');
   });
 
-  test('the spend is proportional across the bundle', function () {
-    // Not draining one type, which would let a build launder a stack's
-    // composition — and, more importantly, it is what makes this survive the
-    // collapse to a single unit type (§9).
+  // WAS 'the spend is proportional across the bundle', and it said in its own
+  // comment that proportionality was "what makes this survive the collapse to a
+  // single unit type (§9)". The collapse happened; the property it guarded — a
+  // build cannot launder a stack's composition — has no composition to launder.
+  //
+  // What replaces it is the arithmetic claim underneath, which the old test
+  // could not make because it only compared RATIOS: the spend is exactly the
+  // cost, no more and no less. A build that overcharged proportionally would
+  // have passed the old test and fails this one.
+  test('a build spends exactly its cost, to the unit', function () {
     var sid = P.plainHolding, cap = STATIONS[sid].capacity;
     var s = _devtBoard('ger', sid, 0);
-    s.stations[sid].units = { infantry: cap * 0.5, artillery: cap * 0.3, armour: cap * 0.2 };
+    s.stations[sid].units = cap;
     var before = s.stations[sid].units;
-    var ratio = before.artillery / totalUnits(before);
-    applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
-    var after = s.stations[sid].units;
-    assertClose(after.artillery / totalUnits(after), ratio, 1e-9,
-      'the mix changed — the spend was not proportional');
+    var cost = developmentCost(sid, 1);
+    var res = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
+    assert(res.ok, 'the build was rejected: ' + JSON.stringify(res.rejected));
+    assertClose(s.stations[sid].units, before - cost, 1e-9,
+      'the spend was not exactly the cost — ' + before + ' - ' + cost +
+      ' should leave ' + (before - cost) + ', left ' + s.stations[sid].units);
   });
 
   // ── operating tier: the rent ───────────────────────────────────────────
@@ -235,14 +242,14 @@ function suiteDevelopment() {
     var s = _devtBoard('ger', sid, cap * 3);
     // Build all three tiers, refilling between.
     for (var t = 1; t <= 3; t++) {
-      s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap * 2);
       applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     }
     assertEqual(builtTier(s, sid), 3, 'the fixture did not reach tier 3');
 
     var cases = [[0.80, 3], [0.75, 3], [0.60, 2], [0.50, 2], [0.30, 1], [0.25, 1], [0.10, 0], [0, 0]];
     for (var i = 0; i < cases.length; i++) {
-      s.stations[sid].units = { infantry: cap * cases[i][0], artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap * cases[i][0]);
       assertEqual(operatingTier(s, sid), cases[i][1],
         'at ' + (cases[i][0] * 100) + '% of capacity the tier should be ' + cases[i][1]);
     }
@@ -254,18 +261,18 @@ function suiteDevelopment() {
     var sid = P.capital, cap = STATIONS[sid].capacity;
     var s = _devtBoard('ger', sid, cap * 3);
     for (var t = 1; t <= 2; t++) {
-      s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap * 2);
       applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     }
-    s.stations[sid].units = { infantry: cap * 0.30, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap * 0.30);
     assertEqual(operatingTier(s, sid), 1, 'the fixture is not at operating tier 1');
     var need = operatingShortBy(s, sid);
     assertClose(need, cap * 0.5 - cap * 0.30, 1e-9, 'the shortfall is wrong');
     // Add exactly that and the tier must step.
-    s.stations[sid].units.infantry += need;
+    s.stations[sid].units += need;
     assertEqual(operatingTier(s, sid), 2, 'adding the stated shortfall did not raise the tier');
     // At the built tier there is nothing to be short of.
-    s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap);
     assertEqual(operatingShortBy(s, sid), null,
       'a fully-operating development still reports a shortfall');
   });
@@ -287,10 +294,10 @@ function suiteDevelopment() {
     // The real case. Build 1 and 2 first, then price tier 3 from exactly the
     // overflow band: it costs a whole capacity and leaves half, which operates 2.
     for (var t = 1; t <= 2; t++) {
-      s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap * 2);
       applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     }
-    s.stations[sid].units = { infantry: cap * 1.5, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap * 1.5);
     assertEqual(operatingAfterBuild(s, sid, 3, developmentCost(sid, 3)), 2,
       'tier 3 paid from 1.5x capacity should report that it will run at 2, not 3');
 
@@ -306,7 +313,7 @@ function suiteDevelopment() {
     var sid = P.plainHolding, cap = STATIONS[sid].capacity;
     var s = _devtBoard('ger', sid, cap);
     // Spend it right down to the floor: nothing left to operate anything.
-    var cost = totalUnits(s.stations[sid].units) - BAL.DEV.MIN_REMAINING;
+    var cost = (s.stations[sid].units) - BAL.DEV.MIN_REMAINING;
     assertEqual(operatingAfterBuild(s, sid, 1, cost), 0,
       'a build that leaves the floor still claims to be running');
     assert(operatingAfterBuild(s, sid, 1, 1e9) >= 0,
@@ -322,17 +329,17 @@ function suiteDevelopment() {
     var sid = P.capital, cap = STATIONS[sid].capacity;
     var s = _devtBoard('ger', sid, cap * 3);
     for (var t = 1; t <= 2; t++) {
-      s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap * 2);
       applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     }
-    s.stations[sid].units = { infantry: cap * 0.8, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap * 0.8);
     assertEqual(operatingTier(s, sid), 2, 'the fixture is not operating at 2');
 
-    s.stations[sid].units = { infantry: cap * 0.1, artillery: 0, armour: 0 };   // raided
+    s.stations[sid].units = (cap * 0.1);   // raided
     assertEqual(operatingTier(s, sid), 0, 'a gutted garrison still operates the fort');
     assertEqual(builtTier(s, sid), 2, 'a raid destroyed the BUILD, not just the tier');
 
-    s.stations[sid].units = { infantry: cap * 0.8, artillery: 0, armour: 0 };   // regrown
+    s.stations[sid].units = (cap * 0.8);   // regrown
     assertEqual(operatingTier(s, sid), 2, 'the tier did not come back with the garrison');
   });
 
@@ -359,7 +366,7 @@ function suiteDevelopment() {
     applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'port' });
     assertEqual(developmentKind(s, sid), 'port', 'the port did not build');
 
-    s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap * 2);
     var res = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'factory' });
     assert(!res.ok, 'a station switched development kind');
     assertEqual(res.rejected[0].reason, 'already-developed', 'wrong rejection reason');
@@ -401,7 +408,7 @@ function suiteDevelopment() {
     assert(poor, 'no second fortify-only station found');
     var s = _devtBoard('ger', rich, STATIONS[rich].capacity);
     if (s.stations[poor].owner !== 'ger') setStationOwner(s, poor, 'ger');
-    s.stations[poor].units = { infantry: 0.5, artillery: 0, armour: 0 };
+    s.stations[poor].units = 0.5;
     var res = applyCommand(s, { type: 'build', owner: 'ger', stations: [rich, poor] });
     assert(res.ok, 'the whole group was refused because one member was short');
     assertEqual(res.accepted.length, 1, 'expected exactly one build');
@@ -487,7 +494,7 @@ function suiteDevelopment() {
       'one operating tier did not add FORT_POWER_PER_TIER to the fort level');
 
     // Gut the garrison: the tier stops operating and the bonus goes with it.
-    s.stations[sid].units = { infantry: 0.1, artillery: 0, armour: 0 };
+    s.stations[sid].units = 0.1;
     assertEqual(operatingTier(s, sid), 0, 'the tier still operates on 0.1 units');
     assertClose(fortLevel(sid, s), bare, 1e-9,
       'an unmanned fortification is still adding defence — it is a ghost army');
@@ -513,36 +520,93 @@ function suiteDevelopment() {
     // above.
     var sid = P.plainHolding, cap = STATIONS[sid].capacity;
     var s = _devtBoard('ger', sid, cap);
-    s.stations[sid].attackers = { fra: { infantry: 30, artillery: 0, armour: 0 } };
+    s.stations[sid].attackers = { fra: 30 };
     var plain = stationPower(s, sid, 'defender');
 
     var s2 = _devtBoard('ger', sid, cap);
     applyCommand(s2, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
     // Match the garrison exactly, so the ONLY difference is the development.
-    s2.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
-    s2.stations[sid].attackers = { fra: { infantry: 30, artillery: 0, armour: 0 } };
+    s2.stations[sid].units = (cap);
+    s2.stations[sid].attackers = { fra: 30 };
     var forted = stationPower(s2, sid, 'defender');
 
     assert(forted > plain, 'a tier-1 fortification did not raise defensive power at all: ' +
       plain + ' -> ' + forted);
   });
 
-  test('artillery still answers a BUILT fort, exactly as it answers a stone one', function () {
-    // The development goes through fortLevel, so it goes through the existing
-    // artillery-strip path. If it were added beside the fort block instead, a
-    // built fortification would be immune to the one counter the design gives it.
+  // ADDED AT C1, and the reason is worth recording: the fort SCALE-IN had no
+  // behavioural test at all. Mutating `scale` to a constant 1 — an empty fort
+  // worth its full block, the exact "ghost army" sim/combat.js says the
+  // scale-in exists to prevent — was caught only by the 2,000-tick hash pin,
+  // which tells you a number moved and nothing about which rule broke.
+  //
+  // It matters more since C1, because the fort is now the ONLY thing that makes
+  // two garrisons of equal size worth different amounts.
+  test('an unmanned fortification is not a ghost army — the block scales in', function () {
     var sid = P.plainHolding, cap = STATIONS[sid].capacity;
-    function powerVs(kind) {
+    function powerAt(garrison) {
       var s = _devtBoard('ger', sid, cap);
-      applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
-      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
-      s.stations[sid].attackers = { fra: kind };
-      return stationPower(s, sid, 'defender');
+      var res = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
+      assert(res.ok, 'build rejected: ' + JSON.stringify(res.rejected));
+      s.stations[sid].units = garrison;
+      s.stations[sid].attackers = { fra: 30 };
+      // The BODIES subtracted off, so what is left is the fort block alone.
+      return stationPower(s, sid, 'defender') - garrison * BAL.UNIT.def;
     }
-    var vsInf = powerVs({ infantry: 30, artillery: 0, armour: 0 });
-    var vsArt = powerVs({ infantry: 0, artillery: 30, armour: 0 });
-    assert(vsArt < vsInf, 'artillery did not strip the built fortification: ' +
-      vsInf + ' vs ' + vsArt);
+    var full = BAL.DEFENSE_BONUS_FULL_AT;
+    var thin = powerAt(full / 5);
+    var manned = powerAt(full);
+
+    // VACUITY: a fort that contributes nothing at either garrison would pass a
+    // bare `thin < manned` by way of 0 < 0.
+    assert(manned > 1e-9, 'the fortification contributes nothing even fully manned — ' +
+      'nothing was measured');
+    assert(thin < manned - 1e-9,
+      'a fortification held by ' + (full / 5) + ' units was worth the same block (' +
+      thin.toFixed(4) + ') as one held by ' + full + ' (' + manned.toFixed(4) +
+      ') — the scale-in is not applying and an empty fort is a ghost army');
+    // And it is PROPORTIONAL below the threshold, not merely smaller: a step
+    // function would also pass the assertion above.
+    assertClose(thin, manned / 5, 1e-9,
+      'the block does not scale linearly with the garrison below ' + full + ' defenders');
+  });
+
+  // TOMBSTONE — C1. 'artillery still answers a BUILT fort, exactly as it
+  // answers a stone one' stood here. It pinned that a development reached the
+  // fort block THROUGH fortLevel() rather than beside it, so that a built
+  // fortification could not be immune to the one counter §4 gave it. There is
+  // no counter left: the artillery strip died with the unit types.
+  //
+  // The routing it actually tested is still worth pinning, so this checks the
+  // other observable consequence of going through fortLevel(): a build stacks
+  // ADDITIVELY with the station's own stone defence rather than replacing it.
+  // A development added beside the block would give a defensive station the
+  // same absolute power as a plain one.
+  test('a BUILT fort stacks on the stone one rather than replacing it', function () {
+    function fortedPower(sid) {
+      var cap = STATIONS[sid].capacity;
+      var s = _devtBoard('ger', sid, cap);
+      var res = applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
+      assert(res.ok, 'build rejected at ' + sid + ': ' + JSON.stringify(res.rejected));
+      s.stations[sid].units = cap;
+      s.stations[sid].attackers = { fra: 30 };
+      return stationPower(s, sid, 'defender') - cap * BAL.UNIT.def;
+    }
+    // Same GARRISON on both, so the only difference in the fort block is the
+    // station's own defence rating. Normalised per unit of garrison would hide
+    // it; the bodies are subtracted off above instead.
+    var plainSid = P.plainHolding;
+    var stoneSid = null;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var d = STATIONS[STATION_IDS[i]];
+      if (d.type === 'defensive' && d.capacity >= STATIONS[plainSid].capacity * 0.4) {
+        stoneSid = STATION_IDS[i]; break;
+      }
+    }
+    if (!stoneSid) return skipTest('additive fort', 'no defensive station on the map');
+    assert(fortedPower(stoneSid) > fortedPower(plainSid),
+      'a built fort on a citadel is worth no more than the same fort on a plain ' +
+      'city — the development replaced the stone defence instead of adding to it');
   });
 
   // ── interdiction: the fort bleeds the assault on its approach ──────────
@@ -556,7 +620,7 @@ function suiteDevelopment() {
     function assault(fortify) {
       var s = _devtBoard('fra', sid, cap);
       if (fortify) applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
-      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap);
       // A neighbour Germany attacks from, so the wave has a real final hop.
       var src = null;
       for (var i = 0; i < LINKS.length && !src; i++) {
@@ -565,17 +629,17 @@ function suiteDevelopment() {
         if (o) src = o;
       }
       setStationOwner(s, src, 'ger');
-      s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+      s.stations[src].units = 60;
       var res = applyCommand(s, {
         type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1,
       });
       assert(res.ok, 'the fixture could not launch: ' + JSON.stringify(res.rejected));
       var w = s.waves[s.waves.length - 1];
-      var launched = totalUnits(w.units);
+      var launched = (w.units);
       // March until it lands, then read what actually arrived.
       var guard = 0;
       while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
-      return { launched: launched, landed: totalUnits(w.units), fortified: fortify };
+      return { launched: launched, landed: (w.units), fortified: fortify };
     }
 
     // AGAINST AN UNFORTIFIED CONTROL, not against what was launched. Since B1
@@ -603,7 +667,7 @@ function suiteDevelopment() {
     var s = _devtBoard('fra', sid, cap);
     applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
     assertEqual(builtTier(s, sid), 1, 'the fixture did not build');
-    s.stations[sid].units = { infantry: 0.05, artillery: 0, armour: 0 };   // gutted
+    s.stations[sid].units = 0.05;   // gutted
     assertEqual(operatingTier(s, sid), 0, 'the fixture still operates the fort');
 
     var src = null;
@@ -613,27 +677,27 @@ function suiteDevelopment() {
       if (o) src = o;
     }
     setStationOwner(s, src, 'ger');
-    s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+    s.stations[src].units = 60;
     applyCommand(s, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
     var w = s.waves[s.waves.length - 1];
-    var launched = totalUnits(w.units);
+    var launched = (w.units);
     var guard = 0;
     while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
-    var lost = launched - totalUnits(w.units);
+    var lost = launched - (w.units);
 
     // The control: identical assault, no fortification at all. Since B1 both pay
     // march attrition, so the question is whether the EMPTY fort adds anything on
     // top — and it must not.
     var c = _devtBoard('fra', sid, cap);
-    c.stations[sid].units = { infantry: 0.05, artillery: 0, armour: 0 };
+    c.stations[sid].units = 0.05;
     setStationOwner(c, src, 'ger');
-    c.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+    c.stations[src].units = 60;
     applyCommand(c, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
     var cw = c.waves[c.waves.length - 1];
-    var cLaunched = totalUnits(cw.units);
+    var cLaunched = (cw.units);
     guard = 0;
     while (c.waves.indexOf(cw) >= 0 && guard++ < 4000) movementTick(c);
-    var cLost = cLaunched - totalUnits(cw.units);
+    var cLost = cLaunched - (cw.units);
 
     assertClose(lost, cLost, 1e-6,
       'an empty fortress cost the assault ' + lost.toFixed(4) + ' where no ' +
@@ -647,10 +711,10 @@ function suiteDevelopment() {
     function assaultAt(tier) {
       var s = _devtBoard('fra', sid, cap * 3);
       for (var t = 0; t < tier; t++) {
-        s.stations[sid].units = { infantry: cap * 2, artillery: 0, armour: 0 };
+        s.stations[sid].units = (cap * 2);
         applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
       }
-      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };   // fully manned
+      s.stations[sid].units = (cap);   // fully manned
       assertEqual(operatingTier(s, sid), tier, 'fixture is not operating at ' + tier);
       var src = null;
       for (var i = 0; i < LINKS.length && !src; i++) {
@@ -659,13 +723,13 @@ function suiteDevelopment() {
         if (o) src = o;
       }
       setStationOwner(s, src, 'ger');
-      s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+      s.stations[src].units = 60;
       applyCommand(s, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
       var w = s.waves[s.waves.length - 1];
-      var launched = totalUnits(w.units);
+      var launched = (w.units);
       var guard = 0;
       while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
-      return launched - totalUnits(w.units);
+      return launched - (w.units);
     }
 
     var one = assaultAt(1), three = assaultAt(3);
@@ -725,11 +789,11 @@ function suiteDevelopment() {
     function assaultFrom(src, expectHops, fortify) {
       var s = _devtBoard('fra', sid, cap * 2);
       if (fortify) applyCommand(s, { type: 'build', owner: 'fra', stations: [sid], kind: 'fort' });
-      s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+      s.stations[sid].units = (cap);
       assert(!fortify || operatingTier(s, sid) > 0, 'the fortress is not operating');
       setStationOwner(s, near, 'ger');
       setStationOwner(s, far, 'ger');
-      s.stations[src].units = { infantry: 60, artillery: 0, armour: 0 };
+      s.stations[src].units = 60;
       var res = applyCommand(s, {
         type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1,
       });
@@ -738,10 +802,10 @@ function suiteDevelopment() {
       assertEqual(w.path.length - 1, expectHops,
         'the route from ' + src + ' is ' + (w.path.length - 1) + ' hops, not ' +
         expectHops + ' — this test is not measuring what it claims');
-      var launched = totalUnits(w.units);
+      var launched = (w.units);
       var guard = 0;
       while (s.waves.indexOf(w) >= 0 && guard++ < 8000) movementTick(s);
-      return launched - totalUnits(w.units);
+      return launched - (w.units);
     }
 
     var oneHop = assaultFrom(near, 1, true) - assaultFrom(near, 1, false);
@@ -771,7 +835,7 @@ function suiteDevelopment() {
     var sid = P.capital, cap = STATIONS[sid].capacity;
     var s = _devtBoard('ger', sid, cap * 2);
     applyCommand(s, { type: 'build', owner: 'ger', stations: [sid], kind: 'fort' });
-    s.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    s.stations[sid].units = (cap);
     assert(operatingTier(s, sid) > 0, 'the fixture is not operating');
 
     var src = null;
@@ -781,27 +845,27 @@ function suiteDevelopment() {
       if (o) src = o;
     }
     setStationOwner(s, src, 'ger');
-    s.stations[src].units = { infantry: 40, artillery: 0, armour: 0 };
+    s.stations[src].units = 40;
     applyCommand(s, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
     var w = s.waves[s.waves.length - 1];
-    var launched = totalUnits(w.units);
+    var launched = (w.units);
     var guard = 0;
     while (s.waves.indexOf(w) >= 0 && guard++ < 4000) movementTick(s);
-    var lost = launched - totalUnits(w.units);
+    var lost = launched - (w.units);
 
     // Control: the same march with no fortification built. Both pay march
     // attrition since B1; only the fort is being tested.
     var c = _devtBoard('ger', sid, cap * 2);
-    c.stations[sid].units = { infantry: cap, artillery: 0, armour: 0 };
+    c.stations[sid].units = (cap);
     setStationOwner(c, src, 'ger');
-    c.stations[src].units = { infantry: 40, artillery: 0, armour: 0 };
+    c.stations[src].units = 40;
     applyCommand(c, { type: 'send', owner: 'ger', sources: [src], target: sid, fraction: 1 });
     var cw = c.waves[c.waves.length - 1];
-    var cLaunched = totalUnits(cw.units);
+    var cLaunched = (cw.units);
     guard = 0;
     while (c.waves.indexOf(cw) >= 0 && guard++ < 4000) movementTick(c);
 
-    assertClose(lost, cLaunched - totalUnits(cw.units), 1e-6,
+    assertClose(lost, cLaunched - (cw.units), 1e-6,
       'a power marching into its OWN fortress paid more than the same march to an ' +
       'undeveloped city — your walls are shooting at you');
   });

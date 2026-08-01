@@ -63,7 +63,7 @@ function _wfgBoard(seed, pid) {
 function _wfgWave(s, pid, a, b) {
   var w = {
     id: s.nextWaveId++, owner: pid, from: a, to: b, path: [a, b], hop: 0,
-    progress: 0.5, units: { infantry: 9, artillery: 0, armour: 0 },
+    progress: 0.5, units: 9,
     launchTick: s.tick, eta: 40,
   };
   s.waves.push(w);

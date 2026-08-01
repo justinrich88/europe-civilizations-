@@ -73,11 +73,11 @@ function _dmkBuild(sid, kind, tiers, keepFrac) {
   setStationOwner(GAME, sid, PLAYER);
   for (var t = 0; t < tiers; t++) {
     GAME.stations[sid].units =
-      { infantry: STATIONS[sid].capacity * 1.5, artillery: 0, armour: 0 };
+      (STATIONS[sid].capacity * 1.5);
     applyCommand(GAME, { type: 'build', owner: PLAYER, stations: [sid], kind: kind });
   }
   GAME.stations[sid].units =
-    { infantry: STATIONS[sid].capacity * keepFrac, artillery: 0, armour: 0 };
+    (STATIONS[sid].capacity * keepFrac);
 }
 
 // A station of each shape, found from the data. A hard-coded id is a test that

@@ -745,7 +745,7 @@ function _fogWavePush(f, s, hop, progress) {
     path: f.path.slice(),
     hop: hop,
     progress: progress || 0,
-    units: { infantry: 12, artillery: 0, armour: 0 },
+    units: 12,
     launchTick: s.tick,
     eta: 100,
   };
@@ -1002,7 +1002,7 @@ function _fogSuiteWaves(d) {
     if (typeof applyCommand !== 'function' || typeof stepTick !== 'function') return;
 
     var s = _fogWaveBoard(f);
-    s.stations[f.home].units = { infantry: 6000, artillery: 0, armour: 0 };
+    s.stations[f.home].units = 6000;
     var dark0 = visibleTo(s, f.pid);
 
     var res = applyCommand(s, {
@@ -1099,7 +1099,7 @@ function _fogMemFixture(seed, pid) {
   for (i = 0; i < STATION_IDS.length; i++) {
     sid = STATION_IDS[i];
     if (before[sid] !== 2 || after[sid] !== 0) continue;
-    var room = STATIONS[sid].capacity - totalUnits(s.stations[sid].units);
+    var room = STATIONS[sid].capacity - (s.stations[sid].units);
     if (room > bestRoom) { bestRoom = room; lost = sid; }
   }
   if (!lost) return null;
@@ -1180,19 +1180,19 @@ function _fogSuiteMemory(d) {
     assert(!!f, 'fixture is wrong');
 
     observeTick(f.s);
-    var at0 = totalUnits(believedStation(f.s, pid, f.lost).units);
+    var at0 = (believedStation(f.s, pid, f.lost).units);
     setStationOwner(f.s, f.drop, 'neutral');            // go blind, then let it grow
     _fogMemWatch(f.s, 400);                             // observer running throughout
 
     var b = believedStation(f.s, pid, f.lost);
-    var liveNow = totalUnits(f.s.stations[f.lost].units);
+    var liveNow = (f.s.stations[f.lost].units);
     assertEqual(b.level, 1, 'the fixture station stopped being fogged');
-    assertClose(totalUnits(b.units), at0, 1e-9,
+    assertClose((b.units), at0, 1e-9,
       'the remembered garrison moved while nobody was watching it');
     // The control. Without this a memory that never updated AND a board that
     // never moved would both pass the line above.
-    assert(Math.abs(liveNow - totalUnits(b.units)) > 0.5,
-      'live ' + liveNow.toFixed(2) + ' vs remembered ' + totalUnits(b.units).toFixed(2) +
+    assert(Math.abs(liveNow - (b.units)) > 0.5,
+      'live ' + liveNow.toFixed(2) + ' vs remembered ' + (b.units).toFixed(2) +
       ' — after 400 ticks these must have separated, or nothing was proved stale');
   });
 
@@ -1212,8 +1212,8 @@ function _fogSuiteMemory(d) {
     observeTick(f.s);
     var rec = f.s.seen[pid][f.lost];
     assertEqual(rec.t, 200, 'the refreshed record should be stamped with the current tick');
-    assertClose(totalUnits(rec.u),
-      totalUnits(f.s.stations[f.lost].units), 1e-9,
+    assertClose((rec.u),
+      (f.s.stations[f.lost].units), 1e-9,
       'the refreshed record does not match the live garrison it just observed');
   });
 
@@ -1439,10 +1439,7 @@ function _fogAmbush(seed, pid, mul) {
   _fogMemWatch(f.s, 200);                             // observer runs throughout
 
   // The ambush. Everything the defender does from here is invisible to `pid`.
-  var u = f.s.stations[f.lost].units;
-  u.infantry *= mul;
-  u.artillery *= mul;
-  u.armour *= mul;
+  f.s.stations[f.lost].units *= mul;
 
   f.believed = believedStation(f.s, pid, f.lost);
   if (f.believed.level !== 1) return null;
@@ -1599,8 +1596,7 @@ function _fogSuiteAiSymmetry(d) {
     var me = f.s.powers[pid];
     me.wars = me.wars || {}; me.wars[rival] = true;
     me.relations = me.relations || {}; me.relations[rival] = BAL.AI.RELATION_MIN;
-    var u = f.s.stations[f.lost].units;
-    u.infantry *= 8; u.artillery *= 8; u.armour *= 8;
+    f.s.stations[f.lost].units *= 8;
 
     var after = aiScoreTarget(f.s, pid, f.lost, aiContext(f.s, pid));
     assertEqual(JSON.stringify(after), JSON.stringify(before),
@@ -1618,7 +1614,7 @@ function _fogSuiteAiSymmetry(d) {
     var live = scratch.stations[f.lost];
     scratch.seen[pid][f.lost] = {
       o: live.owner,
-      u: { infantry: live.units.infantry, artillery: live.units.artillery, armour: live.units.armour },
+      u: live.units,
       c: live.connected !== false,
       t: scratch.tick,
     };
@@ -1661,7 +1657,7 @@ function _fogSuiteAiSymmetry(d) {
     // comes back exactly equal to def. Believing it connected projects it
     // forward to the growth ceiling.
     var room = STATIONS[f.lost].capacity * BAL.GROWTH_OVERFLOW_CEIL -
-               totalUnits(b.units);
+               (b.units);
     assert(room > 0, f.lost + ' is already at the growth ceiling — there is no ' +
       'projection to make and this test proves nothing');
     assert(grown > def,

@@ -437,27 +437,13 @@ function _rdoLvl(v) {
   return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + ' lvl';
 }
 
-// Short unit tags, from BAL.UNIT_ORDER so a fourth unit type would appear here
-// without an edit.
-function _rdoUnitTag(t) { return String(t).slice(0, 3); }
-
-// "40 inf · 12 art" — the SAME grammar the map's volley preview uses for a
-// payload (00-vision.md §8), deliberately, so a stack reads identically wherever
-// it appears. Zero-count types are omitted rather than printed as "0": three
-// cells of which two are always zero was a row of noise on 78 of 108 stations.
-function _rdoComp(units) {
-  var out = [];
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    // Gated on what will actually PRINT, not on what exists. The sim's
-    // annihilation epsilon is far below one decimal place, so a trace of 0.03
-    // artillery used to render as the tag "0.0 art" — a unit type announced on
-    // the strength of a rounding error.
-    if (Math.round(units[t] * 10) / 10 <= 0) continue;
-    out.push(_rdoNum(units[t]) + ' ' + _rdoUnitTag(t));
-  }
-  return out.join(' · ');
-}
+// TOMBSTONE — C1. `_rdoUnitTag()` and `_rdoComp()` stood here and printed a
+// stack's COMPOSITION ("40 inf · 12 art") in the same grammar the map's volley
+// preview used, so a stack read identically wherever it appeared. With one unit
+// type a composition line would print the garrison a second time, three rows
+// below the garrison — so the `.comp` row is now written EMPTY rather than
+// removed from the DOM, and the header line spends the space it freed on
+// "moving" and "full" instead.
 
 function _rdoTypeLabel(d) {
   var t = d && d.type;
@@ -513,17 +499,6 @@ function _rdoTerrainKey(sid) {
   return (t && t.terrain) ? t.terrain : 'plains';
 }
 
-// The heaviest type in a resolved mix, for naming who a matchup is against.
-function _rdoTopType(mix) {
-  if (!mix) return '';
-  var best = '', bv = -1;
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    if (mix[t] > bv) { bv = mix[t]; best = t; }
-  }
-  return best;
-}
-
 // ── sim reads ───────────────────────────────────────────────────────────
 
 // Where growth actually STOPS, as a multiple of capacity. Since the
@@ -573,17 +548,16 @@ function _rdoGrowthPerTick(state, sid, units, extraMul) {
   var d = STATIONS[sid];
   var st = state.stations[sid];
   var probe = {
-    units: { infantry: 0, artillery: 0, armour: 0 },
+    units: 0,
     growthMul: st.growthMul,
     capturedTick: st.capturedTick,
   };
-  var total = totalUnits(units);
   try {
-    _applyGrowth({ tick: state.tick }, sid, probe, d, total, extraMul);
+    _applyGrowth({ tick: state.tick }, sid, probe, d, units, extraMul);
   } catch (e) {
     return null;
   }
-  return totalUnits(probe.units);
+  return probe.units;
 }
 
 // Ticks for a station to reach `frac` of capacity, by stepping the sim's own
@@ -599,17 +573,15 @@ function _rdoTicksToFill(state, sid, frac) {
   var cap = d.capacity;
   if (!(cap > 0)) return -1;
   var target = cap * frac;
-  var u = totalUnits(st.units);
+  var u = st.units;
   if (u >= target) return 0;
 
   var stub = { tick: state.tick };
-  var probe = { units: { infantry: 0, artillery: 0, armour: 0 }, growthMul: st.growthMul };
+  var probe = { units: 0, growthMul: st.growthMul };
   for (var i = 0; i < RDO_ETA_MAX_TICKS; i++) {
-    probe.units.infantry = 0;
-    probe.units.artillery = 0;
-    probe.units.armour = 0;
+    probe.units = 0;
     _applyGrowth(stub, sid, probe, d, u, 1);
-    var g = totalUnits(probe.units);
+    var g = probe.units;
     if (!(g > 0)) return -1;
     u += g;
     if (u >= target) return i + 1;
@@ -1070,7 +1042,7 @@ var RDO_STALE_OPACITY = '0.65';
 //
 // 4. COMPOSITION — infantry / artillery / armour, zero types omitted. It is
 //    tempting to blend them into a single "strength" and it would be wrong in
-//    both directions at once: BAL.UNITS gives infantry 1.0/1.2, artillery
+//    both directions at once: BAL.UNIT gives 1.0/1.2, and before C1
 //    1.8/0.6 and armour 1.5/0.9, so the same stack is a different size
 //    attacking than defending; the matchup triangle makes it a different size
 //    again depending on who it meets, and the additive fortress block makes it
@@ -1128,16 +1100,11 @@ function _rdoHeaderStats(state, pid) {
 
   var ids = (typeof powerStations === 'function') ? powerStations(state, pid) : [];
   var e = {
-    // A REAL unit bundle, not three loose accumulators. The per-type split is
-    // load-bearing — the composition line ("42 inf · 9 art") is the only place
-    // in the panel that distinguishes the types, so it cannot be collapsed to a
-    // scalar ahead of the sim. But it does not follow that this file should
-    // spell the bundle out: as `inf/art/arm` the accumulation and its total
-    // were a fourth hand-rolled copy of core/state.js, and the day the bundle
-    // changes shape they would go on adding up three properties that no longer
-    // exist. Held as a bundle, addUnits()/totalUnits() carry it, and _rdoComp
-    // becomes the single site that has to answer what a composition means.
-    n: ids.length, units: emptyUnits(), transit: 0, cap: 0,
+    // `units` was a bundle here, and this comment said the per-type split was
+    // load-bearing because the composition line was the only place in the panel
+    // that distinguished the types. C1 removed the types and the composition
+    // line with them, so it is now a running total and nothing else.
+    n: ids.length, units: 0, transit: 0, cap: 0,
     perTick: 0, cut: 0, contested: 0, atCap: 0,
     // Standing supply. Counted on THIS walk rather than on one of their own:
     // the aggregate already visits every station this power holds, on a tick
@@ -1182,7 +1149,7 @@ function _rdoHeaderStats(state, pid) {
     }
     var d = STATIONS[sid];
     var u = st.units;
-    addUnits(e.units, u);
+    e.units += u;
     e.cap += d.capacity || 0;
 
     // Counted BEFORE the growth branches below, every one of which `continue`s.
@@ -1213,7 +1180,7 @@ function _rdoHeaderStats(state, pid) {
       }
     }
 
-    var total = totalUnits(u);
+    var total = u;
     var contested = (typeof stationAttackers === 'function') && stationAttackers(state, sid).length > 0;
     if (contested) { e.contested++; continue; }
     if (st.connected === false) {
@@ -1241,10 +1208,10 @@ function _rdoHeaderStats(state, pid) {
 
   var waves = state.waves || [];
   for (var w = 0; w < waves.length; w++) {
-    if (waves[w].owner === pid) e.transit += totalUnits(waves[w].units);
+    if (waves[w].owner === pid) e.transit += waves[w].units;
   }
 
-  e.held = totalUnits(e.units);
+  e.held = e.units;
   _rdoHead = { tick: state.tick, pid: pid, data: e };
   return e;
 }
@@ -1315,8 +1282,8 @@ function _rdoHeaderUpdate(state, n) {
   // is the drift known-issues #9 is about.
   _rdoClass(n.barFill, 'hdrbar', 'is-full', fill >= _rdoFullAt());
 
-  var comp = _rdoComp(e.units);
-  if (e.transit > 0) comp += (comp ? '  ·  ' : '') + _rdoNum(e.transit) + ' moving';
+  var comp = '';
+  if (e.transit > 0) comp += _rdoNum(e.transit) + ' moving';
   if (e.atCap > 0) comp += (comp ? '  ·  ' : '') + e.atCap + ' full';
   _rdoSet(n.comp, 'hdrcomp', comp);
 
@@ -1482,7 +1449,6 @@ function _rdoStationBuild(host) {
 // place; see rule 2 in the file header.
 function _rdoTypeBadge(d) {
   var t = _rdoTypeLabel(d);
-  if (d.type === 'producer' && d.produces) return t + ' · ' + _rdoUnitTag(d.produces);
   if (d.type === 'multiplier' && d.multiplier) return t + ' ×' + d.multiplier;
   return t;
 }
@@ -1597,10 +1563,13 @@ function _rdoStationFogged(state, n, sid, b) {
   // "14.2 units", never "14.2 / 26". The ratio is half live-looking — the
   // denominator is real and current, so the pair reads as a measurement rather
   // than as a recollection, and the capacity is not the question anyway.
-  var u = b.units || { infantry: 0, artillery: 0, armour: 0 };
+  // `typeof`, not `||` — a remembered garrison of exactly ZERO is a real thing
+  // to have seen, and `b.units || 0` would print the same 0 for it either way
+  // while quietly treating "saw an empty city" as "saw nothing".
+  var u = (typeof b.units === 'number') ? b.units : 0;
   _rdoSet(n.garr.k, 'stagarrk', 'last seen');
-  _rdoSet(n.garr.v, 'stagarr', _rdoNum(totalUnits(u)) + ' units');
-  _rdoSet(n.comp, 'stacomp', _rdoComp(u));
+  _rdoSet(n.garr.v, 'stagarr', _rdoNum(u) + ' units');
+  _rdoSet(n.comp, 'stacomp', '');
 
   // The age carries the warning colour, because "may have changed" is the
   // actionable half of the sentence and the number above it is the bait.
@@ -1628,7 +1597,7 @@ function _rdoStationUpdate(state, n) {
   var d = STATIONS[sid];
   var st = state.stations[sid];
   var units = st.units;
-  var total = totalUnits(units);
+  var total = units;
   var cap = d.capacity;
   var fill = cap > 0 ? total / cap : 0;
 
@@ -1653,7 +1622,7 @@ function _rdoStationUpdate(state, n) {
   // the "39.0 / 26" text, which is where a number over capacity belongs.
   _rdoStyle(n.barFill, 'stabar', 'width', _rdoPct(Math.min(1, fill)));
   _rdoClass(n.barFill, 'stabar', 'is-full', fill >= _rdoFullAt());
-  _rdoSet(n.comp, 'stacomp', _rdoComp(units));
+  _rdoSet(n.comp, 'stacomp', '');
 
   // ── which growth branch the sim will take ──
   //
@@ -1724,12 +1693,12 @@ function _rdoStationUpdate(state, n) {
     }
   }
 
-  // The unit type is folded into the VALUE rather than costing a status line of
-  // its own ("into infantry"). It matters most on a producer, where the answer
-  // is not infantry, and there it is now impossible to miss.
-  var made = (typeof growthType === 'function') ? _rdoUnitTag(growthType(sid)) : 'inf';
+  // The unit type used to be folded into this value ("+4.2 art / day"), because
+  // a producer made something other than infantry and that was the one place it
+  // showed. Every station now grows the same thing, so naming it would be noise
+  // on all 108.
   _rdoSet(n.growth.v, 'stagrowth',
-    (perDay > 0 ? '+' : '') + _rdoNum(perDay) + ' ' + made + ' / day');
+    (perDay > 0 ? '+' : '') + _rdoNum(perDay) + ' / day');
   _rdoClass(n.growth.row, 'stagrowthrow', 'is-stalled', perDay <= 0);
   _rdoSet(n.status, 'stastatus', statusBad ? status : '');
   _rdoClass(n.status, 'stastatus', 'is-bad', statusBad && !!status);
@@ -1848,7 +1817,7 @@ function _rdoSupplyUpdate(state, n) {
   var since = (st.discSince === undefined || st.discSince < 0) ? state.tick : st.discSince;
   var elapsed = state.tick - since;
   var decaying = elapsed >= BAL.DISCONNECT_GRACE;
-  var total = totalUnits(st.units);
+  var total = st.units;
 
   // The headline is the CLOCK, because the clock is the decision: relieve it
   // before the grace period ends and nothing is lost at all.
@@ -1970,14 +1939,13 @@ function _rdoFightUpdate(state, n) {
   var fort = fortLevel(sid, state);
 
   // Every hostile stack standing here, via the sim's own reader. Pure: it
-  // builds a fresh unit bag with emptyUnits()/addUnits and never writes back.
-  var atk = (typeof _allAttackerUnits === 'function') ? _allAttackerUnits(state, sid) : emptyUnits();
-  var anyAtk = totalUnits(atk) > BAL.ANNIHILATION_EPSILON;
-  var enemyMix = (typeof _mix === 'function') ? _mix(atk, false, fort) : null;
+  // sums the attacking stacks into a local and never writes back.
+  var atk = (typeof _allAttackerUnits === 'function') ? _allAttackerUnits(state, sid) : 0;
+  var anyAtk = atk > BAL.ANNIHILATION_EPSILON;
 
   // The headline IS the sim's number, not a sum of the rows below it…
   var pDef = stationPower(state, sid, 'defender');
-  var body = (typeof _bodyPower === 'function') ? _bodyPower(units, true, fort, enemyMix) : pDef;
+  var body = (typeof _bodyPower === 'function') ? _bodyPower(units, true) : pDef;
   // …and the fort block is the REMAINDER, so the two cannot fail to add up to
   // the headline even if sim/combat.js gains another term.
   var fbonus = pDef - body;
@@ -1986,7 +1954,7 @@ function _rdoFightUpdate(state, n) {
 
   _rdoSet(n.def, 'fgtdef', _rdoNum(pDef));
   _rdoSet(n.atk, 'fgtatk', _rdoNum(open));
-  _rdoClass(n.pwr.row, 'fgtpwrrow', 'is-stalled', totalUnits(units) <= BAL.ANNIHILATION_EPSILON);
+  _rdoClass(n.pwr.row, 'fgtpwrrow', 'is-stalled', units <= BAL.ANNIHILATION_EPSILON);
 
   // ── the additive block ──
   //
@@ -2020,13 +1988,13 @@ function _rdoFightUpdate(state, n) {
     // rather than restated: run it once with no attackers to get the
     // un-stripped block, and the two factors fall out of the ratio.
     var fNoAtk = (typeof _fortBonus === 'function')
-      ? _fortBonus(sid, units, emptyUnits(), fort) : fbonus;
+      ? _fortBonus(sid, units, 0, fort) : fbonus;
     var full = fort * BAL.DEFENSE_BONUS_POWER;
     var scale = full > 0 ? fNoAtk / full : 1;
     var strip = fNoAtk > 0 ? 1 - (fbonus / fNoAtk) : 0;
     var cut = [];
     if (scale < 1 - RDO_MOD_EPS) {
-      cut.push('only ' + _rdoNum(totalUnits(units)) + ' of ' + BAL.DEFENSE_BONUS_FULL_AT +
+      cut.push('only ' + _rdoNum(units) + ' of ' + BAL.DEFENSE_BONUS_FULL_AT +
         ' manning it');
     }
     if (strip > RDO_MOD_EPS) {
@@ -2047,7 +2015,7 @@ function _rdoFightUpdate(state, n) {
     _rdoClass(n.match.row, 'fgtmatchrow', 'is-off', m < 1);
   }
   _rdoSources(n.matchSrc, 'fgtmatchsrc', showMatch ? [
-    'against ' + _rdoNum(totalUnits(atk)) + ' units, mostly ' + _rdoTopType(enemyMix),
+    'against ' + _rdoNum(atk) + ' units',
   ] : []);
 
   _rdoFightMarch(state, n, sid);
@@ -2081,18 +2049,11 @@ function _rdoFightMarch(state, n, sid) {
   var st = state.stations[sid];
   var tpd = _rdoTicksPerDay();
 
-  // An empty station still has exits worth pricing; quote them for infantry and
-  // say so, rather than showing a speed of zero.
-  var real = totalUnits(st.units) > BAL.ANNIHILATION_EPSILON;
-  var ref = real ? st.units : { infantry: 1, artillery: 0, armour: 0 };
-
-  // The slowest type present, which is what the whole stack moves at.
-  var slowest = Infinity, slowType = '';
-  for (var i = 0; i < BAL.UNIT_ORDER.length; i++) {
-    var t = BAL.UNIT_ORDER[i];
-    if (!(ref[t] > BAL.ANNIHILATION_EPSILON)) continue;
-    if (BAL.UNITS[t].speed < slowest) { slowest = BAL.UNITS[t].speed; slowType = t; }
-  }
+  // An empty station still has exits worth pricing, so a notional single unit
+  // stands in rather than quoting a speed of zero. waveSpeed() returns 0 for an
+  // empty wave by design (an annihilated stack must not keep walking), which is
+  // exactly why this cannot just pass st.units.
+  var ref = (st.units > BAL.ANNIHILATION_EPSILON) ? st.units : 1;
 
   var adj = stationAdjacency()[sid] || [];
   var exits = [];
@@ -2124,12 +2085,11 @@ function _rdoFightMarch(state, n, sid) {
   var why = [];
   var anySea = false;
   for (var s = 0; s < exits.length; s++) if (exits[s].sea) { anySea = true; break; }
-  if (isFinite(slowest) && Math.abs(slowest - 1) > RDO_MOD_EPS) {
-    why.push(_rdoUnitTag(slowType) + ' ' + _rdoMul(slowest) + ' — a stack moves at its slowest');
-  }
+  // The "a stack moves at its slowest" line used to sit here, naming the type
+  // that was holding the volley up. Every army walks at BAL.UNIT.speed now, so
+  // there is no type to name and no spread to explain.
   if (anySea) {
-    why.push('sea ' + _rdoMul(BAL.SEA_SPEED_MUL) + ' · −' +
-      _rdoPctFine(BAL.SEA_ARTILLERY_LOSS) + ' of the guns per crossing');
+    why.push('sea ' + _rdoMul(BAL.SEA_SPEED_MUL) + ' — every crossing, for everyone');
   }
   // WHAT THIS CITY COSTS TO WALK AT. The other lines here explain why leaving is
   // slow; this one explains why arriving is expensive, and it belongs beside them
@@ -2888,7 +2848,7 @@ function _rdoSelUpdate(state, n) {
   var sel = selectedSources();
   if (!sel.length) return false;                 // nothing selected: no section
 
-  // Units are summed through totalUnits(), never spelled out — a second way to
+  // Units are read straight off the scalar field, never spelled out — a second way to
   // add up a bundle is the defect logged five times, and this one would print a
   // different number from the one the volley actually sends.
   var units = 0, mine = 0;
@@ -2897,7 +2857,7 @@ function _rdoSelUpdate(state, n) {
     var st = state.stations[sel[i]];
     if (!st || (me && st.owner !== me)) continue;
     mine++;
-    units += totalUnits(st.units);
+    units += st.units;
   }
 
   _rdoSet(n.what.v, 'selwhat', mine + (mine === 1 ? ' city' : ' cities') +

@@ -185,6 +185,16 @@ than a naval system"*. Concretely: **10 sea links**, touching **17 of 108
 stations**, with `SEA_SPEED_MUL` slowing everything and
 `SEA_ARTILLERY_SPEED_MUL` punishing artillery specifically.
 
+> *Revised 2026-08, C1.* The artillery clause is gone with the unit types, and
+> so is `SEA_ARTILLERY_LOSS`. The crossing is now **one number for everybody**:
+> `SEA_SPEED_MUL` (0.5) compounded with the 1.6x `dist` inflation every sea
+> link already carries, so 3.2x a land link of the same on-screen length. It
+> was 5.3x for a stack carrying guns, so **the sea got cheaper for exactly the
+> kind of force that used to find it expensive** — which is a real balance
+> change and is not costed anywhere in this document. What it restores is this
+> section's own premise: the artillery penalty was the one exception to "simply
+> slow", and there is no longer an exception.
+
 > *Revised 2026-07. Milestone 5.5 shipped change (a) below: there are now **32
 > sea links**, not 10. Everything downstream of that count in this document was
 > written against the old board — in particular the fog cost estimate in §1,

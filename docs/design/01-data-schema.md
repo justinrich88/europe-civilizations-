@@ -76,7 +76,6 @@ const STATIONS = {
     type: 'holding',          // holding | multiplier | producer | defensive
     capacity: 60,             // logistic ceiling, units
     rate: 0.9,                // growth coefficient, ×BAL.GROWTH_BASE
-    produces: 'infantry',     // infantry | artillery | armour — producers only
     defense: 1.0,             // additive defense bonus; defensive stations run high
     multiplier: null,         // multiplier stations only, e.g. 1.5
   },
@@ -88,10 +87,15 @@ Type rules, per `00-vision.md §2`:
 
 | type | `produces` | `capacity` | `rate` | `defense` | `multiplier` |
 |---|---|---|---|---|---|
-| `holding` | `infantry` | 25–80 by city size | 0.7–1.1 | 1.0 | `null` |
-| `producer` | `artillery` or `armour` | 15–35 (low) | 0.4–0.6 | 1.0–1.2 | `null` |
-| `multiplier` | `infantry` | 8–15 (very low) | 0.3 | 0.8 (soft) | 1.3–1.8 |
-| `defensive` | `infantry` | 12–25 | 0.3–0.5 | 2.0–3.5 | `null` |
+| `holding` | 25–80 by city size | 0.7–1.1 | 1.0 | `null` |
+| `producer` | 15–35 (low) | 0.4–0.6 | 1.0–1.2 | `null` |
+| `multiplier` | 8–15 (very low) | 0.3 | 0.8 (soft) | 1.3–1.8 |
+| `defensive` | 12–25 | 0.3–0.5 | 2.0–3.5 | `null` |
+
+> **C1 (2026-08) removed the `produces` column** from this table and the field
+> from every station record. There are no unit types to produce. A `producer`
+> is now the *worst* station on the board on both remaining axes — see
+> `00-vision.md` §4 and `04-development.md` §9c, which owns the gap.
 
 A multiplier station raises `rate` at every station in **its own territory and all adjacent territories**. Multipliers from several sources stack multiplicatively.
 
@@ -106,7 +110,7 @@ const LINKS = [
 
 - Undirected. Exactly one record per pair.
 - `dist` drives march time — roughly the on-screen distance, hand-tuned at chokepoints.
-- `sea: true` marks the handful of crossings (Dover, Baltic, Skagerrak, Adriatic, Gibraltar, Aegean). Slow, and punishing for artillery.
+- `sea: true` marks the handful of crossings (Dover, Baltic, Skagerrak, Adriatic, Gibraltar, Aegean). Slow — and, since C1, slow by the *same* amount for everybody. `SEA_ARTILLERY_SPEED_MUL` and `SEA_ARTILLERY_LOSS` charged a gun-carrying stack extra; both died with the unit types.
 - The link graph must be **connected**, and every station reachable from its owner's capital at game start.
 
 ---
@@ -120,7 +124,7 @@ const POWERS = {
 };
 
 const SETUP = {
-  ber: { owner:'ger', units:{infantry:40, artillery:0, armour:0} },
+  ber: { owner:'ger', units:40 },        // a NUMBER since C1, not a per-type bag
   // every station id appears exactly once
 };
 ```
@@ -144,11 +148,8 @@ const BAL = {
   DISCONNECT_DECAY: 0.002,
   CAPITULATE_FRACTION: 0.25,
   UNITS: {
-    infantry:  { atk:1.0, def:1.2, speed:1.0 },
-    artillery: { atk:1.8, def:0.6, speed:0.6, fortStrip:0.5 },
-    armour:    { atk:1.5, def:0.9, speed:1.8 },
+    UNIT: { atk:1.0, def:1.2, speed:1.0 },   // ONE profile since C1
   },
-  MATCHUP: { /* artillery>infantry, armour>artillery, infantry>armour */ },
   AI: { /* personality weights */ },
 };
 ```
@@ -164,7 +165,7 @@ Distinct from the static data above. This is the only thing that mutates.
   tick: 0, speed: 1, paused: true, rng: <uint32>, winner: null,
   ownerEpoch: 0,
   powers:   { ger: { alive:true, relations:{fra:-40,…}, startTerritories:12 } },
-  stations: { ber: { owner:'ger', units:{infantry:0,artillery:0,armour:0},
+  stations: { ber: { owner:'ger', units:0,           // a NUMBER since C1
                      connected:true, growthMul:1.0,
                      supplyTo:[] } },                         // standing orders
   waves:    [ { id, owner, from, to, path:['ber','lei'], hop:0,
@@ -265,7 +266,7 @@ All mutation flows through one entry point:
 
 ```js
 applyCommand(state, { type:'send',  owner, sources:[…], target, fraction,
-                      types?, standing? })
+                      standing? })   // `types?` removed at C1
 applyCommand(state, { type:'order', owner, stations:[…], target })
 ```
 
@@ -347,7 +348,7 @@ Nor may it call `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `atanh`, `hypot`,
 | Field | Meaning |
 |---|---|
 | `ashore` | Units already committed to the station |
-| `total` | Strength at the moment the landing began — **after** the sea artillery toll, which is charged once for the whole landing and never per echelon |
+| `total` | Strength at the moment the landing began. ~~After the sea artillery toll, charged once for the whole landing and never per echelon.~~ **C1 deleted the toll**, so this is now simply the force that reached the beach after B1's march attrition. |
 | `per` | Units of each type committed per tick, fixed at the start so echelons are a constant fraction of *original* strength and the force lands in its original mix |
 
 `w.units` continues to hold the units **still at sea**, so nothing else in the sim needs a new place to look for a wave's strength. Those units are not in `station.attackers` and therefore cannot be hit — that is the whole mechanic, and it needs no combat code. The merge-or-attack decision is re-taken **per echelon**, so a station that flips to the landing power mid-landing absorbs the remainder as reinforcements (consistent with `WAVE_REROUTE_ON_LOSS: false`), while one that flips to a third power keeps receiving attackers. The final echelon flushes whatever is left rather than trickling a sub-`MIN_SEND_UNITS` residue. Renderers may read `landing` to draw the beachhead; nothing in `sim/` reads it except `sim/movement.js`.
@@ -409,7 +410,7 @@ Two more helper contracts, both in `sim/commands.js` and both load-bearing for t
 | Global | File | Contract |
 |---|---|---|
 | `commandRoute(fromSid, toSid[, state, pid])` | `sim/commands.js` | Route a send will take; `null` if unreachable. With `state` and `pid` it returns the **legal** route (`routeFor`); with two arguments only, the geographic one (`routeBetween`). Falls back to its own BFS while `sim/movement.js` is unloaded. |
-| `routeEtaTicks(route, units)` | `sim/commands.js` | Estimated ticks for a stack to walk a route, at the speed of its slowest unit type. |
+| `routeEtaTicks(route)` | `sim/commands.js` | Estimated ticks to walk a route. **Takes no stack since C1** — every army moves at `BAL.UNIT.speed`, so the path is the whole question. The parameter was removed rather than left ignored: an argument that no longer affects the answer is how a caller comes to believe it is asking a question it is not (known-issue #18). |
 
 The preview **must** call these rather than estimating, or the ETAs shown before a commit will not match the waves the commit produces — which makes the preview worse than nothing, since avoiding defeat in detail is exactly what it exists for. A rename here degrades the preview to blank lines without failing any test.
 

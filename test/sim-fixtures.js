@@ -39,28 +39,28 @@ function makeFixture(seed) {
 
   var ST = {
     a1: { id: 'a1', name: 'Aone', territory: 'ta', pos: [100, 100], type: 'holding',
-          capacity: 60, rate: 1.0, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 60, rate: 1.0, defense: 1.0, multiplier: null },
     a2: { id: 'a2', name: 'Atwo', territory: 'ta', pos: [120, 100], type: 'holding',
-          capacity: 40, rate: 0.9, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 40, rate: 0.9, defense: 1.0, multiplier: null },
     m1: { id: 'm1', name: 'Afarm', territory: 'ta', pos: [100, 120], type: 'multiplier',
-          capacity: 10, rate: 0.3, produces: 'infantry', defense: 0.8, multiplier: 1.6 },
+          capacity: 10, rate: 0.3, defense: 0.8, multiplier: 1.6 },
 
     b1: { id: 'b1', name: 'Bone', territory: 'tb', pos: [200, 100], type: 'holding',
-          capacity: 50, rate: 1.0, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 50, rate: 1.0, defense: 1.0, multiplier: null },
     b2: { id: 'b2', name: 'Btwo', territory: 'tb', pos: [220, 100], type: 'holding',
-          capacity: 40, rate: 0.9, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 40, rate: 0.9, defense: 1.0, multiplier: null },
     f1: { id: 'f1', name: 'Bfort', territory: 'tb', pos: [200, 130], type: 'defensive',
-          capacity: 20, rate: 0.4, produces: 'infantry', defense: 3.0, multiplier: null },
+          capacity: 20, rate: 0.4, defense: 3.0, multiplier: null },
     p1: { id: 'p1', name: 'Bworks', territory: 'tb', pos: [200, 70], type: 'producer',
-          capacity: 30, rate: 0.5, produces: 'artillery', defense: 1.1, multiplier: null },
+          capacity: 30, rate: 0.5, defense: 1.1, multiplier: null },
 
     c1: { id: 'c1', name: 'Cone', territory: 'tc', pos: [300, 100], type: 'holding',
-          capacity: 50, rate: 1.0, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 50, rate: 1.0, defense: 1.0, multiplier: null },
     c2: { id: 'c2', name: 'Ctwo', territory: 'tc', pos: [320, 100], type: 'holding',
-          capacity: 30, rate: 0.9, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 30, rate: 0.9, defense: 1.0, multiplier: null },
 
     d1: { id: 'd1', name: 'Done', territory: 'td', pos: [400, 100], type: 'holding',
-          capacity: 40, rate: 0.9, produces: 'infantry', defense: 1.0, multiplier: null },
+          capacity: 40, rate: 0.9, defense: 1.0, multiplier: null },
   };
 
   var LNK = [
@@ -82,16 +82,16 @@ function makeFixture(seed) {
   };
 
   var SET = {
-    a1: { owner: 'pa', units: { infantry: 30, artillery: 0, armour: 0 } },
-    a2: { owner: 'pa', units: { infantry: 20, artillery: 0, armour: 0 } },
-    m1: { owner: 'pa', units: { infantry: 5, artillery: 0, armour: 0 } },
-    b1: { owner: 'neutral', units: { infantry: 10, artillery: 0, armour: 0 } },
-    b2: { owner: 'neutral', units: { infantry: 8, artillery: 0, armour: 0 } },
-    f1: { owner: 'neutral', units: { infantry: 6, artillery: 0, armour: 0 } },
-    p1: { owner: 'neutral', units: { infantry: 6, artillery: 0, armour: 0 } },
-    c1: { owner: 'pb', units: { infantry: 30, artillery: 0, armour: 0 } },
-    c2: { owner: 'pb', units: { infantry: 15, artillery: 0, armour: 0 } },
-    d1: { owner: 'pb', units: { infantry: 12, artillery: 0, armour: 0 } },
+    a1: { owner: 'pa', units: 30 },
+    a2: { owner: 'pa', units: 20 },
+    m1: { owner: 'pa', units: 5 },
+    b1: { owner: 'neutral', units: 10 },
+    b2: { owner: 'neutral', units: 8 },
+    f1: { owner: 'neutral', units: 6 },
+    p1: { owner: 'neutral', units: 6 },
+    c1: { owner: 'pb', units: 30 },
+    c2: { owner: 'pb', units: 15 },
+    d1: { owner: 'pb', units: 12 },
   };
 
   var g = (typeof globalThis !== 'undefined') ? globalThis : this;

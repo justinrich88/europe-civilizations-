@@ -129,9 +129,7 @@ function capitulate(state, pid, holder) {
     // cached against the old map of Europe survive the country that drew them.
     setStationOwner(state, ids[i], holder);
     // The surrendering army is not handed over intact (BAL.CAPITULATE_UNIT_KEEP).
-    st.units.infantry *= BAL.CAPITULATE_UNIT_KEEP;
-    st.units.artillery *= BAL.CAPITULATE_UNIT_KEEP;
-    st.units.armour *= BAL.CAPITULATE_UNIT_KEEP;
+    st.units *= BAL.CAPITULATE_UNIT_KEEP;
     moved++;
   }
 

@@ -14,17 +14,12 @@
 
 'use strict';
 
-// Garrison numbers are summed by core/state.js's totalUnits(), never spelled
-// out here — see mapUnitTotal() below for why a local copy of that sum is a
-// liability. That makes core/state.js a LOAD-ORDER dependency of this file:
-// index.html must keep it above render/map.js. Checked here, at load, because
-// the alternative failure is a ReferenceError thrown mid-frame out of a helper
-// that says nothing about script order (known-issue #22: guard, but make the
-// else branch loud — a guard that returns quietly ships an invisible bug).
-if (typeof totalUnits !== 'function') {
-  console.error('[render/map] no totalUnits at load — core/state.js must come ' +
-    'BEFORE render/map.js in index.html. Every garrison on the board will throw.');
-}
+// Garrison numbers come straight off `st.units`, which is a scalar since C1 —
+// see mapUnitTotal() below, which is still the one place in this file that
+// turns that field into a number to draw, and still fails LOUDLY on a bundle of
+// the wrong shape. There used to be a load-order guard here on core/state.js's
+// totalUnits(); with the sum gone this file no longer depends on core/state.js
+// at load at all, so a guard that can no longer fail went with it (#8).
 
 // Fallback ownership palette, used only if POWERS is missing a colour.
 const FALLBACK_POWER_COLORS = [
@@ -253,7 +248,7 @@ function controlOf(state, territoryId) {
 // snapshot through the same path every later frame uses — which is the right
 // design, one renderer and no "static mode" — but it means this object has to
 // satisfy every read liveStations makes, not just `owner`. It did not: with no
-// `units` bag, `const u = st.units; u.infantry` threw, renderBoard() died
+// `units` field at all, reading it threw, renderBoard() died
 // part-way through, and the shell that is supposed to be viewable before
 // app/main.js exists took drawTerritoryLabels down with it.
 //
@@ -279,14 +274,9 @@ function setupPseudoState(D) {
   if (D.STATIONS) {
     for (const sid in D.STATIONS) {
       const setup = (D.SETUP && D.SETUP[sid]) || null;
-      const u = (setup && setup.units) || null;
       stations[sid] = {
         owner: stationOwner(D, sid) || 'neutral',
-        units: {
-          infantry: (u && u.infantry) || 0,
-          artillery: (u && u.artillery) || 0,
-          armour: (u && u.armour) || 0,
-        },
+        units: (setup && typeof setup.units === 'number') ? setup.units : 0,
         connected: true,
         growthMul: 1,
         supplyTo: [],
@@ -1623,23 +1613,28 @@ function mapOrderFlow(rec, next, inFlight, sid, tick) {
   }
 }
 
-// The ONE place in this file that knows how to add up a unit bundle, and it
-// does not know: it defers to core/state.js.
+// The ONE place in this file that turns a station's `units` field into a
+// number to draw.
 //
-// It used to spell the sum out inline as `(u.infantry || 0) + …`, and those
-// `|| 0`s were the most dangerous three characters in the renderer. The unit
-// bundle's SHAPE is about to change (three types collapsing to one scalar), and
-// under that spelling every missing property reads as zero and the whole board
-// draws a confident, silent "0" — no throw, no warning, and test/node.js loads
-// no render/ file so nothing would go red. Routed through totalUnits(), the
-// same mistake produces NaN on every node at once, which is impossible to miss.
+// THE SHAPE CHANGE THIS FUNCTION WAS WRITTEN FOR HAS NOW HAPPENED. It used to
+// spell the sum out inline as `(u.infantry || 0) + …`; those `|| 0`s were the
+// most dangerous three characters in the renderer, because under them a bundle
+// of the wrong shape reads as zero and the whole board draws a confident,
+// silent "0" — no throw, no warning, and test/node.js loads no render/ file so
+// nothing would go red. It was then routed through totalUnits() so the same
+// mistake would produce NaN on every node at once instead.
 //
-// The `!u` guard is a different question and stays: it answers "is there a
-// bundle at all" (the pre-game pseudo-state and a station drawn before its
-// units exist), not "does this bundle have the properties I expect".
+// `units` is now a scalar and totalUnits() is gone, so the loud-failure
+// property has to be kept deliberately rather than inherited: Number() turns
+// any leftover `{infantry,…}` bag into NaN on the spot. Returning `u` bare
+// would hand an object to the caller and let it fail somewhere quieter.
+//
+// The null guard is a different question and stays: it answers "is there a
+// units field at all" (a station drawn before its units exist), not "is this
+// field the shape I expect".
 function mapUnitTotal(u) {
-  if (!u) return 0;
-  return totalUnits(u);
+  if (u === null || u === undefined) return 0;
+  return Number(u);
 }
 
 function mapRingFraction(units, capacity) {

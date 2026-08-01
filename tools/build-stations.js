@@ -44,7 +44,7 @@ const VERTS = sandbox.__V;
 const FIT = PROJ.loadFit();
 
 // ================================================================ CITIES ====
-// { id, name, lon, lat, terr, type, capacity, rate, produces, defense, multiplier }
+// { id, name, lon, lat, terr, type, capacity, rate, defense, multiplier }
 //
 // Density tracks real 1914 size and industry (00-vision.md §2) — this table IS
 // each power's character. Germany dense with producers, Russia sparse over a
@@ -52,18 +52,25 @@ const FIT = PROJ.loadFit();
 // chokepoints.
 //
 // Type bands (01-data-schema.md), obeyed exactly:
-//   holding    infantry             cap 25-80  rate 0.7-1.1  def 1.0      mult null
-//   producer   artillery|armour     cap 15-35  rate 0.4-0.6  def 1.0-1.2  mult null
-//   multiplier infantry             cap  8-15  rate 0.3      def 0.8      mult 1.3-1.8
-//   defensive  infantry             cap 12-25  rate 0.3-0.5  def 2.0-3.5  mult null
+//   holding    cap 25-80  rate 0.7-1.1  def 1.0      mult null
+//   producer   cap 15-35  rate 0.4-0.6  def 1.0-1.2  mult null
+//   multiplier cap  8-15  rate 0.3      def 0.8      mult 1.3-1.8
+//   defensive  cap 12-25  rate 0.3-0.5  def 2.0-3.5  mult null
+//
+// C1 removed the `produces` column. P()'s `makes` argument is kept in the
+// TABLE below and ignored by the emitter: it is the only surviving record of
+// which 16 cities were the Ruhrs and the Leipzigs, and 04-development.md §9c
+// says a producer needs a reason to exist again. Deleting the argument would
+// throw away the answer to "which ones were they" at the moment it becomes
+// worth knowing.
 const H = (id, name, lon, lat, terr, cap, rate) =>
-  ({ id, name, lon, lat, terr, type: 'holding', capacity: cap, rate, produces: 'infantry', defense: 1.0, multiplier: null });
+  ({ id, name, lon, lat, terr, type: 'holding', capacity: cap, rate, defense: 1.0, multiplier: null });
 const P = (id, name, lon, lat, terr, cap, rate, makes, def) =>
-  ({ id, name, lon, lat, terr, type: 'producer', capacity: cap, rate, produces: makes, defense: def, multiplier: null });
+  ({ id, name, lon, lat, terr, type: 'producer', capacity: cap, rate, defense: def, multiplier: null });
 const M = (id, name, lon, lat, terr, cap, mult) =>
-  ({ id, name, lon, lat, terr, type: 'multiplier', capacity: cap, rate: 0.3, produces: 'infantry', defense: 0.8, multiplier: mult });
+  ({ id, name, lon, lat, terr, type: 'multiplier', capacity: cap, rate: 0.3, defense: 0.8, multiplier: mult });
 const F = (id, name, lon, lat, terr, cap, rate, def) =>
-  ({ id, name, lon, lat, terr, type: 'defensive', capacity: cap, rate, produces: 'infantry', defense: def, multiplier: null });
+  ({ id, name, lon, lat, terr, type: 'defensive', capacity: cap, rate, defense: def, multiplier: null });
 
 const CITIES = [
   // --- Germany (9) — dense, three producers, the strongest industrial base ---
@@ -342,7 +349,7 @@ for (const c of CITIES) {
   STATIONS[c.id] = {
     id: c.id, name: c.name, territory: c.terr, pos,
     type: c.type, capacity: c.capacity, rate: c.rate,
-    produces: c.produces, defense: c.defense, multiplier: c.multiplier,
+    defense: c.defense, multiplier: c.multiplier,
   };
   order.push(c.id);
 }
@@ -917,17 +924,11 @@ for (const sid of order) {
   else if (st.type === 'defensive') frac = 0.35 + f * 0.15;
   else frac = 0.15 + f * 0.15;
 
+  // ONE NUMBER. This used to split a producer's opening stock 70/30 into what
+  // it made and the infantry holding the gate; C1 removed the unit types, so a
+  // station's starting garrison is a scalar and the split has nowhere to land.
   const total = Math.max(1, Math.round(st.capacity * frac));
-  const u = { infantry: 0, artillery: 0, armour: 0 };
-  if (st.type === 'producer') {
-    // A producer's stock is what it makes; a little infantry holds the gate.
-    const made = Math.round(total * 0.7);
-    u[st.produces] = made;
-    u.infantry = total - made;
-  } else {
-    u.infantry = total;
-  }
-  SETUP[sid] = { owner, units: u };
+  SETUP[sid] = { owner, units: total };
 }
 
 // Assertions the schema demands.
@@ -949,13 +950,11 @@ for (const sid of order) {
     else if (mine[0] !== p.capital) problems.push(p.id + ' owns ' + mine[0] + ', not its capital ' + p.capital);
   }
   for (const sid of Object.keys(SETUP)) {
-    const u = SETUP[sid].units;
-    const tot = u.infantry + u.artillery + u.armour;
-    // core/state.js's totalUnits() is the canonical way to add a bundle up and
-    // it is NOT reachable here: this script loads data/map.js into a sandbox
-    // and nothing else, deliberately — a generator that had to boot the sim to
-    // check its own output would be circular. So the sum stays spelled out, and
-    // the isFinite gate is what pays for that.
+    const tot = SETUP[sid].units;
+    // There is no sum left to spell out — the garrison IS the number (C1). The
+    // isFinite gate below stays and is doing MORE work than before, not less:
+    // it is now the only thing standing between a malformed capacity and a
+    // SETUP entry of NaN.
     //
     // It is not decoration. `NaN > capacity` is FALSE, like every comparison
     // against NaN, so the moment the unit bundle changes shape this assertion
@@ -1037,7 +1036,7 @@ for (const sid of order) {
   js += '  ' + sid + ': { id: ' + JSON.stringify(sid) + ', name: ' + JSON.stringify(s.name) +
         ', territory: ' + JSON.stringify(s.territory) + ', pos: [' + s.pos[0] + ', ' + s.pos[1] + '],\n' +
         '    type: ' + JSON.stringify(s.type) + ', capacity: ' + s.capacity + ', rate: ' + s.rate +
-        ', produces: ' + JSON.stringify(s.produces) + ', defense: ' + s.defense +
+        ', defense: ' + s.defense +
         ', multiplier: ' + (s.multiplier === null ? 'null' : s.multiplier) +
         ', vision: ' + s.vision + ' },\n';
 }
@@ -1068,8 +1067,7 @@ sc += '};\n\n';
 sc += 'const SETUP = {\n';
 for (const sid of order) {
   const s = SETUP[sid];
-  sc += '  ' + sid + ': { owner: ' + JSON.stringify(s.owner) + ', units: { infantry: ' + s.units.infantry +
-        ', artillery: ' + s.units.artillery + ', armour: ' + s.units.armour + ' } },\n';
+  sc += '  ' + sid + ': { owner: ' + JSON.stringify(s.owner) + ', units: ' + s.units + ' },\n';
 }
 sc += '};\n';
 fs.writeFileSync(OUT_SCENARIO, sc);

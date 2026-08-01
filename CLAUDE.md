@@ -35,6 +35,14 @@ lockstep. Use `core/exact.js` — `exactSin`, `exactExp`, `exactLog`, `exactAtan
 constants `Math.PI` / `Math.LN2` / `Math.SQRT2` ARE exact and are fine.
 `test/exact-tests.js` scans `sim/` and `ai/` and goes red if one comes back.
 
+**Units are a SCALAR.** `st.units` and `w.units` are plain numbers — a count of
+undifferentiated armies. C1 collapsed `{infantry, artillery, armour}` and
+deleted `emptyUnits`/`totalUnits`/`splitUnits`/`addUnits`/`subUnits` with it, so
+`+ - *` are the whole API. Still FLOATS: attrition on an integer count rounds to
+zero and battles never resolve. **The trap this shape introduces is truthiness**
+— a garrison of exactly 0 is a real and common board state, so a believed or
+remembered `units` must be tested with `typeof x === 'number'`, never `if (x)`.
+
 **All input — player and AI — goes through `applyCommand(state, cmd)`.** Nothing
 else may build a wave or mutate a station's owner. Command shapes are
 `{type:'send', owner, sources:[…], target, fraction, standing?}` and
@@ -56,7 +64,7 @@ immediate; see `07-roadmap.md` A3 for why and what it costs.
 ## Running things
 
 ```
-node test/node.js                  the sim suite — 336 tests, 33 suites, headless
+node test/node.js                  the sim suite — 362 tests, 35 suites, headless
 node test/exact-tests.js           the deterministic-maths suite standalone
 node test/queue-tests.js           scheduled commands standalone
 node test/development-tests.js     development standalone
@@ -123,11 +131,22 @@ owner for every one of the 108 cities, same territory count for every power,
 worst relative drift 1.9e-13 across 324 garrison floats. A changed hash with no
 such measurement beside it is an unexplained regression.
 
+**But that instrument has a HORIZON — known-issue #27.** Two trees that compute
+provably the same game, differing only in floating-point association, first
+disagree about a city's owner at **tick 6,978** and differ on 13-23 of 108 by
+tick 12,000. So "same owner for all 108 at 12,000 ticks" is only evidence for a
+change that perturbs **no float at all** — which is what `core/exact.js` and B2
+were. For anything that does move a float, that diff cannot tell a real balance
+change from a last-bit one, and the honest instruments are a `tools/balance.js`
+sweep over enough games that the spread is the statistic, or a comparison built
+so association *cannot* differ. C1 did the latter and got a bit-identical board
+out of a ~700-site rewrite; `04-development.md` §9c is the worked example.
+
 ---
 
 ## Known issues — read `docs/testing/known-issues.md` before debugging
 
-25 numbered entries, five of which recurred after being written down. The ones
+27 numbered entries, five of which recurred after being written down. The ones
 that cost the most time:
 
 | # | The trap |
@@ -144,6 +163,8 @@ that cost the most time:
 | 23 | `tests-ui.html` result depended on browser localStorage — the guide covered the board on a fresh profile and eleven select tests silently never ran |
 | 24 | `var` inside a function body is not a global — `renderBoard()` threw, `app/main.js` caught it, and the board came up EMPTY with 329 tests green |
 | 25 | `_rdoSet(rec, …)` instead of `_rdoSet(rec.v, …)` writes to a plain object and does nothing, with no error |
+| 26 | A one-station PROXY state answers a different question from the real board — the AI is blind to every fort |
+| 27 | Owner identity at 12,000 ticks is not a valid check for a change that perturbs floats |
 
 **macOS only:** files under `~/Downloads` pick up a `com.apple.macl` ACL the
 preview server cannot read, giving silent 404s that look exactly like code bugs

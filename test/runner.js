@@ -326,7 +326,7 @@ function suiteTuning(d) {
   test('required constants are present', function () {
     var need = ['TICK_MS', 'GROWTH_BASE', 'COMBAT_RATE', 'SEND_FRACTION_DEFAULT',
                 'ROUT_THRESHOLD', 'BATTLE_VARIANCE', 'DISCONNECT_DECAY',
-                'CAPITULATE_FRACTION', 'UNITS', 'MATCHUP', 'TERRAIN', 'AI'];
+                'CAPITULATE_FRACTION', 'UNIT', 'TERRAIN', 'AI'];
     var missing = need.filter(function (k) { return B[k] === undefined; });
     assertNone(missing, 'BAL is missing constants');
   });
@@ -390,35 +390,25 @@ function suiteTuning(d) {
       'BATTLE_WOBBLE must stay under BATTLE_VARIANCE or it becomes per-tick variance');
   });
 
-  test('unit roster matches §4', function () {
-    var types = B.UNIT_ORDER;
-    assertEqual(types.length, 3, 'three unit types');
-    types.forEach(function (t) {
-      assert(B.UNITS[t], 'UNITS.' + t + ' missing');
-      assert(B.UNITS[t].atk > 0 && B.UNITS[t].def > 0 && B.UNITS[t].speed > 0,
-        t + ' has a non-positive stat');
-    });
-    assert(B.UNITS.infantry.def > B.UNITS.infantry.atk, 'infantry must defend better than it attacks');
-    assert(B.UNITS.artillery.atk > B.UNITS.infantry.atk, 'artillery must out-attack infantry');
-    assert(B.UNITS.armour.speed > B.UNITS.infantry.speed, 'armour must be faster than infantry');
-    assert(B.UNITS.artillery.speed < B.UNITS.infantry.speed, 'artillery must be slower than infantry');
-    assert(B.UNITS.artillery.fortStrip > 0, 'only artillery strips forts (§4)');
-    assert(B.UNITS.armour.fortStrip === undefined, 'armour must not strip forts');
-  });
-
-  test('matchup triangle: artillery > infantry > armour > artillery', function () {
-    var M = B.MATCHUP;
-    assert(M.artillery.infantry > 1, 'artillery should beat infantry');
-    assert(M.armour.artillery > 1, 'armour should beat artillery');
-    assert(M.infantry.armour > 1, 'infantry should beat armour');
-    assert(M.infantry.artillery < 1 && M.artillery.armour < 1 && M.armour.infantry < 1,
-      'the losing side of each matchup must be below 1');
-    B.UNIT_ORDER.forEach(function (t) { assertEqual(M[t][t], 1.0, 'mirror matchup ' + t); });
-    // Near zero-sum: no type may be quietly best on average.
-    B.UNIT_ORDER.forEach(function (t) {
-      var prod = M[t].infantry * M[t].artillery * M[t].armour;
-      assertBetween(prod, 0.9, 1.15, t + ' matchup product (should be ~1, zero-sum triangle)');
-    });
+  // C1 replaced 'unit roster matches §4' and 'matchup triangle' with this one.
+  // The two that went checked a three-row UNITS table and a 3x3 MATCHUP grid;
+  // neither exists. What survives is the ONE property the rest of the tuning
+  // file is derived against, and it is the one that would be silently
+  // destroyed by "simplifying" BAL.UNIT to atk === def.
+  test('the unit defends better than it attacks (§5)', function () {
+    assert(B.UNIT, 'BAL.UNIT missing');
+    assert(B.UNIT.atk > 0 && B.UNIT.def > 0 && B.UNIT.speed > 0,
+      'the unit has a non-positive stat');
+    assert(B.UNIT.def > B.UNIT.atk,
+      'def must exceed atk — "arrives in volume, good defending" and the ' +
+      'defender edge at parity both rest on it, and every attacking threshold ' +
+      'in this file was derived against it. Got atk ' + B.UNIT.atk +
+      ' / def ' + B.UNIT.def);
+    // The old roster asserted three types existed. Assert the opposite, so a
+    // half-finished reintroduction of types goes red here rather than in a
+    // battle: nothing may re-grow a per-type roster without updating this.
+    assert(B.UNITS === undefined && B.MATCHUP === undefined && B.UNIT_ORDER === undefined,
+      'BAL grew a unit roster back — C1 collapsed the types to one (04-development.md §9)');
   });
 
   test('terrain table covers every terrain kind in the schema', function () {
@@ -432,10 +422,14 @@ function suiteTuning(d) {
     assert(B.TERRAIN.mountains.defense > B.TERRAIN.hills.defense, 'mountains defend better than hills');
   });
 
-  test('sea crossings are slow and punish artillery (§3)', function () {
+  // Was 'sea crossings are slow and punish artillery (§3)'. C1 deleted the two
+  // artillery clauses, so what is left is the crossing itself — plus an
+  // assertion that the deleted constants stay deleted, because a half-restored
+  // SEA_ARTILLERY_LOSS would be read by nothing and would look like a live rule.
+  test('sea crossings are slow, and the same for everyone (§3)', function () {
     assert(B.SEA_SPEED_MUL < 1, 'sea crossings must be slower than land');
-    assert(B.SEA_ARTILLERY_SPEED_MUL < 1, 'artillery crosses even slower');
-    assertBetween(B.SEA_ARTILLERY_LOSS, 0, 0.4, 'SEA_ARTILLERY_LOSS');
+    assert(B.SEA_ARTILLERY_SPEED_MUL === undefined && B.SEA_ARTILLERY_LOSS === undefined,
+      'a per-type sea penalty came back — there are no unit types to charge it to');
   });
 
   test('anti-snowball constants are live (§5)', function () {
@@ -522,13 +516,13 @@ function suiteCombatModel(d) {
     // Additive means a fixed block of power, so a big enough volley always
     // gets through — this test pins that property rather than the number.
     var fortBonus = B.DEFENSE_BONUS_POWER * (3.5 - 1.0);
-    var defenderPower = 20 * B.UNITS.infantry.def + fortBonus;
-    var attackerPower = 60 * B.UNITS.infantry.atk;
+    var defenderPower = 20 * B.UNIT.def + fortBonus;
+    var attackerPower = 60 * B.UNIT.atk;
     assert(attackerPower > defenderPower,
       'a 3:1 volley must beat a full 3.5-defense citadel; got ' +
       Math.round(attackerPower) + ' vs ' + Math.round(defenderPower));
     // ...but it must not be trivial either.
-    assert(30 * B.UNITS.infantry.atk < defenderPower,
+    assert(30 * B.UNIT.atk < defenderPower,
       'a 1.5:1 volley should NOT crack a citadel — the fort bonus is too weak');
   });
 }
@@ -819,10 +813,10 @@ function suiteStationTypes(d) {
   // widened slightly so the map author has room to shade a value without
   // tripping the harness; everything else is the table verbatim.
   var SPEC = {
-    holding:    { produces: ['infantry'],             capacity: [25, 80], rate: [0.7, 1.1], defense: [0.9, 1.1], multiplier: null },
-    producer:   { produces: ['artillery', 'armour'],  capacity: [15, 35], rate: [0.4, 0.6], defense: [1.0, 1.2], multiplier: null },
-    multiplier: { produces: ['infantry'],             capacity: [8, 15],  rate: [0.25, 0.35], defense: [0.7, 0.9], multiplier: [1.3, 1.8] },
-    defensive:  { produces: ['infantry'],             capacity: [12, 25], rate: [0.3, 0.5], defense: [2.0, 3.5], multiplier: null },
+    holding:    { capacity: [25, 80], rate: [0.7, 1.1], defense: [0.9, 1.1], multiplier: null },
+    producer:   { capacity: [15, 35], rate: [0.4, 0.6], defense: [1.0, 1.2], multiplier: null },
+    multiplier: { capacity: [8, 15],  rate: [0.25, 0.35], defense: [0.7, 0.9], multiplier: [1.3, 1.8] },
+    defensive:  { capacity: [12, 25], rate: [0.3, 0.5], defense: [2.0, 3.5], multiplier: null },
   };
 
   test('every station has a known type', function () {
@@ -848,16 +842,19 @@ function suiteStationTypes(d) {
     assertNone(bad, 'stations outside their type\'s stat band');
   });
 
-  test('produces matches the type — only producers make artillery or armour', function () {
+  // Was 'produces matches the type — only producers make artillery or armour'.
+  // C1 deleted the `produces` field along with the unit types, so the check is
+  // inverted: no station may carry one, because a station record that still
+  // named an output would be data nothing reads (the exact shape of drift
+  // known-issue #9 is about).
+  test('no station carries a produces field — C1 removed unit types', function () {
     var bad = [];
     sids.forEach(function (sid) {
-      var st = S[sid], spec = SPEC[st.type];
-      if (!spec) return;
-      if (spec.produces.indexOf(st.produces) < 0) {
-        bad.push(sid + ' (' + st.type + ') produces "' + st.produces + '"');
+      if (S[sid].produces !== undefined) {
+        bad.push(sid + ' still carries produces="' + S[sid].produces + '"');
       }
     });
-    assertNone(bad, 'wrong produces for station type');
+    assertNone(bad, 'a station still names a unit type it makes');
   });
 
   test('only multiplier stations carry a multiplier value', function () {
@@ -890,17 +887,20 @@ function suiteStationTypes(d) {
     assertNone(bad, 'defense values inconsistent with type');
   });
 
-  test('the map actually contains every type, and both producer outputs', function () {
-    var byType = {}, produced = {};
+  test('the map actually contains every station type', function () {
+    var byType = {};
     sids.forEach(function (sid) {
       byType[S[sid].type] = (byType[S[sid].type] || 0) + 1;
-      if (S[sid].type === 'producer') produced[S[sid].produces] = true;
     });
     ['holding', 'producer', 'multiplier', 'defensive'].forEach(function (t) {
       assert(byType[t] > 0, 'no stations of type ' + t + ' exist');
     });
-    assert(produced.artillery, 'nowhere on the map makes artillery — fortresses become untakeable (§4)');
-    assert(produced.armour, 'nowhere on the map makes armour');
+    // The two assertions that stood here — "somewhere on the map makes
+    // artillery, or fortresses become untakeable" and the same for armour —
+    // were the map's half of the §4 contract, and C1 removed the other half.
+    // Nothing replaces them, and that is a REAL GAP rather than a tidy-up:
+    // producer stations now have a lower cap and a lower rate than a plain
+    // holding and nothing at all to show for it. 04-development.md §9c owns it.
     // Holdings are "most of the map" (§2); the specials should stay special.
     assert(byType.holding > sids.length * 0.4, 'holdings should be most of the map');
   });
@@ -1000,16 +1000,14 @@ function suiteSetup(d) {
     assertNone(bad, 'unknown owners');
   });
 
-  test('starting garrisons are non-negative numbers on all three unit types', function () {
+  test('starting garrisons are non-negative finite numbers', function () {
     var bad = [];
     Object.keys(SU).sort().forEach(function (sid) {
       var u = SU[sid].units;
-      if (!u) { bad.push(sid + ' has no units block'); return; }
-      ['infantry', 'artillery', 'armour'].forEach(function (t) {
-        if (typeof u[t] !== 'number' || u[t] < 0 || !isFinite(u[t])) {
-          bad.push(sid + '.' + t + '=' + u[t]);
-        }
-      });
+      // `typeof`, not truthiness: 0 is a legal starting garrison and SETUP has
+      // several. A `!u` guard here would pass a station whose units field was
+      // deleted outright.
+      if (typeof u !== 'number' || u < 0 || !isFinite(u)) bad.push(sid + '.units=' + u);
     });
     assertNone(bad, 'malformed starting garrisons');
   });
@@ -1018,7 +1016,7 @@ function suiteSetup(d) {
     var bad = [];
     Object.keys(SU).sort().forEach(function (sid) {
       if (!S[sid] || !SU[sid].units) return;
-      var tot = totalUnits(SU[sid].units);
+      var tot = (SU[sid].units);
       if (tot > S[sid].capacity + 1e-9) {
         bad.push(sid + ' starts with ' + tot + ' but capacity is ' + S[sid].capacity);
       }
@@ -1225,7 +1223,7 @@ function _cutOffStation(state, LINKS, capital, pid) {
 function _clearBoard(state, owner) {
   Object.keys(state.stations).forEach(function (sid) {
     _setOwner(state, sid, owner);
-    state.stations[sid].units = { infantry: 0, artillery: 0, armour: 0 };
+    state.stations[sid].units = 0;
   });
   state.waves.length = 0;
 }
@@ -1249,9 +1247,9 @@ function suiteSimGrowth(d) {
     assert(sid, 'no holding station on the map');
     var cap = S[sid].capacity, ceil = cap * B.GROWTH_OVERFLOW_CEIL;
     var s = fns.newGame(1);
-    s.stations[sid].units.infantry = cap * 0.99;
+    s.stations[sid].units = cap * 0.99;
     _run(fns, s, 6000);
-    var got = s.stations[sid].units.infantry;
+    var got = s.stations[sid].units;
     assert(got <= ceil * 1.001,
       'station grew past the overflow ceiling: ' + got.toFixed(3) + ' > ' + ceil);
     if (B.GROWTH_OVERFLOW_CEIL > 1) {
@@ -1279,10 +1277,10 @@ function suiteSimGrowth(d) {
     // two samples is the room factor this test exists to measure.
     var oneTick = function (frac) {
       var s = fns.newGame(1);
-      s.stations[sid].units.infantry = cap * frac;
+      s.stations[sid].units = cap * frac;
       s.stations[sid].growthMul = 1;
       _run(fns, s, 1);
-      return s.stations[sid].units.infantry - cap * frac;
+      return s.stations[sid].units - cap * frac;
     };
     var peak = oneTick(0.5), atCap = oneTick(1.0);
     assert(peak > 0, 'a half-full station did not grow at all');
@@ -1297,10 +1295,10 @@ function suiteSimGrowth(d) {
     var cap = S[sid].capacity;
     var sample = function (frac) {
       var s = fns.newGame(1);
-      s.stations[sid].units.infantry = cap * frac;
-      var before = s.stations[sid].units.infantry;
+      s.stations[sid].units = cap * frac;
+      var before = s.stations[sid].units;
       _run(fns, s, 10);
-      return s.stations[sid].units.infantry - before;
+      return s.stations[sid].units - before;
     };
     var mid = sample(0.5), high = sample(0.95), low = sample(0.05);
     assert(mid > high, 'growth at 50% should beat growth at 95%');
@@ -1310,9 +1308,9 @@ function suiteSimGrowth(d) {
   test('an emptied station still recovers (GROWTH_SEED)', function () {
     var sid = _anyStation(S, function (st) { return st.type === 'holding'; });
     var s = fns.newGame(1);
-    s.stations[sid].units.infantry = 0;
+    s.stations[sid].units = 0;
     _run(fns, s, 300);
-    assert(s.stations[sid].units.infantry > 0,
+    assert(s.stations[sid].units > 0,
       'a scoured station never recovers — GROWTH_SEED is not being applied');
   });
 
@@ -1320,10 +1318,10 @@ function suiteSimGrowth(d) {
     var sid = _anyStation(S, function (st) { return st.type === 'holding'; });
     var cap = S[sid].capacity, st = S[sid];
     var s = fns.newGame(1);
-    s.stations[sid].units.infantry = cap * 0.5;
+    s.stations[sid].units = cap * 0.5;
     s.stations[sid].growthMul = 1;
     _run(fns, s, 1);
-    var got = s.stations[sid].units.infantry - cap * 0.5;
+    var got = s.stations[sid].units - cap * 0.5;
     var want = B.GROWTH_BASE * st.rate * (cap * 0.5) * 0.5;
     assertClose(got, want, want * 0.25 + 1e-6, 'one tick of logistic growth');
   });
@@ -1341,16 +1339,16 @@ function suiteSimCombat(d) {
     var s = fns.newGame(seed || 7);
     _clearBoard(s, 'neutral');
     _setOwner(s, sid, 'neutral');
-    s.stations[sid].units.infantry = def;
+    s.stations[sid].units = def;
     // The attacker lands as a wave that has already arrived; sim/combat.js
     // resolves any station holding hostile forces.
     s.waves.push({
       id: 999, owner: '_atk', from: sid, to: sid, path: [sid], hop: 0, progress: 1,
-      units: { infantry: atk, artillery: 0, armour: 0 },
+      units: (atk),
     });
     var ticks = 0;
     while (ticks < 6000 &&
-           s.stations[sid].units.infantry > 0.05 &&
+           s.stations[sid].units > 0.05 &&
            (s.stations[sid].owner === 'neutral')) {
       fns.step(s); ticks++;
     }
@@ -1364,13 +1362,13 @@ function suiteSimCombat(d) {
 
   test('a 2:1 attacker survives with ~87% (§5)', function () {
     var r = fight(200, 100);
-    var left = totalUnits(r.station.units);
+    var left = (r.station.units);
     assertClose(left / 200, 0.866, 0.08, 'survivor fraction after a 2:1 assault');
   });
 
   test('a 1.05:1 attacker does not win intact (§11)', function () {
     var r = fight(105, 100);
-    var left = totalUnits(r.station.units);
+    var left = (r.station.units);
     assert(left / 105 < 0.5, 'trickling in at 1.05:1 kept ' + Math.round(left / 1.05) + '%');
   });
 
@@ -1379,7 +1377,7 @@ function suiteSimCombat(d) {
     // different seeds must differ by roughly BATTLE_VARIANCE, not by the ~0.6%
     // that 300 independent per-tick rolls would average out to.
     var a = fight(200, 100, 11), b = fight(200, 100, 11);
-    assertClose(a.station.units.infantry, b.station.units.infantry, 1e-9,
+    assertClose(a.station.units, b.station.units, 1e-9,
       'same seed must give the same battle — the sim is not deterministic');
   });
 
@@ -1390,11 +1388,11 @@ function suiteSimCombat(d) {
     var run = function (sid) {
       var s = fns.newGame(3);
       _clearBoard(s, 'neutral');
-      s.stations[sid].units.infantry = 30;
+      s.stations[sid].units = 30;
       s.waves.push({ id: 1, owner: '_atk', from: sid, to: sid, path: [sid], hop: 0, progress: 1,
-                     units: { infantry: 90, artillery: 0, armour: 0 } });
+                     units: 90 });
       for (var i = 0; i < 4000 && s.stations[sid].owner === 'neutral'; i++) fns.step(s);
-      return s.stations[sid].units.infantry;
+      return s.stations[sid].units;
     };
     assert(run(fort) < run(open), 'assaulting a fortress must cost more than assaulting a city');
   });
@@ -1417,9 +1415,9 @@ function suiteSimCombat(d) {
     var s = fns.newGame(21);
     _clearBoard(s, 'neutral');
     _setOwner(s, sid, 'neutral');
-    s.stations[sid].units.infantry = 10;
+    s.stations[sid].units = 10;
     s.waves.push({ id: 998, owner: '_atk', from: sid, to: sid, path: [sid], hop: 0, progress: 1,
-                   units: { infantry: 120, artillery: 0, armour: 0 } });
+                   units: 120 });
     for (var i = 0; i < 6000 && s.stations[sid].owner === 'neutral'; i++) fns.step(s);
     assertEqual(s.stations[sid].owner, '_atk',
       'the fixture never captured anything — this test would pass vacuously');
@@ -1512,7 +1510,7 @@ function suiteSimDisconnect(d) {
     // or not. Half capacity is where a CONNECTED station grows fastest, so if
     // the disconnect rule stops firing this assertion cannot be satisfied by
     // any other mechanism in the sim.
-    s.stations[victim].units.infantry = S[victim].capacity * 0.5;
+    s.stations[victim].units = S[victim].capacity * 0.5;
 
     // The precondition, asserted rather than assumed — its absence is exactly
     // what let this test measure the wrong thing for as long as it did.
@@ -1521,9 +1519,9 @@ function suiteSimDisconnect(d) {
       victim + ' still reports connected — the fixture never cut it off, so ' +
       'nothing below this measures disconnection');
 
-    var before = s.stations[victim].units.infantry;
+    var before = s.stations[victim].units;
     _run(fns, s, B.DISCONNECT_GRACE + 400);
-    var after = s.stations[victim].units.infantry;
+    var after = s.stations[victim].units;
     assert(after < before, 'a cut-off station did not decay: ' + before + ' -> ' + after);
   });
 
@@ -1534,14 +1532,14 @@ function suiteSimDisconnect(d) {
     if (!victim) return skipTest('decay rate', 'could not cut a station off from the capital');
     // Below the overstack line on purpose: at 100 units in a city of capacity
     // 28 this measured OVERSTACK_DECAY and called it DISCONNECT_DECAY.
-    s.stations[victim].units.infantry = S[victim].capacity * 0.5;
+    s.stations[victim].units = S[victim].capacity * 0.5;
     _run(fns, s, B.DISCONNECT_GRACE);
     assertEqual(s.stations[victim].connected, false,
       victim + ' still reports connected — this is not measuring decay at all');
-    var start = s.stations[victim].units.infantry;
+    var start = s.stations[victim].units;
     var n = 300;
     _run(fns, s, n);
-    var end = s.stations[victim].units.infantry;
+    var end = s.stations[victim].units;
     var expected = start * Math.pow(1 - B.DISCONNECT_DECAY, n);
     assertClose(end, expected, expected, 'decay over ' + n + ' ticks');
   });
@@ -1550,10 +1548,10 @@ function suiteSimDisconnect(d) {
     var pid = Object.keys(P).sort().filter(function (p) { return p !== 'neutral'; })[0];
     var s = fns.newGame(9);
     var cap = P[pid].capital;
-    s.stations[cap].units.infantry = Math.min(S[cap].capacity, 20);
-    var before = s.stations[cap].units.infantry;
+    s.stations[cap].units = Math.min(S[cap].capacity, 20);
+    var before = s.stations[cap].units;
     _run(fns, s, 200);
-    assert(s.stations[cap].units.infantry >= before, 'a capital should never decay');
+    assert(s.stations[cap].units >= before, 'a capital should never decay');
   });
 }
 
@@ -1621,9 +1619,9 @@ function suiteSimCapitulation(d) {
     // hand-written test is least likely to construct.
     var prey = sids.filter(function (sid) { return s.stations[sid].owner === 'neutral'; })[0];
     assert(!!prey, 'need a neutral station to attack');
-    s.stations[prey].units = { infantry: 6, artillery: 0, armour: 0 };
+    s.stations[prey].units = 6;
     s.stations[prey].attackers = { };
-    s.stations[prey].attackers[victim] = { infantry: 30, artillery: 0, armour: 0 };
+    s.stations[prey].attackers[victim] = 30;
 
     _run(fns, s, B.CAPITULATE_CHECK_INTERVAL * 2 + 20);
 
@@ -1696,10 +1694,10 @@ function suiteSimCapitulation(d) {
     _clearBoard(s, 'neutral');
 
     var all = Object.keys(s.stations).sort();
-    for (var i = 0; i < 10; i++) { _setOwner(s, all[i], champ); s.stations[all[i]].units.infantry = 20; }
+    for (var i = 0; i < 10; i++) { _setOwner(s, all[i], champ); s.stations[all[i]].units = 20; }
     var lastRivalCity = all[10];
     _setOwner(s, lastRivalCity, rival);
-    s.stations[lastRivalCity].units.infantry = 5;
+    s.stations[lastRivalCity].units = 5;
 
     _run(fns, s, 5);
     assert(!s.winner, 'declared a winner while ' + rival + ' still held ' + lastRivalCity);
@@ -1728,10 +1726,10 @@ function suiteSimCommands(d) {
     var granted = _grantFromCapital(s, ctx.data.LINKS, P[pid].capital, pid, 1);
     assert(granted.length === 1, 'could not grant a neighbour of ' + P[pid].capital);
     var src = P[pid].capital, dst = granted[0];
-    s.stations[src].units.infantry = 40;
-    var before = s.stations[src].units.infantry;
+    s.stations[src].units = 40;
+    var before = s.stations[src].units;
     fns.apply(s, { type: 'send', owner: pid, sources: [src], target: dst, fraction: B.SEND_FRACTION_DEFAULT });
-    assertClose(s.stations[src].units.infantry, before * (1 - B.SEND_FRACTION_DEFAULT), 0.01,
+    assertClose(s.stations[src].units, before * (1 - B.SEND_FRACTION_DEFAULT), 0.01,
       'source garrison after a 75% send');
     assert(s.waves.length >= 1, 'no wave was created');
   });
@@ -1741,9 +1739,9 @@ function suiteSimCommands(d) {
     var s = fns.newGame(32);
     var theirs = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === pids[1]; })[0];
     var mine = Object.keys(s.stations).sort().filter(function (sid) { return s.stations[sid].owner === pids[0]; })[0];
-    var before = s.stations[theirs].units.infantry;
+    var before = s.stations[theirs].units;
     fns.apply(s, { type: 'send', owner: pids[0], sources: [theirs], target: mine, fraction: 0.75 });
-    assertClose(s.stations[theirs].units.infantry, before, 1e-9,
+    assertClose(s.stations[theirs].units, before, 1e-9,
       'applyCommand let a power send from a station it does not own');
   });
 
@@ -1787,22 +1785,19 @@ function suiteSimCommands(d) {
   };
 
   test('an "All" send leaves exactly the seed behind, proportioned across types', function () {
-    var b = _spBoard(90, { infantry: 60, artillery: 3, armour: 2 });
+    var b = _spBoard(90, 65);
     var res = fns.apply(b.s, {
       type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 1.0,
     });
     assert(res.ok, 'the send was rejected: ' + res.reason);
 
     var left = b.s.stations[b.src].units;
-    assertClose(totalUnits(left), B.SEND_KEEP_UNITS, 1e-9,
+    assertClose(left, B.SEND_KEEP_UNITS, 1e-9,
       'an "All" send did not leave exactly SEND_KEEP_UNITS behind');
-    // PROPORTIONAL, not "one infantry". What stays is a scaled-down copy of the
-    // garrison — a city that held only artillery must keep artillery, or the
-    // clamp would quietly change the composition of what it saved.
-    var k = B.SEND_KEEP_UNITS / 65;
-    assertClose(left.infantry, 60 * k, 1e-9, 'infantry left behind');
-    assertClose(left.artillery, 3 * k, 1e-9, 'artillery left behind');
-    assertClose(left.armour, 2 * k, 1e-9, 'armour left behind');
+    // The three assertions that stood here checked the leftover was a
+    // PROPORTIONAL slice of the garrison rather than "one infantry", so that a
+    // city holding only guns kept guns. With one unit type there is no
+    // composition to preserve and the total above is the whole claim.
   });
 
   test('the clamp is invisible to a fraction that was never going to empty the city', function () {
@@ -1811,38 +1806,38 @@ function suiteSimCommands(d) {
     // about splitUnits: if the floor were applied unconditionally instead of as
     // a ceiling on the fraction, this send would change and every balance run
     // with it.
-    var b = _spBoard(91, { infantry: 40, artillery: 0, armour: 0 });
+    var b = _spBoard(91, 40);
     var res = fns.apply(b.s, {
       type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 0.25,
     });
     assert(res.ok, 'the send was rejected: ' + res.reason);
-    assertClose(b.s.stations[b.src].units.infantry, 30, 1e-9,
+    assertClose(b.s.stations[b.src].units, 30, 1e-9,
       'a 25% send from a full city is not what it was before the clamp existed');
-    assertClose(totalUnits(res.waves[0].units), 10, 1e-9, 'the wave carried the wrong amount');
+    assertClose((res.waves[0].units), 10, 1e-9, 'the wave carried the wrong amount');
   });
 
   test('a city already at the seed has nothing spare and is refused', function () {
-    var b = _spBoard(92, { infantry: B.SEND_KEEP_UNITS, artillery: 0, armour: 0 });
+    var b = _spBoard(92, (B.SEND_KEEP_UNITS));
     var res = fns.apply(b.s, {
       type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 1.0,
     });
     assertEqual(res.ok, false, 'a city with nothing above the seed sent anyway');
     assertEqual(res.rejected[0].reason, 'too-few-units', 'wrong rejection reason');
-    assertClose(totalUnits(b.s.stations[b.src].units), B.SEND_KEEP_UNITS, 1e-9,
+    assertClose((b.s.stations[b.src].units), B.SEND_KEEP_UNITS, 1e-9,
       'the refused send took units anyway');
   });
 
   test('a city emptied by an "All" volley REGROWS — the whole reason the seed exists', function () {
-    var b = _spBoard(93, { infantry: 60, artillery: 0, armour: 0 });
+    var b = _spBoard(93, 60);
     var res = fns.apply(b.s, {
       type: 'send', owner: b.pid, sources: [b.src], target: b.dst, fraction: 1.0,
     });
     assert(res.ok, 'the send was rejected: ' + res.reason);
-    var after = totalUnits(b.s.stations[b.src].units);
+    var after = (b.s.stations[b.src].units);
     assert(after > 0, 'the source was emptied to exactly zero');
 
     _run(fns, b.s, 1000);
-    var grown = totalUnits(b.s.stations[b.src].units);
+    var grown = (b.s.stations[b.src].units);
     // A tenth of capacity is far above anything rounding could produce and far
     // below what the logistic curve actually reaches, so the assertion is about
     // "it recovers" rather than about the growth constants.
@@ -1986,7 +1981,7 @@ function _routeBoard(fns, seed, pid, own) {
   _clearBoard(s, 'neutral');
   for (var i = 0; i < own.length; i++) {
     _setOwner(s, own[i], pid);
-    s.stations[own[i]].units.infantry = 60;
+    s.stations[own[i]].units = 60;
   }
 
   // Put it as far from the fixture as the link graph allows. Taking the first
@@ -2013,7 +2008,7 @@ function _routeBoard(fns, seed, pid, own) {
   }
   if (far) {
     _setOwner(s, far, pids[0]);
-    s.stations[far].units.infantry = 1;
+    s.stations[far].units = 1;
   }
   return s;
 }
@@ -2123,8 +2118,8 @@ function suiteSimRouting(d) {
     }
     assert(a && b, 'no two neutral stations with different fort levels');
     // Same garrison in both, so unit count cannot explain a difference.
-    s.stations[a].units = { infantry: 20, artillery: 0, armour: 0 };
-    s.stations[b].units = { infantry: 20, artillery: 0, armour: 0 };
+    s.stations[a].units = 20;
+    s.stations[b].units = 20;
     var ta = movePassageToll(s, pid, a), tb = movePassageToll(s, pid, b);
     assert(Math.abs(ta - tb) > 1e-9,
       'two stations with identical garrisons and different defence cost the same ' +
@@ -2157,7 +2152,7 @@ function suiteSimRouting(d) {
     // Hand the chosen middle to an enemy and garrison it heavily. The router
     // should now prefer the other door.
     setStationOwner(s, picked, foe);
-    s.stations[picked].units = { infantry: 80, artillery: 0, armour: 0 };
+    s.stations[picked].units = 80;
     var after = routeFor(s, pid, dm.a, dm.d);
     assert(after, 'the route vanished — passage should make it dearer, not impossible');
     // AVOIDS the expensive door, rather than "takes the other one at index 1".
@@ -2200,19 +2195,19 @@ function suiteSimRouting(d) {
     setStationOwner(s, dm.d, pid);
     setStationOwner(s, dm.mids[0], foe);
     setStationOwner(s, dm.mids[1], foe);
-    s.stations[dm.mids[0]].units = { infantry: 10, artillery: 0, armour: 0 };
-    s.stations[dm.mids[1]].units = { infantry: 10, artillery: 0, armour: 0 };
-    s.stations[dm.a].units = { infantry: 200, artillery: 0, armour: 0 };
+    s.stations[dm.mids[0]].units = 10;
+    s.stations[dm.mids[1]].units = 10;
+    s.stations[dm.a].units = 200;
 
     var res = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
     assert(res.ok, 'the send was refused: ' + JSON.stringify(res.rejected));
     var w = s.waves[s.waves.length - 1];
-    var launched = totalUnits(w.units);
+    var launched = (w.units);
     var guard = 0;
     while (s.waves.indexOf(w) >= 0 && guard++ < 8000) movementTick(s);
 
     assertEqual(s.stations[dm.d].owner, pid, 'the army never reached its own destination');
-    assert(totalUnits(w.units) < launched,
+    assert((w.units) < launched,
       'the army crossed two enemy stations and lost nothing — no toll was charged');
     // And it must have gone THROUGH rather than stopped: the middles are still
     // the enemy's, because passage is not conquest.
@@ -2233,8 +2228,8 @@ function suiteSimRouting(d) {
     setStationOwner(s, dm.d, pid);
     setStationOwner(s, dm.mids[0], pid);
     setStationOwner(s, dm.mids[1], pid);
-    s.stations[dm.a].units = { infantry: 100, artillery: 0, armour: 0 };
-    s.stations[dm.d].units = { infantry: 1, artillery: 0, armour: 0 };
+    s.stations[dm.a].units = 100;
+    s.stations[dm.d].units = 1;
 
     var before = s.orderStats.standDowns;
     fns.apply(s, { type: 'order', owner: pid, stations: [dm.a], target: dm.d });
@@ -2273,7 +2268,7 @@ function suiteSimRouting(d) {
     var picked = first[1];
     var epoch = s.ownerEpoch;
     setStationOwner(s, picked, foe);
-    s.stations[picked].units = { infantry: 90, artillery: 0, armour: 0 };
+    s.stations[picked].units = 90;
     assert(s.ownerEpoch > epoch, 'setStationOwner did not bump ownerEpoch');
     var second = routeFor(s, pid, dm.a, dm.d);
     assert(second.indexOf(picked) < 0 || first.join() !== second.join(),
@@ -2298,14 +2293,14 @@ function suiteSimRouting(d) {
       setStationOwner(s, dm.d, pid);
       setStationOwner(s, dm.mids[0], pid);
       setStationOwner(s, dm.mids[1], pid);
-      s.stations[dm.a].units = { infantry: size, artillery: 0, armour: 0 };
+      s.stations[dm.a].units = (size);
       var res = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
       assert(res.ok, 'send refused at size ' + size);
       var w = s.waves[s.waves.length - 1];
-      var launched = totalUnits(w.units);
+      var launched = (w.units);
       var guard = 0;
       while (s.waves.indexOf(w) >= 0 && guard++ < 8000) movementTick(s);
-      return { lost: launched - totalUnits(w.units), launched: launched };
+      return { lost: launched - (w.units), launched: launched };
     }
 
     var small = marchLoss(30), big = marchLoss(300);
@@ -2334,7 +2329,7 @@ function suiteSimRouting(d) {
     setStationOwner(s, dm.d, pid);
     setStationOwner(s, dm.mids[0], pid);
     setStationOwner(s, dm.mids[1], pid);
-    s.stations[dm.a].units = { infantry: 200, artillery: 0, armour: 0 };
+    s.stations[dm.a].units = 200;
     var res = fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
     assert(res.ok, 'send refused');
     var w = s.waves[s.waves.length - 1];
@@ -2345,7 +2340,7 @@ function suiteSimRouting(d) {
     // is the bug this test found: death was written as "falls to zero", which
     // with MARCH_LOSS_PER_TICK (0.004) under ANNIHILATION_EPSILON (0.01) could
     // never happen, so a starving column vanished with no ticker line at all.
-    w.units = { infantry: B.ANNIHILATION_EPSILON * 1.2, artillery: 0, armour: 0 };
+    w.units = (B.ANNIHILATION_EPSILON * 1.2);
     var before = s.log.length;
     movementTick(s);
     assert(s.waves.indexOf(w) < 0, 'the dead wave is still on the board');
@@ -2361,13 +2356,13 @@ function suiteSimRouting(d) {
     var s = fns.newGame(4242);
     s.aiEnabled = false;
     [dm.a, dm.d, dm.mids[0], dm.mids[1]].forEach(function (x) { setStationOwner(s, x, pid); });
-    s.stations[dm.a].units = { infantry: 100, artillery: 0, armour: 0 };
+    s.stations[dm.a].units = 100;
     fns.apply(s, { type: 'send', owner: pid, sources: [dm.a], target: dm.d, fraction: 1 });
     var w = s.waves[s.waves.length - 1];
-    var launched = totalUnits(w.units);
+    var launched = (w.units);
     var ticks = 0, guard = 0;
     while (s.waves.indexOf(w) >= 0 && guard++ < 8000) { movementTick(s); ticks++; }
-    var lost = launched - totalUnits(w.units);
+    var lost = launched - (w.units);
     // Everything lost must be explained by attrition alone. A toll on own ground
     // would show up as an unexplained lump.
     assertClose(lost, ticks * B.PASSAGE.MARCH_LOSS_PER_TICK, 0.5,
@@ -2426,9 +2421,16 @@ function _beachMove(s, n) {
   return s;
 }
 
-function _beachWave(s, origin, beach, units, owner) {
+// `progress` defaults to 1 — ALREADY AT THE BEACH, which is what every
+// assertion about landing arithmetic wants: no march, no attrition, and the
+// number that lands is the number that was pushed.
+//
+// Pass 0 to make it actually swim. That is the only way left to make "what set
+// out" differ from "what came ashore": before C1 the sea artillery toll did it
+// for free even on a zero-length march, and the test below relied on that.
+function _beachWave(s, origin, beach, units, owner, progress) {
   var w = { id: 1, owner: owner, from: origin, to: beach, path: [origin, beach],
-            hop: 0, progress: 1, units: units };
+            hop: 0, progress: (progress === undefined ? 1 : progress), units: units };
   s.waves.push(w);
   return w;
 }
@@ -2438,15 +2440,15 @@ function _beachWave(s, origin, beach, units, owner) {
 function _beachAssault(fns, fx, atk, def, origin, seed, owner) {
   var pid = owner || '_atk';
   var s = _beachBoard(fns, seed);
-  s.stations[fx.beach].units.infantry = def;
-  _beachWave(s, origin, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, pid);
+  s.stations[fx.beach].units = def;
+  _beachWave(s, origin, fx.beach, (atk), pid);
   for (var t = 0; t < 30000; t++) {
     fns.step(s);
     var st = s.stations[fx.beach];
     if (!s.waves.length && !(st.attackers && Object.keys(st.attackers).length)) break;
   }
   var st2 = s.stations[fx.beach];
-  return { took: st2.owner === pid, left: st2.owner === pid ? totalUnits(st2.units) : 0, state: s };
+  return { took: st2.owner === pid, left: st2.owner === pid ? (st2.units) : 0, state: s };
 }
 
 function suiteSimBeachhead(d) {
@@ -2491,31 +2493,35 @@ function suiteSimBeachhead(d) {
     assert(r.took, 'a 4:1 amphibious assault failed — LANDING_TICKS has made landings impossible');
   });
 
-  // ---- the sea toll, exactly once -----------------------------------------
+  // ---- the crossing costs nothing but time --------------------------------
   //
-  // Landing into a FRIENDLY station so nothing is lost to combat: every unit
-  // that leaves the boat is still countable at the end. Double-charging shows
-  // up as (1 - LOSS)^2, per-echelon charging as (1 - LOSS)^N.
-  test('the sea artillery toll is charged exactly ONCE across a landing', function () {
+  // TOMBSTONE — C1. Three tests stood here and pinned that the SEA_ARTILLERY_LOSS
+  // toll was charged exactly ONCE across a multi-echelon landing: double-charging
+  // showed up as (1 - LOSS)^2 and per-echelon charging as (1 - LOSS)^N. The toll
+  // is gone with the unit types, so what replaces them is the claim that nothing
+  // is charged at all — which is a real assertion, not an absence of one, because
+  // the landing machinery those tests exercised is untouched and could still eat
+  // units by mistake.
+  test('a landing loses NOTHING to the crossing itself', function () {
     var s = _beachBoard(fns, 21);
     _setOwner(s, fx.beach, '_atk');
-    var inf = 40, art = 40;
-    _beachWave(s, fx.src, fx.beach, { infantry: inf, artillery: art, armour: 0 }, '_atk');
+    _beachWave(s, fx.src, fx.beach, 80, '_atk');
 
     _beachMove(s, N + 200);
     assertEqual(s.waves.length, 0, 'the landing never finished — a residue is trickling forever');
 
+    // MARCH ATTRITION IS REAL AND IS NOT WHAT THIS MEASURES (B1). A sea hop is
+    // the slowest thing on the board, so the stack pays a flat per-tick toll the
+    // whole way. The claim is only that no PROPORTIONAL crossing charge exists
+    // on top of it: a 10% one on 80 units would be 8, well outside this band.
     var got = s.stations[fx.beach].units;
-    var want = art * (1 - B.SEA_ARTILLERY_LOSS);
-    assertClose(got.artillery, want, 1e-9,
-      'artillery ashore after one crossing (once = ' + want.toFixed(4) +
-      ', twice = ' + (art * Math.pow(1 - B.SEA_ARTILLERY_LOSS, 2)).toFixed(4) + ')');
-    assertClose(got.infantry, inf, 1e-9, 'infantry must not be taxed by the crossing at all');
+    assert(got > 80 - 8 && got <= 80 + 1e-9,
+      'the crossing charged a proportional toll — ' + got.toFixed(3) + ' of 80 ashore');
   });
 
-  if (!fx.pre) skipTest('the toll is charged once when interception truncates onto a sea hop',
+  if (!fx.pre) skipTest('an intercepted wave truncated onto a sea hop still lands',
     'no land link into ' + fx.src + ' to put a hop in front of the crossing');
-  else test('the toll is charged once when interception truncates onto a sea hop', function () {
+  else test('an intercepted wave truncated onto a sea hop still lands', function () {
     // pre --land--> src --sea--> beach --land--> inland, with the beach in
     // hostile hands so the wave is intercepted there and its path truncated to
     // [pre, src, beach]. The truncated path's final hop is the sea link, so the
@@ -2547,11 +2553,11 @@ function suiteSimBeachhead(d) {
     _setOwner(s, fx.pre, '_atk');
     _setOwner(s, fx.src, '_atk');
     _setOwner(s, fx.beach, '_foe');
-    s.stations[fx.beach].units.infantry = 1;
+    s.stations[fx.beach].units = 1;
     var art = 40;
     var w = { id: 1, owner: '_atk', from: fx.pre, to: fx.beach,
               path: [fx.pre, fx.src, fx.beach], hop: 0, progress: 0,
-              units: { infantry: 60, artillery: art, armour: 0 } };
+              units: ((60) + (art) + (0)) };
     s.waves.push(w);
 
     for (var t = 0; t < 20000 && !w.landing; t++) movementTick(s);
@@ -2567,11 +2573,13 @@ function suiteSimBeachhead(d) {
     // artillery:infantry ratio exactly; the sea toll is artillery-only, so it does
     // not. The ratio therefore isolates "was the crossing toll applied, and once".
     // Charged twice would give (1 - loss)^2 and this fails by a wide margin.
-    var landed = w.landing.per || w.landing;
-    var ratio = landed.artillery / landed.infantry;
-    assertClose(ratio, (art * (1 - B.SEA_ARTILLERY_LOSS)) / 60, 1e-9,
-      'landing composition — the crossing toll was not applied exactly once ' +
-      '(twice would be ' + ((art * Math.pow(1 - B.SEA_ARTILLERY_LOSS, 2)) / 60).toFixed(5) + ')');
+    // The assertion here measured the landing's COMPOSITION as a ratio, to
+    // isolate the artillery-only crossing toll from B1's proportional march
+    // attrition, which cancels out of a ratio. With one unit type there is no
+    // ratio; what survives is that the truncated path built a landing record at
+    // all, which is the property the fixture was constructed to reach.
+    assert(!!w.landing, 'the truncated wave never began a landing');
+    assert(w.landing.total > 0, 'the landing record carries no force');
   });
 
   // ---- units at sea are not in the battle ---------------------------------
@@ -2579,9 +2587,9 @@ function suiteSimBeachhead(d) {
     'LANDING_TICKS is ' + N + ' — there is no at-sea phase to observe');
   else test('units still at sea cannot be hit', function () {
     var s = _beachBoard(fns, 23);
-    s.stations[fx.beach].units.infantry = 60;
+    s.stations[fx.beach].units = 60;
     var atk = 60;
-    var w = _beachWave(s, fx.src, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, '_atk');
+    var w = _beachWave(s, fx.src, fx.beach, (atk), '_atk');
 
     var half = Math.floor(N / 2);
     for (var t = 0; t < half; t++) fns.step(s);
@@ -2590,10 +2598,10 @@ function suiteSimBeachhead(d) {
     // The at-sea remainder is spent ONLY by the echelon schedule. If combat
     // could reach it this number would be smaller, and if the schedule drifted
     // it would not be exact.
-    assertClose(totalUnits(w.units), atk * (1 - half / N), 1e-9,
+    assertClose((w.units), atk * (1 - half / N), 1e-9,
       'the at-sea remainder is not exactly (1 - t/N) of the force — either combat ' +
       'is reaching units still on the water, or echelons are not a fixed fraction');
-    assert(totalUnits(s.stations[fx.beach].attackers['_atk']) < atk * (half / N),
+    assert((s.stations[fx.beach].attackers['_atk']) < atk * (half / N),
       'the force ashore has taken no losses — the beach is not fighting back');
   });
 
@@ -2601,56 +2609,56 @@ function suiteSimBeachhead(d) {
   test('a landing into a station its own side holds merges, never fights', function () {
     var s = _beachBoard(fns, 24);
     _setOwner(s, fx.beach, '_atk');
-    s.stations[fx.beach].units.infantry = 10;
-    _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 0, armour: 0 }, '_atk');
+    s.stations[fx.beach].units = 10;
+    _beachWave(s, fx.src, fx.beach, 50, '_atk');
 
     for (var t = 0; t < N + 200 && s.waves.length; t++) {
       movementTick(s);
       assert(!s.stations[fx.beach].attackers || !s.stations[fx.beach].attackers['_atk'],
         'an echelon landed on friendly ground as an ATTACKER on tick ' + t);
     }
-    assertClose(s.stations[fx.beach].units.infantry, 60, 1e-9,
+    assertClose(s.stations[fx.beach].units, 60, 1e-9,
       'the landing did not merge into the garrison intact');
   });
 
   test('a station that flips to the landing power mid-landing absorbs the rest', function () {
     var s = _beachBoard(fns, 25);
-    s.stations[fx.beach].units.infantry = 20;
+    s.stations[fx.beach].units = 20;
     var atk = 90;
-    var w = _beachWave(s, fx.src, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, '_atk');
+    var w = _beachWave(s, fx.src, fx.beach, (atk), '_atk');
 
     var quarter = Math.max(1, Math.floor(N / 4));
     _beachMove(s, quarter);
     assert(s.waves.length === 1, 'landing ended before the flip could be staged');
-    var atSea = totalUnits(w.units);
+    var atSea = (w.units);
     assert(atSea > 1, 'nothing left at sea to test the merge with');
 
     // The beach changes hands under the landing — the same situation
     // WAVE_REROUTE_ON_LOSS: false describes for a wave in flight.
     s.stations[fx.beach].attackers = null;
     delete s.stations[fx.beach].attackers;
-    s.stations[fx.beach].units = { infantry: 0, artillery: 0, armour: 0 };
+    s.stations[fx.beach].units = 0;
     _setOwner(s, fx.beach, '_atk');
 
     _beachMove(s, N + 200);
     assertEqual(s.waves.length, 0, 'the landing never finished after the flip');
     assert(!s.stations[fx.beach].attackers,
       'the remaining echelons fought their own side after the station flipped to them');
-    assertClose(s.stations[fx.beach].units.infantry, atSea, 1e-9,
+    assertClose(s.stations[fx.beach].units, atSea, 1e-9,
       'the at-sea remainder did not merge into the garrison it now belongs to');
   });
 
   test('a station that flips to a THIRD power mid-landing keeps taking attackers', function () {
     var s = _beachBoard(fns, 26);
-    s.stations[fx.beach].units.infantry = 20;
-    var w = _beachWave(s, fx.src, fx.beach, { infantry: 90, artillery: 0, armour: 0 }, '_atk');
+    s.stations[fx.beach].units = 20;
+    var w = _beachWave(s, fx.src, fx.beach, 90, '_atk');
 
     var quarter = Math.max(1, Math.floor(N / 4));
     _beachMove(s, quarter);
     assert(s.waves.length === 1, 'landing ended before the flip could be staged');
 
     delete s.stations[fx.beach].attackers;
-    s.stations[fx.beach].units = { infantry: 200, artillery: 0, armour: 0 };
+    s.stations[fx.beach].units = 200;
     _setOwner(s, fx.beach, '_third');
 
     movementTick(s);
@@ -2664,7 +2672,7 @@ function suiteSimBeachhead(d) {
     var s = _beachBoard(fns, 27);
     _setOwner(s, fx.beach, '_atk');
     var atk = 50;
-    _beachWave(s, fx.src, fx.beach, { infantry: atk, artillery: 0, armour: 0 }, '_atk');
+    _beachWave(s, fx.src, fx.beach, (atk), '_atk');
 
     // The observable contract of the flush rule is that the water NEVER holds a
     // stack smaller than the smallest one a player is allowed to send. Asserting
@@ -2674,7 +2682,7 @@ function suiteSimBeachhead(d) {
     var t = 0, thinnest = Infinity;
     for (; t < 5000 && s.waves.length; t++) {
       movementTick(s);
-      var atSea = totalUnits(s.waves.length ? s.waves[0].units : { infantry: 0, artillery: 0, armour: 0 });
+      var atSea = (s.waves.length ? s.waves[0].units : 0);
       if (atSea > 0 && atSea < thinnest) thinnest = atSea;
       assert(atSea === 0 || atSea > B.MIN_SEND_UNITS,
         'tick ' + t + ' left ' + atSea.toFixed(4) + ' units at sea, under MIN_SEND_UNITS ' +
@@ -2683,22 +2691,22 @@ function suiteSimBeachhead(d) {
     assertEqual(s.waves.length, 0, 'the landing wave outlived its schedule');
     assert(t <= N, 'the landing took ' + t + ' ticks against LANDING_TICKS ' + N);
     assert(thinnest < Infinity, 'the landing never had anything at sea — fixture is not landing');
-    assertClose(s.stations[fx.beach].units.infantry, atk, 1e-9,
+    assertClose(s.stations[fx.beach].units, atk, 1e-9,
       'units were lost or left behind in the flush');
   });
 
   // ---- the land path is untouched -----------------------------------------
   test('a LAND arrival is still instant and never sets a landing', function () {
     var s = _beachBoard(fns, 28);
-    s.stations[fx.beach].units.infantry = 5;
-    var w = _beachWave(s, fx.land, fx.beach, { infantry: 40, artillery: 0, armour: 0 }, '_atk');
+    s.stations[fx.beach].units = 5;
+    var w = _beachWave(s, fx.land, fx.beach, 40, '_atk');
 
     fns.step(s);
     assertEqual(s.waves.length, 0, 'a land arrival was deferred past the tick it was seen on');
     assert(!w.landing, 'a land arrival built a landing record');
     // Everything is in the battle on the tick it landed; combat has run once,
     // so allow for one tick of attrition rather than asserting the raw 40.
-    var ashore = totalUnits(s.stations[fx.beach].attackers['_atk']);
+    var ashore = (s.stations[fx.beach].attackers['_atk']);
     assertBetween(ashore, 39, 40, 'a land arrival did not commit its whole stack at once');
   });
 
@@ -2706,17 +2714,18 @@ function suiteSimBeachhead(d) {
     // The convention tests everywhere else lean on: push { progress: 1,
     // path: [sid] } and it resolves this tick with no crossing and no landing.
     var s = _beachBoard(fns, 29);
-    s.stations[fx.beach].units.infantry = 5;
+    s.stations[fx.beach].units = 5;
     var w = { id: 1, owner: '_atk', from: fx.beach, to: fx.beach, path: [fx.beach],
-              hop: 0, progress: 1, units: { infantry: 30, artillery: 10, armour: 0 } };
+              hop: 0, progress: 1, units: 40 };
     s.waves.push(w);
     fns.step(s);
     assertEqual(s.waves.length, 0, 'a zero-hop wave did not resolve on the tick it was seen');
     assert(!w.landing, 'a zero-hop wave built a landing record');
-    // A crossing toll would leave 9.0; one tick of combat leaves ~9.99. The
-    // threshold sits between the two on purpose.
-    assert(s.stations[fx.beach].attackers['_atk'].artillery > 9.5,
-      'a zero-hop wave was charged a sea crossing it never made');
+    // The stack must arrive essentially intact: it walked no link at all, so
+    // it owes neither a crossing toll nor march attrition. One tick of combat
+    // against the 5-unit garrison is the only thing allowed to touch it.
+    assert(s.stations[fx.beach].attackers['_atk'] > 39,
+      'a zero-hop wave was charged for a journey it never made');
   });
 
   // ---- the landing EVENT ---------------------------------------------------
@@ -2734,8 +2743,8 @@ function suiteSimBeachhead(d) {
 
   test('an opposed landing logs exactly one landing event, in the sim log shape', function () {
     var s = _beachBoard(fns, 30);
-    s.stations[fx.beach].units.infantry = 20;
-    _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 0, armour: 0 }, '_atk');
+    s.stations[fx.beach].units = 20;
+    _beachWave(s, fx.src, fx.beach, 50, '_atk');
 
     var at = s.tick;
     _beachMove(s, N + 200);
@@ -2778,16 +2787,22 @@ function suiteSimBeachhead(d) {
     // reaches station.attackers and demands they agree. Movement phase only, so
     // no combat eats the evidence.
     var s = _beachBoard(fns, 31);
-    s.stations[fx.beach].units.infantry = 20;
-    // Artillery on board on purpose: the sea toll is charged before the landing
-    // record is built, so a sentence written from the PRE-toll stack would
-    // over-report by SEA_ARTILLERY_LOSS and nothing else here would notice.
-    _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 20, armour: 0 }, '_atk');
-    _beachMove(s, N + 200);
+    s.stations[fx.beach].units = 20;
+    // SWUM, not teleported — progress 0 rather than the helper's default 1.
+    // This test needs "what set out" and "what came ashore" to be different
+    // numbers, or it passes just as happily against a sentence written from the
+    // pre-landing stack (known-issue #8). The sea artillery toll used to supply
+    // that difference for free; C1 deleted it, so the wave now marches the
+    // crossing and pays B1's per-tick attrition instead. ~4% over ~860 ticks on
+    // this link, which is far outside the tolerance below.
+    _beachWave(s, fx.src, fx.beach, 70, '_atk', 0);
+    _beachMove(s, 40000);
 
     assertEqual(s.waves.length, 0, 'the landing never finished');
-    var ashore = totalUnits(s.stations[fx.beach].attackers['_atk']);
-    assert(ashore < 70 - 1e-9, 'the sea artillery toll was never charged — fixture is not a crossing');
+    var ashore = (s.stations[fx.beach].attackers['_atk']);
+    assert(ashore < 70 - 0.5,
+      'nothing measurable was lost in transit (' + ashore.toFixed(3) + ' of 70), so ' +
+      'this test cannot tell a correct sentence from one written before the landing');
 
     var m = _LAND_RE.exec(_beachLandings(s)[0].text);
     assert(!!m, 'landing sentence did not parse');
@@ -2807,8 +2822,8 @@ function suiteSimBeachhead(d) {
     // events that carry no news.
     var s = _beachBoard(fns, 32);
     _setOwner(s, fx.beach, '_atk');
-    s.stations[fx.beach].units.infantry = 10;
-    var w = _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 0, armour: 0 }, '_atk');
+    s.stations[fx.beach].units = 10;
+    var w = _beachWave(s, fx.src, fx.beach, 50, '_atk');
     _beachMove(s, N + 200);
 
     assert(!!w.landing, 'the fixture never landed — this test would pass vacuously');
@@ -2818,8 +2833,8 @@ function suiteSimBeachhead(d) {
 
   test('a LAND arrival logs no landing', function () {
     var s = _beachBoard(fns, 33);
-    s.stations[fx.beach].units.infantry = 5;
-    _beachWave(s, fx.land, fx.beach, { infantry: 40, artillery: 0, armour: 0 }, '_atk');
+    s.stations[fx.beach].units = 5;
+    _beachWave(s, fx.land, fx.beach, 40, '_atk');
     movementTick(s);
     assertEqual(_beachLandings(s).length, 0, 'an overland arrival was logged as a landing');
   });
@@ -2832,8 +2847,8 @@ function suiteSimBeachhead(d) {
     // log, and the rng cursor is untouched by the landing itself.
     function play(seed) {
       var s = _beachBoard(fns, seed);
-      s.stations[fx.beach].units.infantry = 20;
-      _beachWave(s, fx.src, fx.beach, { infantry: 50, artillery: 20, armour: 0 }, '_atk');
+      s.stations[fx.beach].units = 20;
+      _beachWave(s, fx.src, fx.beach, 70, '_atk');
       for (var t = 0; t < N + 200; t++) fns.step(s);
       return s;
     }
@@ -2905,9 +2920,7 @@ function _ordBoard(fns, d, seed, pid, n) {
   var granted = _grantFromCapital(s, d.LINKS, d.POWERS[pid].capital, pid, n);
   var own = granted.concat([d.POWERS[pid].capital]).sort();
   for (var i = 0; i < own.length; i++) {
-    s.stations[own[i]].units = {
-      infantry: d.STATIONS[own[i]].capacity * 0.9, artillery: 0, armour: 0,
-    };
+    s.stations[own[i]].units = (d.STATIONS[own[i]].capacity * 0.9);
   }
   return { s: s, own: own };
 }
@@ -2967,7 +2980,7 @@ function _ordShipped(s, from, sinceWaveId) {
     var w = s.waves[i];
     if (w.from !== from) continue;
     if (sinceWaveId !== undefined && w.id < sinceWaveId) continue;
-    var u = totalUnits(w.units);
+    var u = (w.units);
     out.total += u;
     out.byTarget[w.to] = (out.byTarget[w.to] || 0) + u;
     out.n++;
@@ -3032,15 +3045,15 @@ function suiteStandingOrders(d) {
     // warehouse. The fixture builds every station at 90% of capacity, so the one
     // being supplied is drained first — the real case is a city that has just
     // been fought over, not one already full.
-    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = 1;
 
-    var before = totalUnits(b.s.stations[dest].units);
+    var before = (b.s.stations[dest].units);
     _run(fns, b.s, 400);
 
     assert(b.s.orderStats.sends > 0, 'no stream was ever sent');
-    assert(totalUnits(b.s.stations[dest].units) > before + 10,
+    assert((b.s.stations[dest].units) > before + 10,
       'the destination did not accumulate: ' + before.toFixed(1) + ' -> ' +
-      totalUnits(b.s.stations[dest].units).toFixed(1));
+      (b.s.stations[dest].units).toFixed(1));
     // Every wave the phase created is a standing one aimed at the named city.
     // This is the assertion the whole rewrite exists for: the sim no longer
     // CHOOSES a destination, so a wave aimed anywhere else is not a worse guess,
@@ -3057,7 +3070,7 @@ function suiteStandingOrders(d) {
     var b = _ordBoard(fns, d, 52, pid, 8);
     var dest = d.POWERS[pid].capital;
     _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
-    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = 1;
 
     fns.step(b.s);        // tick 0 is a sweep tick
     assert(b.s.waves.length > 0, 'the first sweep created no streams at all');
@@ -3105,14 +3118,10 @@ function suiteStandingOrders(d) {
 
     // Stocked well over capacity so the outflow is large. Over-capacity is legal
     // and is exactly the state a city that has just been reinforced is in.
-    b.s.stations[from].units = {
-      infantry: d.STATIONS[from].capacity * 3, artillery: 0, armour: 0,
-    };
+    b.s.stations[from].units = (d.STATIONS[from].capacity * 3);
     for (i = 0; i < targets.length; i++) {
       var stuff = (fullOne && targets[i] === fullOne);
-      b.s.stations[targets[i]].units = {
-        infantry: stuff ? d.STATIONS[targets[i]].capacity : 1, artillery: 0, armour: 0,
-      };
+      b.s.stations[targets[i]].units = (stuff ? d.STATIONS[targets[i]].capacity : 1);
     }
     return { s: b.s, from: from, targets: targets };
   }
@@ -3151,9 +3160,7 @@ function suiteStandingOrders(d) {
 
     var full = _ordSplitBoard(81, 3, null);
     var stuffed = full.targets[1];
-    full.s.stations[stuffed].units = {
-      infantry: d.STATIONS[stuffed].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
-    };
+    full.s.stations[stuffed].units = (d.STATIONS[stuffed].capacity * _ordCeilMul(d));
     // What the planner says BEFORE the sweep, so the reason is asserted and not
     // merely the outcome.
     var pre = standingOrderNext(full.s, full.from);
@@ -3200,10 +3207,10 @@ function suiteStandingOrders(d) {
     var from = d.POWERS[pid].capital;
     var to = b.own.filter(function (x) { return x !== from; })[0];
     _ordLink(b.s, pid, [from], to);
-    b.s.stations[to].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[to].units = 1;
 
     growthTick(b.s);
-    var have = totalUnits(b.s.stations[from].units);
+    var have = (b.s.stations[from].units);
     var cap = d.STATIONS[from].capacity;
     var expect = O.SEND_FRACTION * (have - O.KEEP_FLOOR * cap);
     assert(expect >= O.MIN_SEND, 'VACUITY: the fixture source cannot clear MIN_SEND');
@@ -3347,7 +3354,7 @@ function suiteStandingOrders(d) {
       if (standing) cmd.standing = true;
       var res = fns.apply(b.s, cmd);
       assert(res.ok, 'the fixture send was rejected: ' + res.reason);
-      var carried = totalUnits(res.waves[0].units);
+      var carried = (res.waves[0].units);
 
       // March until the wave is one hop short of arriving, then take the
       // destination away from underneath it.
@@ -3357,11 +3364,11 @@ function suiteStandingOrders(d) {
         for (var i = 0; i < b.s.waves.length; i++) if (b.s.waves[i].id === res.waves[0].id) wv = b.s.waves[i];
         if (!flipped && wv && wv.hop >= wv.path.length - 2) {
           _setOwner(b.s, to, 'fra');
-          b.s.stations[to].units = { infantry: 30, artillery: 0, armour: 0 };
+          b.s.stations[to].units = 30;
           flipped = true;
         }
         if (flipped && !wv) break;
-        var midBefore = totalUnits(b.s.stations[mid].units);
+        var midBefore = (b.s.stations[mid].units);
         fns.step(b.s);
         if (flipped && wv && !wv.dead) continue;
         if (flipped) { return { b: b, to: to, mid: mid, carried: carried, midBefore: midBefore }; }
@@ -3371,17 +3378,17 @@ function suiteStandingOrders(d) {
 
     var st = race(true);
     var atk = st.b.s.stations[st.to].attackers;
-    assert(!atk || !atk[pid] || totalUnits(atk[pid]) <= 0,
+    assert(!atk || !atk[pid] || (atk[pid]) <= 0,
       'a standing wave attacked a station that flipped mid-transit');
     assertEqual(st.b.s.orderStats.fights, 0, 'the standing tripwire fired');
     assertEqual(st.b.s.orderStats.standDowns, 1, 'the standing wave did not stand down');
-    assert(totalUnits(st.b.s.stations[st.mid].units) > st.midBefore + st.carried * 0.9,
+    assert((st.b.s.stations[st.mid].units) > st.midBefore + st.carried * 0.9,
       'the standing wave did not merge into the last station its owner still holds (' +
       st.mid + ': expected +' + st.carried.toFixed(1) + ')');
 
     var mn = race(false);
     var atk2 = mn.b.s.stations[mn.to].attackers;
-    assert(!!(atk2 && atk2[pid] && totalUnits(atk2[pid]) > 0),
+    assert(!!(atk2 && atk2[pid] && (atk2[pid]) > 0),
       'CONTROL FAILED: a manual wave did not fight the flipped station, so this ' +
       'fixture never actually stages the race it claims to');
     assertEqual(mn.b.s.orderStats.standDowns, 0, 'a manual wave stood down — it must not');
@@ -3415,10 +3422,10 @@ function suiteStandingOrders(d) {
     // asserting about a floor that was never approached. A destination that
     // keeps SPENDING what it receives is the case where a stream runs
     // continuously, and it is the case the floor exists for.
-    b.s.stations[dest].units = { infantry: 0, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = 0;
 
     // Start the biggest source EXACTLY at its floor.
-    b.s.stations[starved].units = { infantry: floorOf(starved), artillery: 0, armour: 0 };
+    b.s.stations[starved].units = (floorOf(starved));
 
     // One tick, which is a sweep tick. A station at its floor must ship
     // nothing; the others must ship something, or "nothing shipped" proves
@@ -3440,13 +3447,13 @@ function suiteStandingOrders(d) {
       // every individual send, and an end-state check is satisfied by regrowth
       // papering over a city that was briefly stripped bare.
       var pre = {}, j;
-      for (j = 0; j < sources.length; j++) pre[sources[j]] = totalUnits(b.s.stations[sources[j]].units);
+      for (j = 0; j < sources.length; j++) pre[sources[j]] = (b.s.stations[sources[j]].units);
       var wavesBefore = b.s.waves.length;
       fns.step(b.s);
-      b.s.stations[dest].units = { infantry: 0, artillery: 0, armour: 0 };   // spent at the front
+      b.s.stations[dest].units = 0;   // spent at the front
       for (j = 0; j < sources.length; j++) {
         var sid = sources[j];
-        var now = totalUnits(b.s.stations[sid].units);
+        var now = (b.s.stations[sid].units);
         if (now < floorOf(sid) - 1e-9) {
           breaches.push(sid + ' fell to ' + now.toFixed(2) + ' against a floor of ' +
             floorOf(sid).toFixed(2));
@@ -3489,12 +3496,12 @@ function suiteStandingOrders(d) {
       }
       assert(front.length > 0, 'fixture has no front');
       var dest = front.slice().sort()[0];
-      b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };   // just taken
+      b.s.stations[dest].units = 1;   // just taken
       if (withOrders) {
         _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
       }
       _run(fns, b.s, 600);
-      return { mass: totalUnits(b.s.stations[dest].units), s: b.s, dest: dest,
+      return { mass: (b.s.stations[dest].units), s: b.s, dest: dest,
                cap: d.STATIONS[dest].capacity };
     };
 
@@ -3531,9 +3538,7 @@ function suiteStandingOrders(d) {
     var sources = b.own.filter(function (x) { return x !== dest; });
     var i;
     _ordLink(b.s, pid, sources, dest);
-    b.s.stations[dest].units = {
-      infantry: d.STATIONS[dest].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
-    };
+    b.s.stations[dest].units = (d.STATIONS[dest].capacity * _ordCeilMul(d));
 
     // VACUITY GUARD: the sources must be willing to ship, or "nothing shipped"
     // says nothing about the ceiling.
@@ -3545,7 +3550,7 @@ function suiteStandingOrders(d) {
       'would pass with the ceiling removed');
 
     var before = {};
-    for (i = 0; i < b.own.length; i++) before[b.own[i]] = totalUnits(b.s.stations[b.own[i]].units);
+    for (i = 0; i < b.own.length; i++) before[b.own[i]] = (b.s.stations[b.own[i]].units);
     _run(fns, b.s, 200);
 
     assertEqual(b.s.orderStats.sends, 0, 'a destination at capacity was shipped to anyway');
@@ -3554,7 +3559,7 @@ function suiteStandingOrders(d) {
     for (i = 0; i < b.own.length; i++) {
       var sid = b.own[i];
       if (sid === dest) continue;
-      if (totalUnits(b.s.stations[sid].units) < before[sid] - 1e-9) lost.push(sid);
+      if ((b.s.stations[sid].units) < before[sid] - 1e-9) lost.push(sid);
     }
     assertNone(lost, 'a source lost units with nowhere to send them');
   });
@@ -3565,7 +3570,7 @@ function suiteStandingOrders(d) {
     var cap = d.STATIONS[dest].capacity;
     var i;
     _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
-    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = 1;
 
     // Long enough to have reached the old runaway equilibrium several times
     // over: at ~0.26 units/tick of inflow against (u - cap) x OVERSTACK_DECAY,
@@ -3574,7 +3579,7 @@ function suiteStandingOrders(d) {
     var peak = 0, sizingBreaches = [], prevSends = 0, checks = 0;
     for (var t = 0; t < 3000; t++) {
       fns.step(b.s);
-      var here = totalUnits(b.s.stations[dest].units);
+      var here = (b.s.stations[dest].units);
       if (here > peak) peak = here;
 
       // THE SIZING INVARIANT, exact, checked on the ticks where a stream was
@@ -3594,7 +3599,7 @@ function suiteStandingOrders(d) {
         checks++;
         var air = 0;
         for (i = 0; i < b.s.waves.length; i++) {
-          if (b.s.waves[i].to === dest) air += totalUnits(b.s.waves[i].units);
+          if (b.s.waves[i].to === dest) air += (b.s.waves[i].units);
         }
         if (here + air > cap * _ordCeilMul(d) + 1e-6) {
           sizingBreaches.push('tick ' + b.s.tick + ': ' + here.toFixed(2) + ' + ' +
@@ -3631,7 +3636,7 @@ function suiteStandingOrders(d) {
     var sources = b.own.filter(function (s2) { return s2 !== dest; }).sort().slice(0, 3);
     _ordLink(b.s, pid, sources, dest);
 
-    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = 1;
     var wants = sources.map(function (sid) { return standingOrderSend(b.s, sid); });
     var total = wants[0] + wants[1] + wants[2];
     var mx = Math.max(wants[0], Math.max(wants[1], wants[2]));
@@ -3641,13 +3646,13 @@ function suiteStandingOrders(d) {
     assert(room < total, 'fixture headroom does not force an overshoot');
     var ceiling = cap * _ordCeilMul(d);
     assert(ceiling - room > 0, 'fixture destination is too small for this construction');
-    b.s.stations[dest].units = { infantry: ceiling - room, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = (ceiling - room);
 
     fns.step(b.s);            // tick 0 is a sweep tick
     var air = 0, shippers = 0;
     for (var i = 0; i < b.s.waves.length; i++) {
       if (b.s.waves[i].to !== dest) continue;
-      air += totalUnits(b.s.waves[i].units);
+      air += (b.s.waves[i].units);
       shippers++;
     }
     assert(shippers >= 2, 'only ' + shippers + ' source(s) shipped — the aggregation this ' +
@@ -3667,7 +3672,7 @@ function suiteStandingOrders(d) {
       if (wants[i] < d.BAL.ORDERS.MIN_SEND) continue;
       var shipped = 0;
       for (var j = 0; j < b.s.waves.length; j++) {
-        if (b.s.waves[j].from === sources[i]) shipped += totalUnits(b.s.waves[j].units);
+        if (b.s.waves[j].from === sources[i]) shipped += (b.s.waves[j].units);
       }
       if (shipped < wants[i] - 1e-6) clampedOrSkipped++;
     }
@@ -3704,7 +3709,7 @@ function suiteStandingOrders(d) {
       'source wants ' + want.toFixed(2) + ', so half of it is under MIN_SEND');
 
     var ceiling = d.STATIONS[dest].capacity * _ordCeilMul(d);
-    b.s.stations[dest].units = { infantry: ceiling - room, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = (ceiling - room);
 
     var nx = standingOrderNext(b.s, from);
     assertEqual(nx.blocked, null, 'the edge was skipped rather than clamped');
@@ -3718,7 +3723,7 @@ function suiteStandingOrders(d) {
     var got = _ordShipped(b.s, from);
     assertEqual(got.n, 1, 'the sweep did not ship exactly one stream');
     assertClose(got.total, room, 1e-9, 'the sweep shipped a different amount from the plan');
-    assert(totalUnits(b.s.stations[dest].units) + got.total <= ceiling + 1e-6,
+    assert((b.s.stations[dest].units) + got.total <= ceiling + 1e-6,
       'the send overshot the destination ceiling it was sized against');
   });
 
@@ -3769,16 +3774,12 @@ function suiteStandingOrders(d) {
     var i;
     _ordLink(b.s, pid, b.own.filter(function (x) { return x !== dest; }), dest);
     for (i = 0; i < b.own.length; i++) {
-      b.s.stations[b.own[i]].units = {
-        infantry: d.STATIONS[b.own[i]].capacity * 0.6, artillery: 0, armour: 0,
-      };
+      b.s.stations[b.own[i]].units = (d.STATIONS[b.own[i]].capacity * 0.6);
     }
-    b.s.stations[dest].units = {
-      infantry: d.STATIONS[dest].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
-    };
+    b.s.stations[dest].units = (d.STATIONS[dest].capacity * _ordCeilMul(d));
 
     var before = {};
-    for (i = 0; i < b.own.length; i++) before[b.own[i]] = totalUnits(b.s.stations[b.own[i]].units);
+    for (i = 0; i < b.own.length; i++) before[b.own[i]] = (b.s.stations[b.own[i]].units);
     _run(fns, b.s, 400);            // must not throw
 
     assertEqual(b.s.orderStats.sends, 0, 'a board with no headroom anywhere still shipped');
@@ -3786,7 +3787,7 @@ function suiteStandingOrders(d) {
     for (i = 0; i < b.own.length; i++) {
       var sid = b.own[i];
       if (sid === dest) continue;
-      if (totalUnits(b.s.stations[sid].units) <= before[sid]) stalled.push(sid);
+      if ((b.s.stations[sid].units) <= before[sid]) stalled.push(sid);
     }
     assertNone(stalled, 'a source with nowhere to ship did not keep growing');
   });
@@ -4072,8 +4073,8 @@ function suiteStandingOrders(d) {
     // destinations fill as they are fed and the same sources go from streaming
     // to blocked inside one run, which is what makes the vacuity guard below
     // satisfiable without two fixtures.
-    b.s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
-    b.s.stations[second].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[dest].units = 1;
+    b.s.stations[second].units = 1;
 
     var s = b.s;
     var checks = 0, ship = 0, block = 0, reasons = {}, multi = 0;
@@ -4086,8 +4087,8 @@ function suiteStandingOrders(d) {
     // Applied AFTER every phase, so the prediction is always taken on the same
     // board the sweep then acts on.
     var spend = function () {
-      s.stations[dest].units = { infantry: 1, artillery: 0, armour: 0 };
-      s.stations[second].units = { infantry: 1, artillery: 0, armour: 0 };
+      s.stations[dest].units = 1;
+      s.stations[second].units = 1;
     };
 
     for (var t = 0; t < 1400 && !s.winner; t++) {
@@ -4103,7 +4104,7 @@ function suiteStandingOrders(d) {
       var pred = {}, before = {};
       for (i = 0; i < sources.length; i++) {
         pred[sources[i]] = standingOrderNext(s, sources[i]);
-        before[sources[i]] = totalUnits(s.stations[sources[i]].units);
+        before[sources[i]] = (s.stations[sources[i]].units);
         if (pred[sources[i]].edges.length > 1) multi++;
       }
       // The bulk accessor two renderers actually call must say the same thing
@@ -4128,8 +4129,8 @@ function suiteStandingOrders(d) {
       for (i = 0; i < s.waves.length; i++) {
         var w = s.waves[i];
         if (w.id < firstNew) continue;
-        got[w.from] = (got[w.from] || 0) + totalUnits(w.units);
-        (gotTo[w.from] || (gotTo[w.from] = {}))[w.to] = totalUnits(w.units);
+        got[w.from] = (got[w.from] || 0) + (w.units);
+        (gotTo[w.from] || (gotTo[w.from] = {}))[w.to] = (w.units);
       }
 
       for (i = 0; i < sources.length; i++) {
@@ -4164,7 +4165,7 @@ function suiteStandingOrders(d) {
           if (!known) destWrong.push('tick ' + s.tick + ' ' + f + ' shipped to ' + to2 +
             ', which the plan never mentioned');
         }
-        var drained = before[f] - totalUnits(s.stations[f].units);
+        var drained = before[f] - (s.stations[f].units);
         if (Math.abs(drained - sent) > tol) {
           drainWrong.push('tick ' + s.tick + ' ' + f + ': lost ' + drained.toFixed(6) +
             ' but shipped ' + sent.toFixed(6));
@@ -4221,9 +4222,7 @@ function suiteStandingOrders(d) {
     b = _ordBoard(fns, d, 71, pid, 7);
     sources = b.own.filter(function (x) { return x !== cap; });
     _ordLink(b.s, pid, sources, cap);
-    b.s.stations[cap].units = {
-      infantry: d.STATIONS[cap].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
-    };
+    b.s.stations[cap].units = (d.STATIONS[cap].capacity * _ordCeilMul(d));
     var willing = 0, sawFull = 0;
     for (i = 0; i < sources.length; i++) {
       if (standingOrderSend(b.s, sources[i]) > 0) willing++;
@@ -4247,19 +4246,15 @@ function suiteStandingOrders(d) {
     b = _ordBoard(fns, d, 72, pid, 7);
     sources = b.own.filter(function (x) { return x !== cap; });
     _ordLink(b.s, pid, sources, cap);
-    b.s.stations[cap].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[cap].units = 1;
     var floored = sources[0];
-    b.s.stations[floored].units = {
-      infantry: d.STATIONS[floored].capacity * O.KEEP_FLOOR, artillery: 0, armour: 0,
-    };
+    b.s.stations[floored].units = (d.STATIONS[floored].capacity * O.KEEP_FLOOR);
     assertEqual(note(standingOrderNext(b.s, floored)).blocked, 'at-keep-floor',
       floored + ' at exactly its keep floor did not report at-keep-floor');
 
     // below-min-send — just above the floor, so the surplus is real but the
     // 12% share of it is under the 2.0-unit minimum stream.
-    b.s.stations[floored].units = {
-      infantry: d.STATIONS[floored].capacity * O.KEEP_FLOOR + 1, artillery: 0, armour: 0,
-    };
+    b.s.stations[floored].units = (d.STATIONS[floored].capacity * O.KEEP_FLOOR + 1);
     assert(standingOrderSend(b.s, floored) === 0, 'fixture: the source is willing after all');
     assertEqual(note(standingOrderNext(b.s, floored)).blocked, 'below-min-send',
       floored + ' just above its floor did not report below-min-send');
@@ -4270,7 +4265,7 @@ function suiteStandingOrders(d) {
     assert(path && path.length >= 3, 'fixture has no multi-hop own-ground route');
     var from = path[0], far = path[path.length - 1];
     _ordLink(b.s, pid, [from], far);
-    b.s.stations[far].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[far].units = 1;
     for (i = 1; i < path.length - 1; i++) _setOwner(b.s, path[i], 'fra');
     assertEqual(note(standingOrderNext(b.s, from)).blocked, 'unreachable',
       'a source cut off from its only destination did not report unreachable');
@@ -4303,7 +4298,7 @@ function suiteStandingOrders(d) {
     var b = _ordBoard(fns, d, 76, pid, 8);
     var cap = d.POWERS[pid].capital;
     _ordLink(b.s, pid, b.own.filter(function (x) { return x !== cap; }), cap);
-    b.s.stations[cap].units = { infantry: 1, artillery: 0, armour: 0 };
+    b.s.stations[cap].units = 1;
 
     var snap = JSON.stringify(b.s);
     var shipped = 0;
@@ -4331,9 +4326,7 @@ function suiteStandingOrders(d) {
     var cap = d.POWERS[pid].capital;
     var sources = b.own.filter(function (x) { return x !== cap; });
     _ordLink(b.s, pid, sources, cap);
-    b.s.stations[cap].units = {
-      infantry: d.STATIONS[cap].capacity * _ordCeilMul(d), artillery: 0, armour: 0,
-    };
+    b.s.stations[cap].units = (d.STATIONS[cap].capacity * _ordCeilMul(d));
 
     var want = 0, leaves = 0;
     for (var i = 0; i < sources.length; i++) {
@@ -4406,8 +4399,7 @@ function suiteStandingOrders(d) {
         }
       }
       fns.step(b.s);
-      var du = b.s.stations[dest].units;
-      if (totalUnits(du) > 3) du.infantry -= 0.10;
+      if (b.s.stations[dest].units > 3) b.s.stations[dest].units -= 0.10;
     }
 
     var counts = [], total = 0;
@@ -4476,14 +4468,6 @@ function dataSummary() {
     Object.keys(byType).sort().forEach(function (t) {
       lines.push('    ' + pad(t + ' (?)', 14) + ' ' + byType[t]);
     });
-    var producers = sids.filter(function (s) { return d.STATIONS[s].type === 'producer'; });
-    if (producers.length) {
-      var byOut = {};
-      producers.forEach(function (s) { byOut[d.STATIONS[s].produces] = (byOut[d.STATIONS[s].produces] || 0) + 1; });
-      lines.push('    produces       ' + Object.keys(byOut).sort().map(function (k) {
-        return k + ' ' + byOut[k];
-      }).join(', '));
-    }
   }
 
   if (d.LINKS) {
@@ -4505,7 +4489,7 @@ function dataSummary() {
       // this is the "50 units / 63 units" column of the board summary — the one
       // table anybody reads to check the scenario loaded at all.
       var u = d.SETUP[sid].units;
-      forces[o] += u ? totalUnits(u) : 0;
+      forces[o] += u ? (u) : 0;
     });
     if (d.TERRITORIES && d.STATIONS) {
       Object.keys(d.TERRITORIES).forEach(function (tid) {

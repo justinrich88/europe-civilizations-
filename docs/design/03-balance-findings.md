@@ -6,6 +6,34 @@ named at the bottom.
 
 **Read the first section before touching a single constant in `data/tuning.js`.**
 
+> ## STOP — every win-rate number below this line is from a tree that had three unit types
+>
+> **C1 (2026-08) removed the matchup triangle, and it was load-bearing balance.**
+> This document is written against a board where artillery beat entrenched
+> infantry, armour beat exposed artillery, and infantry beat armour. None of
+> that exists. 96 games either side, same rig, same seeds:
+>
+> | | before C1 | after C1 |
+> |---|---|---|
+> | dominant power | France 70.8% | **Austria-Hungary 76.0%** |
+> | runner-up | Russia 6.3% | France 13.5% |
+> | win-rate spread | 70.8 points | **76.0 points** |
+> | mean game length | 25,445 ticks | 16,013 ticks |
+>
+> The board did not get more balanced — it **changed hands** and got 37% faster.
+> Any finding here that names France as the problem is now a finding about a
+> game that no longer exists, and the triangle turns out to have been what was
+> holding Austria-Hungary down.
+>
+> **What survives unchanged is the METHOD**, and it is the reason this document
+> exists: §0's three faults, the sample-size table, and the rule that 12-game
+> batches resolve nothing. Re-measure before quoting a number; do not re-derive
+> the method.
+>
+> Two structural changes also land here and are not tuned: nothing but mass
+> cracks a fortress now (artillery was the counter), and a sea crossing costs
+> 3.2x rather than 5.3x for a force that used to carry guns.
+
 ---
 
 ## 0. Every balance number produced before this document is void

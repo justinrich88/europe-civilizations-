@@ -460,19 +460,21 @@ function _aiActBelief(state, pid, sid, ctx) {
 // would read unseen ground as a walk-in and send the AI charging at odds it
 // invented. aiCandidates refuses level-0 targets outright, so this is defence
 // in depth rather than a live path.
+// `typeof === 'number'`, NOT a truth test — see the twin of this function in
+// ai/score.js. A believed garrison of exactly zero is a real board state and a
+// truth test would send it down the pessimistic capacity path.
 function _aiActBelievedUnits(sid, bel) {
-  if (bel && bel.units) return bel.units;
+  if (bel && typeof bel.units === 'number') return bel.units;
   var data = (typeof STATIONS !== 'undefined') ? STATIONS[sid] : null;
-  var u = emptyUnits();
-  if (data && data.capacity > 0) u.infantry = data.capacity;
-  return u;
+  return (data && data.capacity > 0) ? data.capacity : 0;
 }
 
 // A one-station proxy state carrying the believed garrison. `attackers` is
 // believed too: live at level 2, empty at level 1, because memory records a
 // garrison and never records who was besieging it — and stationPower folds the
-// attackers' MIX into the defender's matchup. `override` replaces the units
-// (used by the two callers that ask "what if this stack were here instead").
+// attackers' strength into the fight. `override` replaces the units (used by
+// the two callers that ask "what if this stack were here instead"), and is
+// tested with typeof rather than for truthiness so an override of 0 lands.
 //
 // READ THE BANNER ABOVE BEFORE PASSING THIS ANYWHERE NEW.
 function _aiActBelievedAt(state, pid, sid, ctx, override) {
@@ -481,7 +483,7 @@ function _aiActBelievedAt(state, pid, sid, ctx, override) {
   var proxy = { stations: {} };
   proxy.stations[sid] = {
     owner: bel.owner,
-    units: override || _aiActBelievedUnits(sid, bel),
+    units: (typeof override === 'number') ? override : _aiActBelievedUnits(sid, bel),
     attackers: (bel.level === 2 && real && real.attackers) ? real.attackers : {},
     connected: bel.connected !== false,
   };
@@ -492,9 +494,7 @@ function _aiActStackPower(state, sid, pid, stack, ctx) {
   if (typeof stationPower !== 'function') {
     // sim/combat.js absent: a crude attack-value sum keeps ai/ai.js loadable
     // on its own. Deliberately not tuned — it is a smoke-test path.
-    var p = 0, order = BAL.UNIT_ORDER;
-    for (var i = 0; i < order.length; i++) p += stack[order[i]] * BAL.UNITS[order[i]].atk;
-    return p;
+    return stack * BAL.UNIT.atk;
   }
   // The matchup is computed against the BELIEVED defending mix, not the real
   // one. Overwriting `attackers` with just this stack is the original
@@ -512,8 +512,7 @@ function _aiActStackPower(state, sid, pid, stack, ctx) {
 // the AI, and the one that made fog cosmetic on the player's side only.
 function _aiActDefenderPower(state, pid, sid, ctx) {
   if (typeof stationPower !== 'function') {
-    return totalUnits(_aiActBelievedUnits(sid, _aiActBelief(state, pid, sid, ctx)))
-      * BAL.UNITS.infantry.def;
+    return _aiActBelievedUnits(sid, _aiActBelief(state, pid, sid, ctx)) * BAL.UNIT.def;
   }
   return stationPower(_aiActBelievedAt(state, pid, sid, ctx), sid, 'defender');
 }
@@ -553,13 +552,13 @@ function _aiActGrownDefenderPower(state, pid, sid, def, ctx) {
   var bel = _aiActBelief(state, pid, sid, ctx);
   if (bel.connected === false) return def;
   var units = _aiActBelievedUnits(sid, bel);
-  var now = totalUnits(units);
+  var now = units;
   var full = d.capacity * ceil;
   if (!(now > BAL.ANNIHILATION_EPSILON) || now >= full) return def;
 
   var ratio = full / now;
   if (typeof stationPower !== 'function') return def * ratio;
-  var proxy = _aiActBelievedAt(state, pid, sid, ctx, splitUnits(units, ratio));
+  var proxy = _aiActBelievedAt(state, pid, sid, ctx, units * ratio);
   var grown = stationPower(proxy, sid, 'defender');
   return grown > def ? grown : def;
 }
@@ -621,7 +620,7 @@ function _aiActUnderAttack(state, sid, pid) {
   var ids = Object.keys(st.attackers).sort();
   for (var i = 0; i < ids.length; i++) {
     if (ids[i] === pid) continue;
-    if (totalUnits(st.attackers[ids[i]]) > BAL.ANNIHILATION_EPSILON) return true;
+    if (st.attackers[ids[i]] > BAL.ANNIHILATION_EPSILON) return true;
   }
   return false;
 }
@@ -646,7 +645,7 @@ function _aiActAlreadyCommitted(state, pid, target, inflight) {
   if (inflight[target]) return true;
   var st = state.stations[target];
   return !!(st && st.attackers && st.attackers[pid] &&
-            totalUnits(st.attackers[pid]) > BAL.ANNIHILATION_EPSILON);
+            st.attackers[pid] > BAL.ANNIHILATION_EPSILON);
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +673,7 @@ function _aiActAlreadyCommitted(state, pid, target, inflight) {
 
 function _aiActAllowedFraction(state, sid) {
   var st = state.stations[sid];
-  var units = totalUnits(st.units);
+  var units = st.units;
   if (units <= 0) return 0;
   var cap = (typeof STATIONS !== 'undefined' && STATIONS[sid]) ? STATIONS[sid].capacity : units;
   var spare = units - BAL.AI.HOME_GARRISON_FLOOR * cap;
@@ -684,9 +683,9 @@ function _aiActAllowedFraction(state, sid) {
 }
 
 function _aiActSumStack(state, sids, fraction) {
-  var stack = emptyUnits();
+  var stack = 0;
   for (var i = 0; i < sids.length; i++) {
-    addUnits(stack, splitUnits(state.stations[sids[i]].units, fraction));
+    stack += state.stations[sids[i]].units * fraction;
   }
   return stack;
 }
@@ -712,7 +711,7 @@ function _aiActPlanVolley(state, pid, target, oddsFloor, ctx) {
     var sid = near[i].sid;
     var allowed = _aiActAllowedFraction(state, sid);
     if (allowed <= 0) { floored++; continue; }
-    var units = totalUnits(state.stations[sid].units);
+    var units = state.stations[sid].units;
     if (units * allowed < BAL.MIN_SEND_UNITS) { tiny++; continue; }
     afford.push({ sid: sid, allowed: allowed, units: units, hops: near[i].hops });
   }
@@ -753,8 +752,10 @@ function _aiActPlanVolley(state, pid, target, oddsFloor, ctx) {
   for (i = 0; i < considered.length; i++) {
     var route = commandRoute(considered[i].sid, target, state, pid);
     if (!route || route.length < 2) continue;
-    var eta = routeEtaTicks(route, splitUnits(state.stations[considered[i].sid].units,
-                                              considered[i].allowed));
+    // No stack argument any more: routeEtaTicks used to be handed the payload
+    // because a stack's speed depended on what was in it. Every army now walks
+    // at one speed, so the route is the whole question (C1).
+    var eta = routeEtaTicks(route);
     if (!isFinite(eta)) continue;
     considered[i].eta = eta;
     elig.push(considered[i]);
@@ -800,7 +801,7 @@ function _aiActPlanVolley(state, pid, target, oddsFloor, ctx) {
     // estimate count units that never ship.
     var kept = [];
     for (i = 0; i < sids.length; i++) {
-      if (totalUnits(state.stations[sids[i]].units) * frac >= BAL.MIN_SEND_UNITS) kept.push(sids[i]);
+      if (state.stations[sids[i]].units * frac >= BAL.MIN_SEND_UNITS) kept.push(sids[i]);
     }
     if (!kept.length) continue;
     var stack = _aiActSumStack(state, kept, frac);
@@ -845,7 +846,7 @@ function _aiActInflightUnitsTo(state, pid, sid) {
   var n = 0;
   for (var i = 0; i < state.waves.length; i++) {
     var w = state.waves[i];
-    if (w.owner === pid && w.to === sid) n += totalUnits(w.units);
+    if (w.owner === pid && w.to === sid) n += w.units;
   }
   return n;
 }
@@ -907,7 +908,7 @@ function _aiActStageFeeders(state, pid, depot, exclude, maxHops) {
 // Returns { depot, sources, fraction, need, sent } or { reason }.
 //
 // THE DEFICIT IS ARITHMETIC, NOT A GUESS. The volley delivers `plan.power`
-// from `totalUnits(plan.stack)` units, so it is worth plan.power/units per
+// from `plan.stack` units, so it is worth plan.power/units per
 // unit sent; clearing `minOdds` needs minOdds x defenderPower. The shortfall
 // in power therefore converts to a shortfall in units standing at the depot,
 // divided by the fraction a volley actually ships. That is the number this
@@ -920,7 +921,7 @@ function _aiActPlanStage(state, pid, target, plan, minOdds, ctx) {
   var depot = _aiActStageDepot(plan);
   if (!depot) return { reason: 'no-sources' };
 
-  var stackUnits = totalUnits(plan.stack);
+  var stackUnits = plan.stack;
   var perUnit = (stackUnits > BAL.ANNIHILATION_EPSILON && plan.power > 0)
     ? plan.power / stackUnits : 0;
   if (!(perUnit > 0)) return { reason: 'stage-no-feeders' };
@@ -975,7 +976,7 @@ function _aiActPlanStage(state, pid, target, plan, minOdds, ctx) {
     var sid = feeders[i].sid;
     var allowed = _aiActAllowedFraction(state, sid);
     if (allowed <= 0) continue;
-    var units = totalUnits(state.stations[sid].units);
+    var units = state.stations[sid].units;
     if (units * allowed < BAL.MIN_SEND_UNITS) continue;
     // REAL `state`, for the same reason as in _aiActPlanVolley: a proxy here
     // costs 1,400x on every route in the game and reports nothing wrong.

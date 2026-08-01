@@ -42,15 +42,10 @@
 
 'use strict';
 
-// _startHome() sums a capital's opening garrison with core/state.js's
-// totalUnits(), so core/state.js has to be above this file in index.html.
-// Loud on failure per known-issue #22 — the card would otherwise just quietly
-// stop mentioning how many units you start with.
-if (typeof totalUnits !== 'function') {
-  console.error('[render/start] no totalUnits at load — core/state.js must come ' +
-    'BEFORE render/start.js in index.html. The power cards will throw on garrison.');
-}
-
+// _startHome() reads a capital's opening garrison off SETUP directly, so
+// data/scenario.js has to be above this file in index.html. There used to be a
+// loud load-order guard here on core/state.js's totalUnits(); the sum is gone
+// (C1) and a guard that can no longer fail went with it (known-issue #8).
 // ── content ──────────────────────────────────────────────────────────────
 //
 // The ONLY thing in this file that is authored rather than derived. Straight
@@ -153,13 +148,13 @@ function _startHome(D, pid) {
 
   var seed = (D.SETUP && cap) ? D.SETUP[cap.id] : null;
   var units = 0;
-  // totalUnits(), not a fourth hand-rolled copy of the same sum. The card's
+  // the scalar `units` field directly. The card's
   // opening-garrison line is the first number a player ever sees, and the
   // per-property `|| 0` guards this used to carry would print a serene "0
   // units" for every power the day the unit bundle changes shape. `seed.units`
   // being absent is still a legitimate zero — a SETUP entry with no garrison —
   // so that guard stays and only the sum moves.
-  if (seed && seed.units) units = totalUnits(seed.units);
+  if (seed && typeof seed.units === 'number') units = seed.units;
 
   return {
     tid: tid,

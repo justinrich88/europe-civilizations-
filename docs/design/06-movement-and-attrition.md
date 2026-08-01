@@ -165,7 +165,7 @@ the generated data, and a distinct sea toll applied at beachhead landings.
 
 Under per-tick attrition, **a sea crossing is simply a slow link**. It already
 takes 3.2× as long as a land link of the same on-screen length (5.3× with
-artillery) — so it already costs 3.2× the attrition, automatically, with no sea
+artillery, before C1 removed the types) — so it already costs 3.2x the attrition, automatically, with no sea
 rule at all. The punishment emerges from the speed multiplier that already
 exists.
 

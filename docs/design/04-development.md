@@ -332,7 +332,7 @@ term leaves the combat power calculation.
 | # | step | why this order |
 |---|---|---|
 | 5.7 | Fog of war | in progress; must precede Milestone 6 |
-| **5.8** | **Collapse the three unit types to one** | mechanical, large surface, shrinks everything after it |
+| **5.8** | ~~**Collapse the three unit types to one**~~ **SHIPPED 2026-08 — see §9c** | mechanical, large surface, shrinks everything after it |
 | **5.9** | **Development** | as specified above |
 | 6 | Balance pass | run **once**, under fog, sea, and development |
 
@@ -474,6 +474,90 @@ Only a screenshot found them, and only a screenshot will find the next one.
   measured before and after put the win-rate spread at 84.4 → 70.8 points with
   games running 21% longer, the latter being fortification making cities harder
   to take.
+
+
+---
+
+## 9c. WHAT SHIPPED — C1, the collapse, 2026-08
+
+`units` is a scalar. `emptyUnits` / `totalUnits` / `splitUnits` / `addUnits` /
+`subUnits` are gone, and so are `BAL.UNITS`, `BAL.MATCHUP`, `BAL.UNIT_ORDER`,
+`ARMOUR_VS_FORT`, `FORT_STRIP_CAP`, `SEA_ARTILLERY_SPEED_MUL`,
+`SEA_ARTILLERY_LOSS`, the `produces` field on all 108 stations, and the `types?`
+narrowing on a `send`. 34 files, ~700 sites.
+
+### The refactor is separately proven to have changed nothing
+
+This is the part worth copying for any change of this size. C1 does two things
+at once — it deletes a *game rule* and it changes a *data shape* — and one moved
+hash cannot speak for both. So they were separated and measured apart:
+
+| tree | what it is |
+|---|---|
+| **HEAD** | before |
+| **stage 1** | the triangle, per-type speeds, `fortStrip`, `ARMOUR_VS_FORT` and the sea artillery tax **neutralised in `data/tuning.js` only**. Three buckets still exist. This is the balance change with zero refactoring risk attached. |
+| **stage 1b** | stage 1, plus everything grows into and starts in ONE bucket. Behaviourally identical to stage 1, but artillery and armour are now exactly 0 everywhere — so `x + 0 + 0` and `x` are the *same float*. |
+| **C1** | the real scalar refactor |
+
+**stage 1b and C1 produce bit-identical boards** — same owner for all 108
+cities and every one of 432 garrison floats identical to the last bit, on seeds
+100–103 at 12,000 ticks. That is the acceptance test for a ~700-site rewrite,
+and it is only possible because stage 1b was constructed so the float
+association could not differ.
+
+The whole behavioural change is therefore HEAD → stage 1, and it is large:
+
+| | HEAD | after |
+|---|---|---|
+| dominant power | France 70.8% | **Austria-Hungary 76.0%** |
+| win-rate spread | 70.8 points | **76.0 points** |
+| mean game length | 25,445 ticks | 16,013 ticks |
+
+### A LYAPUNOV MEASUREMENT, and it limits the house verification bar
+
+stage 1 and stage 1b compute the same game and differ only by float
+association. They diverge at **tick 2**, by 1.8e-15. Then:
+
+| tick | worst relative drift | cities with a different owner |
+|---|---|---|
+| 1,000 | 8.6e-14 | 0 |
+| 3,000 | 1.9e-14 | 0 |
+| 5,000 | 3.3e-2 | 0 |
+| **6,978** | — | **first disagreement** |
+| 9,000 | 3.5e+1 | 19 |
+| 12,000 | 2.2e+1 | 13 |
+
+`CLAUDE.md`'s standard — *"same owner for every one of the 108 cities at 12,000
+ticks"* — is therefore **only valid for a change that perturbs no float at all**.
+Past roughly 7,000 ticks it cannot distinguish "this change altered the game"
+from "this change altered the last bit". The `core/exact.js` and B2 results that
+used it were fine, because both held drift at ~1e-13 *at* 12,000 ticks; a
+change that does not is measured with a 96-game sweep, not a four-seed board.
+
+### THE GAP THIS OPENS, stated rather than tidied away
+
+**A producer station now has no reason to exist.** 16 of 108 cities, mean
+capacity 28.7 and rate 0.51 against a plain holding's 37.65 and 0.83 — strictly
+worse on both remaining axes, with "it makes the guns" as its entire
+justification. §9 said development *replaces what the triangle was for*, and
+that is true of the triangle; it is **not** true of the producer, because a
+fortification can be built anywhere and restores no reason to want one city
+over another.
+
+The designed answer already exists in this codebase and is inert:
+`sim/development.js` gives `producer` stations exclusive access to the
+**factory**, and `DEV_LIVE` says a factory does nothing. Making it live is what
+closes this, and it is now the strongest argument for doing so.
+
+Two smaller things went with the types and are recorded so they are not
+rediscovered as bugs:
+
+- **Nothing cracks a fortress but mass.** Artillery was the named counter.
+  `_fortBonus` still takes the attacking force as an unused parameter, because
+  that is the seam a replacement arrives at — see §7, whose stalemate question
+  is live again.
+- **The sea got cheaper for the stack that used to find it dear.** 5.3x → 3.2x
+  for a gun-carrying force; one number for everyone now.
 
 ---
 

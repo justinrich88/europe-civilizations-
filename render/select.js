@@ -207,15 +207,15 @@ function selEffectiveFraction() {
 // (a stack travels at the speed of its slowest kind), the refusal test, and the
 // payload label — a preview that disagrees with the commit is worse than none.
 //
-// sendPayload() rather than splitUnits(): sim/commands.js holds a unit back so a
+// sendPayload() rather than a bare multiplication: sim/commands.js holds a unit back so a
 // city can never be emptied to zero and left unable to regrow, and the preview
-// must show the number that will actually leave. Calling splitUnits() here would
+// must show the number that will actually leave. Multiplying here would
 // be the two-expressions-that-happen-to-agree arrangement known-issue #18 is
 // about — it agreed for a year, and then it did not.
 function _selPayload(units) {
   if (!units) return null;
   if (typeof sendPayload === 'function') return sendPayload(units, selEffectiveFraction());
-  if (typeof splitUnits === 'function') return splitUnits(units, selEffectiveFraction());
+  return units * selEffectiveFraction();
   return null;
 }
 
@@ -231,7 +231,7 @@ function selOnFractionChange() {
 // at the map, so each preview line carries what it will actually send. Compact,
 // because it sits beside the ETA on a line that may be one of a dozen.
 
-const SEL_TYPE_ABBR = { infantry: 'inf', artillery: 'art', armour: 'arm' };
+
 
 // One significant decimal below 10, whole numbers above it. Garrisons are
 // continuous (logistic growth), so "8" for 8.4 units is a lie the player can
@@ -241,18 +241,15 @@ function _selFmtQty(v) {
   return String(v >= 10 ? Math.round(v) : Math.round(v * 10) / 10);
 }
 
+// The preview label under a route line. It used to spell out the volley's
+// COMPOSITION ("12 inf · 4 art"); with one unit type there is nothing to spell,
+// so it is the count and the word.
+//
+// 0.05 rather than 0: a payload that rounds to "0" adds a glyph and no
+// information. Anything omitted here is below a twentieth of a unit.
 function _selPayloadLabel(units) {
-  if (!units) return '';
-  const order = (typeof BAL !== 'undefined' && BAL && BAL.UNIT_ORDER)
-    ? BAL.UNIT_ORDER : ['infantry', 'artillery', 'armour'];
-  const parts = [];
-  for (const t of order) {
-    const v = units[t];
-    // 0.05 rather than 0: a kind that rounds to "0" adds a glyph and no
-    // information. Anything the label omits is below a twentieth of a unit.
-    if (v > 0.05) parts.push(_selFmtQty(v) + ' ' + (SEL_TYPE_ABBR[t] || t));
-  }
-  return parts.join(' · ');
+  if (!(units > 0.05)) return '';
+  return _selFmtQty(units) + ' units';
 }
 
 // Live ownership. State is authoritative once a game exists; before that the
@@ -689,11 +686,10 @@ function selPreviewRows(target) {
     const to = selStationPos(target);
     if (!from || !to) continue;
 
-    // The payload drives the ETA, because a stack travels at the speed of its
-    // slowest unit type — artillery in the volley shows up as a longer line.
-    // It drives the ETA, the refusal test AND the label, so it must be the same
-    // bundle applyCommand() will build from the effective fraction, modifier
-    // included.
+    // The payload no longer drives the ETA — every army walks at one speed
+    // since C1, so routeEtaTicks() takes the path alone. It still drives the
+    // refusal test AND the label, so it must be the same number applyCommand()
+    // will build from the effective fraction, modifier included.
     let units = null;
     if (g && g.stations && g.stations[sid]) units = _selPayload(g.stations[sid].units);
 
@@ -709,7 +705,7 @@ function selPreviewRows(target) {
       ? (linkRoutePoints(geoms) || pts) : pts;
     let eta = null;
     if (pts && etaFn) {
-      const t = etaFn(path, units || { infantry: 1, artillery: 0, armour: 0 });
+      const t = etaFn(path);
       eta = isFinite(t) ? t : null;
     }
 
@@ -721,9 +717,9 @@ function selPreviewRows(target) {
     let refusal = null;
     if (!path || path.length < 2) refusal = 'no route';
     else if (eta === null) refusal = 'no route';
-    else if (units && typeof totalUnits === 'function' &&
+    else if (typeof units === 'number' &&
              typeof BAL !== 'undefined' && BAL &&
-             totalUnits(units) < BAL.MIN_SEND_UNITS) {
+             units < BAL.MIN_SEND_UNITS) {
       refusal = 'too few';
     }
 

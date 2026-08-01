@@ -151,9 +151,7 @@ function _rflBoard(fns, d, seed, pid, n) {
   }
   own.sort();
   for (var j = 0; j < own.length; j++) {
-    s.stations[own[j]].units = {
-      infantry: d.STATIONS[own[j]].capacity * 0.9, artillery: 0, armour: 0,
-    };
+    s.stations[own[j]].units = (d.STATIONS[own[j]].capacity * 0.9);
   }
   return { s: s, own: own, adj: adj };
 }
@@ -231,14 +229,14 @@ function _rflWatch(fns, s, pid, sweeps, from, tos, iv) {
 
   for (var t = 0; t < sweeps * iv; t++) {
     for (var k = 0; k < tos.length; k++) {
-      s.stations[tos[k]].units = { infantry: 1, artillery: 0, armour: 0 };
+      s.stations[tos[k]].units = 1;
     }
     var before = s.orderStats ? s.orderStats.sends : 0;
     fns.step(s);
     var sw = Math.floor(s.tick / iv);
     if (seen[sw]) continue;
     seen[sw] = true;
-    if (out.u0 === null) out.u0 = totalUnits(s.stations[from].units);
+    if (out.u0 === null) out.u0 = (s.stations[from].units);
     out.checks++;
     var fired = (s.orderStats ? s.orderStats.sends : 0) > before;
     if (fired) { out.shipSweeps++; dark = 0; }
@@ -259,7 +257,7 @@ function _rflWatch(fns, s, pid, sweeps, from, tos, iv) {
     }
     out.plans.push(rec);
   }
-  out.u1 = totalUnits(s.stations[from].units);
+  out.u1 = (s.stations[from].units);
   out.sends = (s.orderStats ? s.orderStats.sends : 0) - s0Sends;
   out.unitsSent = (s.orderStats ? s.orderStats.unitsSent : 0) - s0Units;
   return out;
@@ -294,7 +292,7 @@ function suiteRouteFlow(d) {
     // fixed point; from the 90% start it ships every sweep for a while, which is
     // the opposite of the case under test.
     for (var t = 0; t < warmSweeps * IV; t++) {
-      b.s.stations[f.to].units = { infantry: 1, artillery: 0, armour: 0 };
+      b.s.stations[f.to].units = 1;
       fns.step(b.s);
     }
     var w = _rflWatch(fns, b.s, PID, sweeps, f.from, [f.to], IV);
@@ -392,7 +390,7 @@ function suiteRouteFlow(d) {
     // on a small feeder this is most sweeps, but the fixture must not assume it.
     var found = null;
     for (var t = 0; t < 60 * IV && !found; t++) {
-      s.stations[to].units = { infantry: 1, artillery: 0, armour: 0 };
+      s.stations[to].units = 1;
       fns.step(s);
       if (s.tick % IV !== 0) continue;
       var p = standingOrderNext(s, from);
@@ -408,19 +406,15 @@ function suiteRouteFlow(d) {
 
     // ARM A — 90% of it is not enough. Applied to a clone so the two arms see
     // the same board.
-    var save = { infantry: s.stations[from].units.infantry,
-                 artillery: s.stations[from].units.artillery,
-                 armour: s.stations[from].units.armour };
-    s.stations[from].units.infantry += short * 0.9;
+    var save = s.stations[from].units;
+    s.stations[from].units += short * 0.9;
     var a = standingOrderNext(s, from).edges[0];
     assert(!!a.blocked,
       'the line shipped on 90% of the reported shortfall (' + (short * 0.9).toFixed(3) +
       ' units), so the number over-reports');
 
     // ARM B — the full shortfall is. Restore and add all of it.
-    s.stations[from].units.infantry = save.infantry + short + 1e-9;
-    s.stations[from].units.artillery = save.artillery;
-    s.stations[from].units.armour = save.armour;
+    s.stations[from].units = save + short + 1e-9;
     var bE = standingOrderNext(s, from).edges[0];
     assert(!bE.blocked && bE.units > 0,
       'the line did NOT ship after adding the full reported shortfall of ' +
@@ -448,7 +442,7 @@ function suiteRouteFlow(d) {
     // Warm to the fixed point, spending both destinations so neither fills.
     var t, k;
     for (t = 0; t < 200 * IV; t++) {
-      for (k = 0; k < 2; k++) b.s.stations[f.to[k]].units = { infantry: 1, artillery: 0, armour: 0 };
+      for (k = 0; k < 2; k++) b.s.stations[f.to[k]].units = 1;
       fns.step(b.s);
     }
 
@@ -458,7 +452,7 @@ function suiteRouteFlow(d) {
     // under test.
     var seen = 0, bad = [];
     for (t = 0; t < 200 * IV; t++) {
-      for (k = 0; k < 2; k++) b.s.stations[f.to[k]].units = { infantry: 1, artillery: 0, armour: 0 };
+      for (k = 0; k < 2; k++) b.s.stations[f.to[k]].units = 1;
       fns.step(b.s);
       if (b.s.tick % IV !== 0) continue;
       var p = standingOrderNext(b.s, f.from);
@@ -504,7 +498,7 @@ function suiteRouteFlow(d) {
       _rflLink(b.s, PID, [f.from], f.to);
       var t;
       for (t = 0; t < 200 * IV; t++) {
-        b.s.stations[f.to].units = { infantry: 1, artillery: 0, armour: 0 };
+        b.s.stations[f.to].units = 1;
         fns.step(b.s);
       }
       if (extra) {
@@ -579,7 +573,7 @@ function suiteRouteFlow(d) {
       _rflLink(b.s, PID, [f.from], f.to);
       var s = b.s, t;
       for (t = 0; t < 200 * IV; t++) {
-        s.stations[f.to].units = { infantry: 1, artillery: 0, armour: 0 };
+        s.stations[f.to].units = 1;
         fns.step(s);
       }
 
@@ -588,7 +582,7 @@ function suiteRouteFlow(d) {
       for (t = 0; t < 300 * IV && !s.winner; t++) {
         if (s.tick % IV !== 0) {
           fns.step(s);
-          s.stations[f.to].units = { infantry: 1, artillery: 0, armour: 0 };
+          s.stations[f.to].units = 1;
           continue;
         }
         growthTick(s);                                  // phase 1
@@ -598,7 +592,7 @@ function suiteRouteFlow(d) {
         var sent = 0;
         for (var i = 0; i < s.waves.length; i++) {
           if (s.waves[i].id >= firstNew && s.waves[i].from === f.from) {
-            sent += totalUnits(s.waves[i].units);
+            sent += (s.waves[i].units);
           }
         }
         sweepsSeen++;
@@ -609,7 +603,7 @@ function suiteRouteFlow(d) {
         }
         movementTick(s); combatTick(s); relationsTick(s); victoryTick(s);
         s.tick++;
-        s.stations[f.to].units = { infantry: 1, artillery: 0, armour: 0 };
+        s.stations[f.to].units = 1;
       }
     } finally {
       d.BAL.ORDERS.MIN_SEND = saved;

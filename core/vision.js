@@ -486,19 +486,19 @@ function observeTick(state) {
 // and it goes through JSON.stringify on every snapshot; long keys would more
 // than double the serialised size of the whole state for no reader's benefit.
 //
-// The record is REUSED rather than replaced, and `u` is copied field by field
-// rather than by reference: a stored reference to the live station.units would
-// make every remembered garrison update itself, which is the exact opposite of
-// the feature and would look correct in every test that only checks the owner.
+// The record is REUSED rather than replaced. `u` used to be a three-field
+// bundle copied field by field, with a warning that storing a REFERENCE to the
+// live station.units would make every remembered garrison silently update
+// itself — the exact opposite of the feature, and invisible to any test that
+// only checks the owner. Since C1 `u` is a number, so the assignment below is
+// a copy by construction and that hazard cannot be reintroduced here.
 function _visRemember(mem, sid, st, tick) {
   var rec = mem[sid];
   if (!rec) {
-    rec = mem[sid] = { o: null, u: { infantry: 0, artillery: 0, armour: 0 }, c: true, t: 0 };
+    rec = mem[sid] = { o: null, u: 0, c: true, t: 0 };
   }
   rec.o = st.owner;
-  rec.u.infantry = st.units.infantry;
-  rec.u.artillery = st.units.artillery;
-  rec.u.armour = st.units.armour;
+  rec.u = st.units;
   rec.c = st.connected !== false;
   rec.t = tick;
   return rec;
@@ -518,8 +518,9 @@ function _visRemember(mem, sid, st, tick) {
 //            meaningful board state, and a renderer that printed one for
 //            ground nobody has ever visited would be inventing intelligence.
 //
-// `units` is always a FRESH object (or null). Handing back the stored record's
-// own bundle would let one careless caller edit another power's memory.
+// `units` is a NUMBER, or null at level 0. It used to be a freshly-built bundle
+// so that a careless caller could not edit another power's memory through the
+// returned object; a number is copied by value and that is now free.
 //
 // COST. Deriving `level` needs live visibility, and visibleTo is 24-38us — so
 // this is safe for one station per frame (the hovered city) and is O(n^2) in a
@@ -537,7 +538,7 @@ function believedStation(state, pid, sid, vis) {
   if (level === 2) {
     var st = state.stations[sid];
     out.owner = st.owner;
-    out.units = { infantry: st.units.infantry, artillery: st.units.artillery, armour: st.units.armour };
+    out.units = st.units;
     out.connected = st.connected !== false;
     out.tick = state.tick;
     out.level = 2;
@@ -548,7 +549,7 @@ function believedStation(state, pid, sid, vis) {
   if (!mem) return out;                                  // never seen: level 0
 
   out.owner = mem.o;
-  out.units = { infantry: mem.u.infantry, artillery: mem.u.artillery, armour: mem.u.armour };
+  out.units = mem.u;
   out.connected = mem.c;
   out.tick = mem.t;
   out.level = 1;

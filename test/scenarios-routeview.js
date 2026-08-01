@@ -138,7 +138,7 @@ function _rvwAdjacent(fns, d, seed, pid) {
     }
   }
   if (!best) return null;
-  b.s.stations[best[1]].units = { infantry: 1, artillery: 0, armour: 0 };
+  b.s.stations[best[1]].units = 1;
   _rteLink(b.s, pid, [best[0]], best[1]);
   for (var t = 0; t < 200; t++) fns.step(b.s);
   return { s: b.s, A: best[0], D: best[1] };
