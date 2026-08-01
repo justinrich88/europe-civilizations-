@@ -3653,3 +3653,17 @@ kbd.help-key {
   font-size: 10px;
   color: var(--warn, #d8a657);
 }
+
+/* ── A4: the speed controls are dev-only ──────────────────────────────────
+   app/main.js sets `hidden` on #speed-controls unless ?dev=1, and THE ATTRIBUTE
+   ALONE IS NOT ENOUGH. `hidden` is `display: none` from the user-agent
+   stylesheet, and ANY author rule outranks the UA sheet — `.hud-group` sets
+   `display: flex`, so the controls stayed fully visible with `hidden` set and no
+   error anywhere. Same shape as known-issues #15 (a stylesheet rule silently
+   beating a presentation attribute), and `.send-armed[hidden]` above already
+   carries this exact fix.
+
+   Caught by asserting `offsetParent !== null` in a real browser rather than by
+   checking that the attribute was set — the attribute WAS set, and it did
+   nothing. */
+.hud-group.speed[hidden] { display: none; }

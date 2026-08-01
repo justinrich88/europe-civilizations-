@@ -45,8 +45,16 @@
      and wired without anyone having to click a card. The iframe is a real
      800x900, the window the game is played at (known-issues #17) — the camera
      fit rect and elementFromPoint both depend on real layout, and a hidden or
-     zero-sized frame would make every hit test a lie. -->
-<iframe id="frame" src="index.html?player=ger" title="game under test"></iframe>
+     zero-sized frame would make every hit test a lie.
+
+     &dev=1 IS LOAD-BEARING SINCE A4, not a convenience. Pause and speed left the
+     player UI, and with them the opening pause — a player who cannot unpause must
+     not be handed a board that never starts. But every gesture assertion below
+     reads a garrison, hit-tests a node, or counts a wave, and a board that is
+     RUNNING changes all three between the setup and the assertion. dev=1 is
+     exactly what roadmap A4 kept these controls for: "browser verification pauses
+     the board constantly and losing that slows every future change." -->
+<iframe id="frame" src="index.html?player=ger&amp;dev=1" title="game under test"></iframe>
 
 <script>
 'use strict';

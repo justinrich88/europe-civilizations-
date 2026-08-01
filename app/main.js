@@ -147,6 +147,13 @@ function syncFractionButtons(fraction) {
 // added, so delegation survives edits that per-button binding would not.
 function wireSpeedControls() {
   const wrap = byId('speed-controls');
+  // A4: gone from the player's HUD, still there for verification. Hidden rather
+  // than removed so the DOM the tests hit-test is the DOM the page ships.
+  if (wrap && !devMode()) {
+    wrap.hidden = true;
+    wrap.setAttribute('aria-hidden', 'true');
+    return false;
+  }
   if (!wrap) {
     console.warn('[app/main] no #speed-controls in the document');
     return;
@@ -194,9 +201,12 @@ function wireKeys() {
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
 
+    // SPACE PAUSES ONLY IN DEV MODE (A4). preventDefault stays unconditional —
+    // space would otherwise scroll the page or re-activate the last focused
+    // button, and that is true whether or not the key does anything else.
     if (ev.code === 'Space' || ev.key === ' ') {
-      ev.preventDefault();          // space would otherwise scroll / re-click
-      togglePause();
+      ev.preventDefault();
+      if (devMode()) togglePause();
       return;
     }
 
@@ -221,6 +231,32 @@ function wireKeys() {
 }
 
 // ── seed ────────────────────────────────────────────────────────────────
+
+// ?dev=1 — the developer surface, roadmap A4.
+//
+// *Decided:* pause and speed are TESTING CONVENIENCES, not mechanics. One shared
+// clock is required for lockstep anyway, so a player who can stop time is a
+// player who cannot play against anyone. They are hidden, NOT DELETED: browser
+// verification pauses the board constantly and losing that slows every future
+// change, and the headless harness is unaffected either way because it drives
+// stepTicks() directly.
+//
+// Read ONCE, at load, into a global — a query-string parse per keypress would be
+// three different answers to one question, and this is the sort of flag that ends
+// up consulted from four files.
+//
+// THE CONSEQUENCE FOR THE DESIGN, and it is not small: 00-vision.md §1's "orders
+// can be issued while paused" stops being true for a player. The board must now
+// be readable WHILE MOVING, which is what raised the stakes on
+// 05-command-clarity.md — and A5 is the answer, which is why A5 landed first.
+function devMode() {
+  if (typeof window === 'undefined') return false;
+  if (window.DEV_MODE === undefined) {
+    var raw = new URLSearchParams(window.location.search).get('dev');
+    window.DEV_MODE = raw !== null && raw !== '0' && raw !== 'false';
+  }
+  return window.DEV_MODE;
+}
 
 // ?seed=N overrides the default so a specific game can be re-opened from a URL.
 // Anything unparseable falls back rather than throwing — a mistyped query
@@ -349,10 +385,16 @@ function bootPlay(pid) {
   wireKeys();
   syncFractionButtons(_sendFraction);
 
-  // The game opens paused (core/state.js sets paused:true) so the player can
-  // read the board before anything moves. setSpeed(0) makes the loop, the state
-  // and the buttons all agree on that.
-  setSpeed(0);
+  // THE OPENING PAUSE IS NOW A DEV-ONLY LUXURY (A4).
+  //
+  // It opened paused so the board could be read before anything moved — which is
+  // right, and is also a thing a player can no longer ask for again once the game
+  // is running. Leaving the opening pause in place for a player who cannot
+  // UNpause would be a board that never starts.
+  //
+  // In dev mode the old contract is unchanged, including the guide interaction
+  // documented below.
+  setSpeed(devMode() ? 0 : (BAL.SPEED_DEFAULT || 2));
 
   // First HUD paint before the loop's first frame, so the bar is never blank.
   if (typeof renderHud === 'function') renderHud(window.GAME);

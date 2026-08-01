@@ -149,18 +149,30 @@ after, `build` is scheduled by construction; written before, it is a retrofit.
 — done in that order: `build` is the first verb that only ever goes through
 `queueCommand`.
 
-### A4. Pause and speed leave the player UI
+### ~~A4. Pause and speed leave the player UI~~ — SHIPPED 2026-07
 
 *Decided.* They are testing conveniences, not mechanics, and one shared clock
 is required for lockstep anyway.
 
-**Keep them behind `?dev=1`, do not delete them.** Browser verification pauses
-the board constantly, and losing that slows every future change. The headless
-harness is unaffected — it drives `stepTicks` directly.
+**Kept behind `?dev=1`, not deleted.** Browser verification pauses the board
+constantly, and losing that slows every future change. The headless harness is
+unaffected — it drives `stepTicks` directly, and `tests-ui.html` now passes
+`&dev=1` for exactly the reason this clause exists.
 
-Note the consequence for the design: `00-vision.md` §1's *"orders can be issued
-while paused"* stops being true, and the board must be readable **while
-moving**. That raises the stakes on `05-command-clarity.md`.
+Three consequences, all of them real:
+
+- `00-vision.md` §1's *"orders can be issued while paused"* **stops being true**,
+  and the board must be readable **while moving**. That is what raised the stakes
+  on `05-command-clarity.md`, and it is why **A5 landed first**.
+- **The opening pause went with it.** The game opened paused so the board could be
+  read before anything moved; handing that to a player who can no longer unpause
+  is a board that never starts. In dev mode the old contract is untouched.
+- `hidden` alone did **not** hide the controls — `.hud-group` sets
+  `display: flex`, and any author rule outranks the UA stylesheet's `hidden`.
+  Needed `.hud-group.speed[hidden] { display: none; }`, the same fix
+  `.send-armed[hidden]` already carried. Known-issue #15's shape; caught by
+  asserting `offsetParent !== null` in a real browser rather than by checking the
+  attribute was set.
 
 ### ~~A5. Selection safety~~ — SHIPPED 2026-07, all three accepted fixes
 
@@ -321,6 +333,7 @@ almost none of this — only letting the human power switch.
 available and simply has to be used: the next thing anyone changes in `render/`
 should be handed to a tester rather than reasoned about.
 
-~~**What gates the rest of Phase A now is A5**~~ — A5 shipped, and A4 with it.
-Phase A is complete. What gates everything now is **B1**, which is what the
-document said from the start: "everything below is blocked on this".
+~~**What gates the rest of Phase A now is A5**~~ — **Phase A is complete.** A1
+through A5 have all shipped. What gates everything now is **B1**, which is what
+`06-movement-and-attrition.md` said from the start: "everything below is blocked
+on this".
