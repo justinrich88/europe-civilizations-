@@ -367,6 +367,17 @@ function suiteExact() {
     // amounts, which is the signature of the second. The commit message carries
     // the board diff.
     //
+    // RE-PINNED for the end-screen history chart, and this is the CLEANEST
+    // possible version of the explanation CLAUDE.md asks for. sim/victory.js
+    // now records territory / forces / development every 120 ticks into
+    // `state.history`, so the snapshot grew and the hash had to move. Nothing
+    // else changed, and that is a measurement rather than a claim: at 12,000
+    // ticks on seeds 100-103, deleting `history` from the new snapshot makes it
+    // BYTE-IDENTICAL to the old one — 210,958 / 210,884 / 204,717 / 209,274
+    // bytes, equal on all four, same winner. A pure shape change with no
+    // behavioural component at all, which is the one case known-issue #27 says
+    // this instrument is still valid for.
+    //
     // RE-PINNED at C1 (07-roadmap.md). The three unit types collapsed to one,
     // and this pin could not have survived it in either of the two ways the
     // message below distinguishes — BOTH are present:
@@ -407,8 +418,8 @@ function suiteExact() {
     var s100 = newGame(100);
     for (var i = 0; i < 2000; i++) stepTick(s100);
     var h100 = _exatStateHash(s100);
-    assertEqual(h100.hash, 3295423891, 'seed 100 diverged after 2000 ticks — state is now ' +
-      h100.bytes + ' bytes of JSON against a pinned 134979. READ THE BYTE COUNT CAREFULLY: ' +
+    assertEqual(h100.hash, 3625268610, 'seed 100 diverged after 2000 ticks — state is now ' +
+      h100.bytes + ' bytes of JSON against a pinned 137926. READ THE BYTE COUNT CAREFULLY: ' +
       'it moves for BOTH kinds of change and cannot tell them apart on its own. A new field ' +
       'on the state moves it by a fixed amount on every seed (A3 moved it +76 on all four); ' +
       'different arithmetic moves it by a different amount on each seed, because a different ' +
@@ -418,8 +429,8 @@ function suiteExact() {
     var s101 = newGame(101);
     for (var j = 0; j < 2000; j++) stepTick(s101);
     var h101 = _exatStateHash(s101);
-    assertEqual(h101.hash, 2283052796, 'seed 101 diverged after 2000 ticks — state is now ' +
-      h101.bytes + ' bytes of JSON against a pinned 136779');
+    assertEqual(h101.hash, 763870096, 'seed 101 diverged after 2000 ticks — state is now ' +
+      h101.bytes + ' bytes of JSON against a pinned 139716');
   });
 
   test('the pin would notice a one-bit change — it is not hashing a constant', function () {

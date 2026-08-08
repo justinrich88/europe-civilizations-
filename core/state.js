@@ -124,6 +124,20 @@ function newGame(seed) {
     // did not carry would make reconnect-and-replay wrong by exactly the
     // commands in flight.
     queued: [],
+    // THE SHAPE OF THE GAME (sim/victory.js `_vicRecordHistory`, drawn by
+    // render/victory.js). Sampled every BAL.HISTORY.INTERVAL_TICKS:
+    //
+    //   { every, t: [tick,…], p: { pid: { terr: [], force: [], dev: [] } } }
+    //
+    // `every` is the CURRENT interval and is not constant — it doubles each
+    // time the series is decimated, so a reader must use it rather than the
+    // constant to convert an index back to a tick.
+    //
+    // In state for the same three reasons state.seen is: it cannot be
+    // recomputed from the present (it is a record of the past), a renderer-side
+    // copy would have holes wherever rAF did not fire, and snapshot() is JSON
+    // of this object alone.
+    history: null,
     // Monotonic, never reused, never reset. Two commands scheduled for the same
     // tick need a total order, and it may not come from the array's insertion
     // order alone — a queue that is filtered or re-sorted anywhere would lose

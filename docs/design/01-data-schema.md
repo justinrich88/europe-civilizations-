@@ -174,6 +174,8 @@ Distinct from the static data above. This is the only thing that mutates.
                 landing:{ ashore:0, total:0, per:{…} } } ],   // beachheads only
   battles:  { ber: { startedTick, variance, wobble } },
   orderStats: { sweeps, sends, unitsSent, standDowns, unitsLost, fights },
+  history:  { every, t:[tick,…],            // the arc of the game, for the end
+              p:{ pid:{ terr:[], force:[], dev:[] } } },   // screen's chart
   seen:     { ger: { bru: { o:'fra', u:{…}, c:true, t:3120 } } },  // fog memory
   log:      [],
 }
@@ -587,6 +589,43 @@ so it needs no belief layer.
 staging decision currently reads as an attack on a friendly city with reason
 `staging`, and a build reads as one with reason `building`. Cosmetic, and the
 panel is outside the AI's ownership.
+
+### `state.history` — the arc of the game
+
+Written by `_vicRecordHistory` in `sim/victory.js`, drawn by `render/victory.js`
+as a line chart with a Territory / Forces / Development toggle. One sample per
+power every `BAL.HISTORY.INTERVAL_TICKS`.
+
+**`every` is not a constant.** It is the *current* spacing and DOUBLES each time
+the series is decimated, so a reader converting an index back to a tick must use
+`h.every`, never `BAL.HISTORY.INTERVAL_TICKS`.
+
+**On overflow it decimates, never truncates.** Dropping the oldest samples would
+throw away the opening, which is the part of a game most worth seeing; cutting
+the newest would stop the chart before the ending. Halving keeps the whole shape
+at half the resolution. A real game does not reach the cap — 103 samples at
+12,336 ticks — so `BAL.HISTORY.MAX_SAMPLES` is a backstop for
+`tools/balance.js`, which runs hundreds of games.
+
+**`dev` is the BUILT tier, not the operating one.** The chart is a record of
+investment; a fortification must not appear to vanish because a city is
+temporarily under-garrisoned (`04-development.md` §4).
+
+**Neutral has no series.** It is scenery, and a line for it would dominate every
+chart from tick 0.
+
+**It rides `victoryTick` rather than being an eighth phase**, first, before the
+winner check — so the sample at the tick a game ends is the board that ended it.
+A new phase in the shared tick silently changes the meaning of every existing
+test of that tick (known-issue #13). Nothing in the sim reads it back.
+
+**Why it is in state at all**, given it cost a re-pin of the balance hashes:
+`rAF` does not fire in a hidden document (known-issue #10) or while paused, so a
+renderer-side recorder would draw a chart of *when somebody was watching*. In
+state it is also deterministic, so two lockstep clients draw the same chart, and
+it survives `snapshot()` for reconnect. Verified as a pure shape change: at
+12,000 ticks on seeds 100–103, deleting `history` from the new snapshot makes it
+byte-identical to the old one on all four.
 
 ### Log storage
 

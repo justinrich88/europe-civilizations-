@@ -1280,6 +1280,90 @@ html, body {
    is then completely untouched — which is the point, since the final map is
    the thing the player most wants to look at. */
 .vscr.is-dismissed { background: none; }
+/* ── the arc of the game (render/victory.js _vscrChart) ────────────────────
+   A line chart of state.history: one polyline per power, three metrics behind
+   a toggle. Inside the card, which is the only thing on this screen that takes
+   pointer events at all — the scrim is pointer-events: none so the final map
+   stays clickable, and these buttons must NOT change that. They are inside
+   .vscr-card and inherit its `auto`; nothing here re-enables anything. */
+
+.vscr-chart {
+  margin: 14px 0 4px;
+}
+
+.vscr-chart-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.vscr-chart-tab {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.vscr-chart-tab:hover { color: var(--ink); }
+
+.vscr-chart-tab.is-on {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The unit of whatever is being shown, pushed to the far end. It changes with
+   the toggle, so the axis never has to be re-read to know what it counts. */
+.vscr-chart-unit {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+.vscr-chart-svg {
+  display: block;
+  width: 100%;
+  height: 150px;
+  overflow: visible;
+}
+
+.vscr-axis { stroke: var(--line); stroke-width: 1; }
+.vscr-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.6; }
+
+.vscr-chart-y,
+.vscr-chart-x {
+  fill: var(--ink-faint);
+  font-size: 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Colour is OWNERSHIP and comes from the power, exactly as on the map and in
+   the standings — so the chart needs no legend to be read. Written as a style
+   by render/victory.js; the width and joins are legibility constants and live
+   here (known-issues #15: a stylesheet rule silently beats a presentation
+   attribute, so the two must never both claim `stroke`). */
+.vscr-chart-line {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  stroke-opacity: 0.85;
+  vector-effect: non-scaling-stroke;
+}
+
+/* The player's own line, thicker. Seven overlapping series need one that is
+   findable without hunting for a colour. */
+.vscr-chart-line.is-you {
+  stroke-width: 2.6;
+  stroke-opacity: 1;
+}
+
 .vscr.is-dismissed .vscr-card { display: none; }
 
 .vscr-card {

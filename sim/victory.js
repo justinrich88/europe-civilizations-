@@ -199,7 +199,97 @@ function _vicHoldsAnything(state, pid) {
 // victoryTick — phase 5 of the tick.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// THE SHAPE OF THE GAME — one sample per power per BAL.HISTORY.INTERVAL_TICKS.
+//
+// Rides victoryTick rather than becoming an eighth phase. A new phase in the
+// shared tick silently changes the meaning of every existing test of that tick
+// — known-issue #13, where 78 of 79 tests kept passing while measuring
+// something else — and this is a RECORDING, not a rule: nothing in the sim ever
+// reads it back, so it cannot move a game.
+//
+// FIRST in victoryTick, before the winner check, so the sample at the tick a
+// game ends is the board that ended it. Placed after the early `if
+// (state.winner) return` it would record every tick of the game except the one
+// the player most wants to look at.
+//
+// Deterministic: sorted POWER_IDS, no rng, no clock. Three numbers, chosen
+// because they are the three the end screen already ranks powers by, and
+// because each answers a different question — how much ground, how much army,
+// how much investment.
+function _vicRecordHistory(state) {
+  var B = (typeof BAL !== 'undefined' && BAL && BAL.HISTORY) ? BAL.HISTORY : null;
+  if (!B || !(B.INTERVAL_TICKS > 0)) return;
+
+  var h = state.history;
+  if (!h) {
+    h = state.history = { every: B.INTERVAL_TICKS, t: [], p: {} };
+  }
+  // `every`, not the constant: after a decimation the interval has doubled and
+  // the constant is no longer the spacing of this series.
+  if (state.tick % h.every !== 0) return;
+
+  var pids = _vicPowerIds();
+  var i, pid;
+
+  // Territory and development in ONE pass over the board. Two passes would be
+  // two loops over 108 stations every 120 ticks for no benefit.
+  var terr = {}, dev = {};
+  var ids = _vicStationIds(state);
+  for (i = 0; i < ids.length; i++) {
+    var st = state.stations[ids[i]];
+    var o = st.owner;
+    terr[o] = (terr[o] || 0) + 1;
+    // BUILT tier, not operating. This is the investment a power has made and it
+    // does not flicker with the garrison standing in the city; the operating
+    // tier is what a defender currently gets for it, which is a different
+    // question and belongs on the board, not in a history of the game.
+    if (st.development && st.development.tier > 0) {
+      dev[o] = (dev[o] || 0) + st.development.tier;
+    }
+  }
+
+  h.t.push(state.tick);
+  for (i = 0; i < pids.length; i++) {
+    pid = pids[i];
+    if (pid === 'neutral') continue;          // scenery, never a competitor
+    var rec = h.p[pid];
+    if (!rec) rec = h.p[pid] = { terr: [], force: [], dev: [] };
+    rec.terr.push(terr[pid] || 0);
+    rec.force.push(powerForces(state, pid));
+    rec.dev.push(dev[pid] || 0);
+  }
+
+  // DECIMATE rather than truncate. Dropping the oldest samples would throw away
+  // the opening — the part of a game most worth seeing — and cutting off the
+  // newest would stop the chart before the ending. Halving keeps the whole
+  // shape at half the resolution, and doubling `every` keeps the x-axis honest.
+  if (B.MAX_SAMPLES > 1 && h.t.length > B.MAX_SAMPLES) {
+    h.t = _vicHalve(h.t);
+    var keys = Object.keys(h.p).sort();
+    for (i = 0; i < keys.length; i++) {
+      var r = h.p[keys[i]];
+      r.terr = _vicHalve(r.terr);
+      r.force = _vicHalve(r.force);
+      r.dev = _vicHalve(r.dev);
+    }
+    h.every *= 2;
+  }
+}
+
+// Every other entry, keeping index 0. The last sample is kept too when the
+// length is odd; when it is even the newest point is dropped and the next
+// sample replaces it one interval later, which is invisible on a chart and is
+// the price of not special-casing the tail.
+function _vicHalve(arr) {
+  var out = [];
+  for (var i = 0; i < arr.length; i += 2) out.push(arr[i]);
+  return out;
+}
+
 function victoryTick(state) {
+  // BEFORE the winner check — see the note above _vicRecordHistory.
+  _vicRecordHistory(state);
   if (state.winner) return;
 
   var pids = _vicPowerIds();

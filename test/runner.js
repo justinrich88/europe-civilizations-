@@ -285,6 +285,9 @@ function runAllTests() {
   // failure explains a mechanism failure, never the other way round.
   if (typeof suiteCommitment === 'function') suiteCommitment();
 
+  // The end-screen history recording — test/history-tests.js.
+  if (typeof suiteHistory === 'function') suiteHistory();
+
   // Fog family — test/fog-tests.js; skips loudly until core/vision.js lands.
   if (typeof suiteFog === 'function') suiteFog(d);
 

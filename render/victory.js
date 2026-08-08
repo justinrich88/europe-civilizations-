@@ -280,6 +280,194 @@ function _vscrTeardown() {
   VSCR_STATE.dismissed = false;
 }
 
+
+// ---------------------------------------------------------------------------
+// THE ARC OF THE GAME — a line chart of state.history
+//
+// Player request: *"show a line graph of development over time (toggles from
+// territory and forces) so the user can see how the game progressed"*.
+//
+// One series per living-or-fallen power, three metrics behind a toggle. The
+// data is recorded by sim/victory.js on a fixed tick interval, NOT by this
+// file on a frame — see BAL.HISTORY for why (rAF does not fire in a hidden
+// document, so a renderer-side recorder would draw a chart with holes in it
+// wherever the player looked away).
+//
+// Drawn as ONE <svg> built once, like everything else on this screen: the
+// victory card is constructed at the frame the winner appears and never
+// touched again.
+//
+// SVG rather than canvas because the rest of the project is SVG and because a
+// polyline of ~200 points per power is nothing. No library — zero-build is a
+// hard constraint (CLAUDE.md), so this is about forty lines of arithmetic
+// rather than a dependency.
+// ---------------------------------------------------------------------------
+
+var VSCR_CHART_W = 520;
+var VSCR_CHART_H = 150;
+var VSCR_CHART_PAD = { l: 34, r: 8, t: 10, b: 18 };
+
+// The three metrics, in the order they appear as buttons. `key` indexes the
+// per-power record sim/victory.js writes; nothing here re-derives a number.
+var VSCR_METRICS = [
+  { key: 'terr',  label: 'Territory',   unit: 'stations' },
+  { key: 'force', label: 'Forces',      unit: 'units' },
+  { key: 'dev',   label: 'Development', unit: 'tiers built' },
+];
+
+// Largest value across every power for one metric, and the tick span. Both are
+// needed before a single point can be placed, and both are pure reads.
+function _vscrChartExtent(h, key) {
+  var max = 0;
+  var pids = Object.keys(h.p).sort();
+  for (var i = 0; i < pids.length; i++) {
+    var arr = h.p[pids[i]][key] || [];
+    for (var j = 0; j < arr.length; j++) if (arr[j] > max) max = arr[j];
+  }
+  return { max: max, n: h.t.length };
+}
+
+// A rounded axis top, so the gridline reads as a number rather than as
+// whatever the winner happened to peak at.
+function _vscrNiceMax(v) {
+  if (!(v > 0)) return 1;
+  var mag = 1;
+  while (mag * 10 <= v) mag *= 10;
+  var steps = [1, 2, 2.5, 5, 10];
+  for (var i = 0; i < steps.length; i++) {
+    if (mag * steps[i] >= v) return mag * steps[i];
+  }
+  return mag * 10;
+}
+
+function _vscrChartPoints(h, pid, key, max) {
+  var arr = (h.p[pid] || {})[key] || [];
+  var n = h.t.length;
+  if (n < 2 || !(max > 0)) return '';
+  var W = VSCR_CHART_W - VSCR_CHART_PAD.l - VSCR_CHART_PAD.r;
+  var H = VSCR_CHART_H - VSCR_CHART_PAD.t - VSCR_CHART_PAD.b;
+  var out = [];
+  for (var i = 0; i < arr.length && i < n; i++) {
+    var x = VSCR_CHART_PAD.l + (W * i) / (n - 1);
+    var y = VSCR_CHART_PAD.t + H - (H * arr[i]) / max;
+    out.push(x.toFixed(1) + ',' + y.toFixed(1));
+  }
+  return out.join(' ');
+}
+
+// Repaint for one metric. Only the polylines and the two axis labels change,
+// so the SVG is built once and this rewrites points — the same diffing
+// discipline render/map.js uses, for the same reason.
+function _vscrChartPaint(nodes, h, key) {
+  var metric = VSCR_METRICS[0];
+  for (var m = 0; m < VSCR_METRICS.length; m++) {
+    if (VSCR_METRICS[m].key === key) metric = VSCR_METRICS[m];
+  }
+  var ext = _vscrChartExtent(h, key);
+  var max = _vscrNiceMax(ext.max);
+
+  for (var i = 0; i < nodes.lines.length; i++) {
+    var rec = nodes.lines[i];
+    rec.node.setAttribute('points', _vscrChartPoints(h, rec.pid, key, max));
+  }
+  nodes.yTop.textContent = _vscrInt(max);
+  nodes.unit.textContent = metric.unit;
+
+  for (var b = 0; b < nodes.buttons.length; b++) {
+    nodes.buttons[b].classList.toggle('is-on', nodes.buttons[b].dataset.metric === key);
+  }
+}
+
+// Returns the finished element, or null when there is nothing to draw. Null is
+// a real answer: a game that ended before the first sample has no arc, and a
+// chart with one point is a dot pretending to be a story.
+function _vscrChart(state) {
+  var h = state.history;
+  if (!h || !h.t || h.t.length < 2) return null;
+  var pids = Object.keys(h.p).sort();
+  if (!pids.length) return null;
+
+  var wrap = el('div', 'vscr-chart');
+
+  var bar = el('div', 'vscr-chart-tabs');
+  var svgNS = 'http://www.w3.org/2000/svg';
+  var svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('class', 'vscr-chart-svg');
+  svg.setAttribute('viewBox', '0 0 ' + VSCR_CHART_W + ' ' + VSCR_CHART_H);
+  svg.setAttribute('preserveAspectRatio', 'none');
+
+  var mk = function (tag, cls, attrs) {
+    var n = document.createElementNS(svgNS, tag);
+    if (cls) n.setAttribute('class', cls);
+    for (var k in attrs) if (attrs.hasOwnProperty(k)) n.setAttribute(k, attrs[k]);
+    return n;
+  };
+
+  // Frame: a baseline and a top gridline. Two lines, because a chart of seven
+  // overlapping series does not need a grid — it needs a floor and a ceiling.
+  var y0 = VSCR_CHART_H - VSCR_CHART_PAD.b;
+  var y1 = VSCR_CHART_PAD.t;
+  svg.appendChild(mk('line', 'vscr-axis', {
+    x1: VSCR_CHART_PAD.l, y1: y0, x2: VSCR_CHART_W - VSCR_CHART_PAD.r, y2: y0,
+  }));
+  svg.appendChild(mk('line', 'vscr-grid', {
+    x1: VSCR_CHART_PAD.l, y1: y1, x2: VSCR_CHART_W - VSCR_CHART_PAD.r, y2: y1,
+  }));
+
+  var yTop = mk('text', 'vscr-chart-y', { x: VSCR_CHART_PAD.l - 5, y: y1 + 4, 'text-anchor': 'end' });
+  var yZero = mk('text', 'vscr-chart-y', { x: VSCR_CHART_PAD.l - 5, y: y0 + 3, 'text-anchor': 'end' });
+  yZero.textContent = '0';
+  svg.appendChild(yTop);
+  svg.appendChild(yZero);
+
+  // x axis: first and last day, so the span is readable without a tick every
+  // 12 sim-seconds.
+  var xa = mk('text', 'vscr-chart-x', { x: VSCR_CHART_PAD.l, y: VSCR_CHART_H - 5 });
+  xa.textContent = 'day ' + _vscrInt(_vscrDay(h.t[0]));
+  var xb = mk('text', 'vscr-chart-x', {
+    x: VSCR_CHART_W - VSCR_CHART_PAD.r, y: VSCR_CHART_H - 5, 'text-anchor': 'end',
+  });
+  xb.textContent = 'day ' + _vscrInt(_vscrDay(h.t[h.t.length - 1]));
+  svg.appendChild(xa);
+  svg.appendChild(xb);
+
+  // One polyline per power, in the power's own colour — the same colour it
+  // wears on the map and in the standings, so no legend has to teach it.
+  var lines = [];
+  for (var i = 0; i < pids.length; i++) {
+    var pid = pids[i];
+    var pl = mk('polyline', 'vscr-chart-line', { points: '' });
+    var c = _vscrColor(pid);
+    if (c) pl.style.stroke = c;
+    if (state.human && pid === state.human) pl.classList.add('is-you');
+    svg.appendChild(pl);
+    lines.push({ pid: pid, node: pl });
+  }
+
+  var unit = el('span', 'vscr-chart-unit');
+  var nodes = { lines: lines, yTop: yTop, unit: unit, buttons: [] };
+
+  for (var b = 0; b < VSCR_METRICS.length; b++) {
+    var met = VSCR_METRICS[b];
+    var btn = el('button', 'vscr-chart-tab', { type: 'button', text: met.label });
+    btn.dataset.metric = met.key;
+    btn.addEventListener('click', (function (key) {
+      return function () { _vscrChartPaint(nodes, h, key); };
+    }(met.key)));
+    bar.appendChild(btn);
+    nodes.buttons.push(btn);
+  }
+  bar.appendChild(unit);
+
+  wrap.appendChild(bar);
+  wrap.appendChild(svg);
+
+  // DEVELOPMENT FIRST, because it is what was asked for. The toggle is right
+  // there for the other two.
+  _vscrChartPaint(nodes, h, 'dev');
+  return wrap;
+}
+
 function _vscrBuild(state) {
   var head = _vscrHeadline(state);
 
@@ -396,6 +584,10 @@ function _vscrBuild(state) {
     table.appendChild(nr);
   }
   card.appendChild(table);
+
+  // — the arc of the game —
+  var chart = _vscrChart(state);
+  if (chart) card.appendChild(chart);
 
   // — actions —
   var foot = el('footer', 'vscr-actions');

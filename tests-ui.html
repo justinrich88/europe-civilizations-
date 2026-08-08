@@ -111,6 +111,9 @@ var TEST_FILES = [
   // elementFromPoint returns on a laid-out board, so the node harness could
   // never see it.
   'test/routehit-tests.js',
+  // The end-screen chart. Runs LAST in TEST_SUITES below, because it steps the
+  // live game to a real ending — after it, every other suite's board is over.
+  'test/chart-tests.js',
 ];
 
 // Suite entry points to call, in order. Named rather than discovered so a suite
@@ -123,7 +126,11 @@ var TEST_FILES = [
 // this loop moved on without waiting. Silently, with the totals still adding
 // up. Awaiting a non-promise is free, so the rule is simply: always wait.
 var TEST_SUITES = ['suiteSelect', 'suiteSelectSafety', 'suiteRouteView', 'suiteCamera',
-                   'suiteOrdersWhy', 'suiteDevMark', 'suiteWaveFog', 'suiteRouteHit'];
+                   'suiteOrdersWhy', 'suiteDevMark', 'suiteWaveFog', 'suiteRouteHit',
+                   // LAST, and that is load-bearing: suiteVictoryChart runs the
+                   // live game to a winner, which leaves every board every
+                   // other suite depends on finished.
+                   'suiteVictoryChart'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');

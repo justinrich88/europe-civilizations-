@@ -547,6 +547,36 @@ const BAL = {
   // sim-seconds.
   CAPITULATE_CHECK_INTERVAL: 50,
 
+  // ===================================================================
+  // HISTORY — the shape of the game, for the end screen
+  //
+  // sim/victory.js samples every power's territory, forces and development
+  // every INTERVAL_TICKS. render/victory.js draws it as a line chart so a
+  // player can see how the game actually went rather than only how it ended.
+  //
+  // IN THE SIM AND NOT IN THE RENDERER, and the reason is rAF. A renderer-side
+  // recorder samples on frames, so the series would have holes wherever the
+  // player paused, changed speed or backgrounded the tab — and known-issue #10
+  // is that rAF does not fire at all in a hidden document. A chart of "how the
+  // game went" that depends on whether anyone was watching is worse than none.
+  // It also means two lockstep clients draw the same chart of the same game.
+  //
+  // 120 ticks = 12 sim-seconds. A game runs 16,000-25,000 ticks (03-balance-
+  // findings.md), so that is 130-210 points — more than a 320px-wide chart can
+  // resolve, and cheap: 7 powers x 3 numbers x 210 samples is ~4,400 floats.
+  //
+  // MAX_SAMPLES is a hard ceiling, not a hope. tools/balance.js runs hundreds
+  // of 36,000-tick games; without it a stuck game would grow this array
+  // forever. On overflow the series is DECIMATED — every other sample dropped
+  // and the interval doubled — which keeps the whole shape of the game at half
+  // the resolution instead of throwing the beginning away.
+  // ===================================================================
+
+  HISTORY: {
+    INTERVAL_TICKS: 120,
+    MAX_SAMPLES: 256,
+  },
+
   // Transferred stations arrive at this fraction of their garrison — the
   // surrendering army is not handed over intact. 0.5 keeps the reward large
   // without making capitulation a bigger prize than the war that caused it.
