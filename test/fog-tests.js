@@ -1878,6 +1878,195 @@ function _fogSuiteAiSymmetry(d) {
       'cache is warm at ~0.42/tick; a proxy state handed to routeFor/commandRoute ' +
       'invalidates it on every call and takes it to ~5.4/tick.');
   });
+
+  // -------------------------------------------------------------------------
+  // 11. The proxy carries the FORT — C1b, known-issue #26
+  // -------------------------------------------------------------------------
+  //
+  // The proxy is the AI's whole view of a station, and every field it omits is
+  // read by the sim as absent, silently. `development` was omitted, so
+  // fortLevel(sid, state) asked developmentKind about an object that had no
+  // development, got null, and returned the bare map value — and the AI planned
+  // every attack in the game against walls it could not see, including the ones
+  // it built itself after B3.
+  //
+  // These are written against the PROXY BUILDERS rather than through aiDecide,
+  // for the reason the banner at the head of this suite gives: the reachable
+  // seam is the believed-read helper, and a scene staged through aiDecide would
+  // be testing the board's shape rather than the fix.
+  //
+  // Both halves are tested because there are two copies of this builder, on
+  // purpose (`_aiScoreBelievedAt` and `_aiActBelievedAt`, known-issue #12), and
+  // fixing one is exactly how the pair drifts.
+
+  // A power, an adjacent enemy city it can see, and a full garrison so the fort
+  // OPERATES — operatingTier divides the built tier by the garrison, so a
+  // fortress on an empty city is worth nothing and the test would measure that
+  // instead.
+  function _fogFortBoard(tier, mult) {
+    var s = newGame(4242);
+    s.aiEnabled = false;
+    var me = null, tgt = null;
+    for (var i = 0; i < STATION_IDS.length && !me; i++) {
+      if (s.stations[STATION_IDS[i]].owner === pid) me = STATION_IDS[i];
+    }
+    for (var k = 0; k < LINKS.length && !tgt; k++) {
+      var o = LINKS[k].a === me ? LINKS[k].b : (LINKS[k].b === me ? LINKS[k].a : null);
+      if (o && s.stations[o].owner !== pid) tgt = o;
+    }
+    s.stations[me].units = STATIONS[me].capacity;
+    s.stations[tgt].units = STATIONS[tgt].capacity * (mult === undefined ? 1 : mult);
+    if (tier > 0) s.stations[tgt].development = { kind: 'fort', tier: tier, tick: 0 };
+    observeTick(s);
+    return { s: s, me: me, tgt: tgt };
+  }
+
+  // A GARRISON AT WHICH THE FIGHT IS NOT ALREADY DECIDED, and this is not
+  // fixture-fiddling — it is the first two things this test got wrong.
+  // `weakness` is the ONLY term a fortification can move, and it is expressible
+  // over exactly one band of odds: zero at or below the power's MIN_ODDS,
+  // saturated at _AI_ODDS_DECISIVE (3:1), linear between. Outside that band a
+  // tier-3 fortress correctly changes the score by nothing, which is the term
+  // working rather than the fog leaking.
+  //
+  // At a full garrison this fixture's odds are **1.094**, already under the
+  // floor, so the first version of this test asserted a difference the scorer
+  // cannot express and reported the fix as broken. So: search DOWNWARD for a
+  // garrison thin enough to be worth attacking and thick enough to operate the
+  // walls — operatingTier is floor(units / 0.25*capacity), so a quarter-full
+  // city runs a tier-1 fort and a three-quarters-full one runs tier 3.
+  //
+  // THE BAND IS READ OFF THE SCORER, NOT RECOMPUTED. The second wrong version
+  // compared the odds against `BAL.AI.MIN_ODDS` — and the floor is per
+  // PERSONALITY (`person.minOddsMul`; a turtle demands 1.35x), so the search
+  // picked a garrison this particular power still rated as hopeless and the
+  // weakness term was absent either way. Asking whether `terms.weakness` came
+  // back non-zero is asking the scorer what it thinks, which is the whole
+  // no-second-implementation rule (known-issue #9) applied to a test fixture.
+  function _fogFortMult() {
+    var ceil = (typeof _AI_ODDS_DECISIVE === 'number') ? _AI_ODDS_DECISIVE : 3.0;
+    var tries = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.25];
+    for (var i = 0; i < tries.length; i++) {
+      var b = _fogFortBoard(0, tries[i]);
+      var ctx = aiContext(b.s, pid);
+      var sc = aiScoreTarget(b.s, pid, b.tgt, ctx);
+      var terms = (sc && sc.terms) ? sc.terms : {};
+      // Non-zero: this power rates the fight as worth something at all.
+      // Under the ceiling: it is not already calling it a walkover, where every
+      // further advantage — and every wall — is clamped away.
+      if (terms.weakness > 0 && _aiOdds(b.s, pid, b.tgt, ctx) < ceil) return tries[i];
+    }
+    return null;
+  }
+
+  test('a fort the AI can SEE changes the defender power it plans against', function () {
+    var mult = (typeof _aiOdds === 'function') ? _fogFortMult() : 1;
+    assert(mult !== null,
+      'no garrison between a quarter and nine tenths of capacity puts the odds ' +
+      'inside (' + BAL.AI.MIN_ODDS + ', 3) — the scorer would clamp `weakness` ' +
+      'identically either way and the score assertion below would be measuring ' +
+      'the clamp rather than the fort');
+    var bare = _fogFortBoard(0, mult), walled = _fogFortBoard(3, mult);
+
+    // Vacuity guards first, both of them load-bearing. If the target is not
+    // visible the fix is not supposed to fire, and if the fort does not move the
+    // TRUE board then the fixture built a fortress that is not operating.
+    assertEqual(visibleTo(walled.s, pid)[walled.tgt], 2,
+      'the fixture target is not visible to ' + pid + ' — this test cannot ' +
+      'distinguish the fix from the fog');
+    var trueBare = stationPower(bare.s, bare.tgt, 'defender');
+    var trueWalled = stationPower(walled.s, walled.tgt, 'defender');
+    assert(trueWalled > trueBare + 1,
+      'a tier-3 fort moved the TRUE defender power by ' + (trueWalled - trueBare).toFixed(3) +
+      ' — the fixture is wrong, not the AI');
+
+    // ai/ai.js's copy — the odds gate, which decides every attack in the game.
+    var belBare = _aiActDefenderPower(bare.s, pid, bare.tgt, aiContext(bare.s, pid));
+    var belWalled = _aiActDefenderPower(walled.s, pid, walled.tgt, aiContext(walled.s, pid));
+    assertClose(belBare, trueBare, 1e-9,
+      'the believed power of an UNFORTED visible city already disagrees with the board');
+    assertClose(belWalled, trueWalled, 1e-9,
+      'the AI plans against ' + belWalled.toFixed(3) + ' where the fight will be ' +
+      trueWalled.toFixed(3) + ' — the one-station proxy is not carrying `development`, ' +
+      'so every fort on the board is invisible to the odds gate (known-issue #26)');
+
+    // ai/score.js's copy — the target scorer, reached through aiScoreTarget so
+    // the test does not depend on a private name.
+    var sBare = aiScoreTarget(bare.s, pid, bare.tgt, aiContext(bare.s, pid));
+    var sWalled = aiScoreTarget(walled.s, pid, walled.tgt, aiContext(walled.s, pid));
+    var nBare = (typeof sBare === 'number') ? sBare : sBare.score;
+    var nWalled = (typeof sWalled === 'number') ? sWalled : sWalled.score;
+    assert(nWalled < nBare,
+      'aiScoreTarget rates the fortified city at ' + nWalled.toFixed(4) + ' against ' +
+      nBare.toFixed(4) + ' unfortified — a tier-3 fortress moves the score by ' +
+      (nWalled - nBare).toFixed(4) + ', and it was exactly 0.0000 before C1b');
+  });
+
+  test('a REMEMBERED fort is not seen — memory records no walls', function () {
+    // The other half of the rule, and the half that keeps it symmetric with the
+    // player: state.seen stores {o,u,c,t} and no development, and render/map.js
+    // draws the pips at level 2 only. So both sides forget a wall the moment
+    // they stop looking at it, and the AI must not be handed one from the true
+    // board through the back door.
+    // Two boards identical in everything this power can possibly know: same
+    // remembered owner, same remembered garrison, same memory tick. They differ
+    // only in whether the fort is really standing there — which is a fact that
+    // lives on the true board and in no record `pid` holds.
+    function remembered(tier) {
+      var f = _fogFortBoard(tier, 0.5);
+      var s = f.s;
+      // Hand every one of this power's cities away, so it holds nothing
+      // adjacent and can see nothing — then give it a memory of what was there.
+      for (var i = 0; i < STATION_IDS.length; i++) {
+        if (s.stations[STATION_IDS[i]].owner === pid) setStationOwner(s, STATION_IDS[i], 'neutral');
+      }
+      if (!s.seen) s.seen = {};
+      if (!s.seen[pid]) s.seen[pid] = {};
+      s.seen[pid][f.tgt] = { o: s.stations[f.tgt].owner, u: s.stations[f.tgt].units, c: true, t: 0 };
+      return f;
+    }
+
+    var bare = remembered(0), walled = remembered(3);
+    var ctxB = aiContext(bare.s, pid), ctxW = aiContext(walled.s, pid);
+
+    var bel = believedStation(walled.s, pid, walled.tgt, ctxW.vis);
+    assertEqual(bel.level, 1,
+      'the fixture left the target at level ' + bel.level + ', not remembered — ' +
+      'at level 2 this test would pass by reading the real board');
+    var trueGap = stationPower(walled.s, walled.tgt, 'defender') -
+                  stationPower(bare.s, bare.tgt, 'defender');
+    assert(trueGap > 1,
+      'the two boards differ by ' + trueGap.toFixed(3) + ' of TRUE defender power — ' +
+      'there is no hidden fort for the AI to be caught reading');
+
+    // ai/ai.js's copy — the odds gate.
+    assertClose(_aiActDefenderPower(bare.s, pid, bare.tgt, ctxB),
+                _aiActDefenderPower(walled.s, pid, walled.tgt, ctxW), 1e-9,
+      'the odds gate plans differently against two boards this power cannot tell ' +
+      'apart — the proxy is carrying a fortification out of the true board that ' +
+      'no memory record contains');
+
+    // ai/score.js's copy, AT THE HELPER rather than through aiScoreTarget, and
+    // the reason is the banner at the head of this suite. A power that holds
+    // nothing near the target has no sources, so the odds are zero, so
+    // `weakness` — the only term a wall can move — is absent whatever the proxy
+    // says. Going through the public function here would have been an assertion
+    // that cannot fail: it was written that way first, and the mutation that
+    // drops score.js's level gate sailed straight through it.
+    //
+    // Tested separately and explicitly because the gate on ONE of the two
+    // deliberately-duplicated builders survived every other assertion in this
+    // file — exactly the drift known-issue #12 predicts for a duplicated helper.
+    if (typeof _aiScoreBelievedAt !== 'function') {
+      return skipTest('ai/score.js proxy', '_aiScoreBelievedAt is not reachable');
+    }
+    assertClose(
+      stationPower(_aiScoreBelievedAt(bare.s, pid, bare.tgt, ctxB), bare.tgt, 'defender'),
+      stationPower(_aiScoreBelievedAt(walled.s, pid, walled.tgt, ctxW), walled.tgt, 'defender'),
+      1e-9,
+      'ai/score.js\'s proxy gives two indistinguishable boards different defender ' +
+      'power — it is reading development this power has never seen');
+  });
 }
 
 // ---------------------------------------------------------------------------

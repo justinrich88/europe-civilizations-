@@ -785,6 +785,26 @@ which no existing test does.
 
 ## 26. A one-station PROXY state silently answers a different question from the real board — the AI cannot see a single fortification
 
+> **FIXED at C1b (2026-08): both proxies now copy `development`, at belief level
+> 2 only.** The entry stays in full, because the *lesson* is about proxies and
+> the next omitted field will not be a fort. Two things the fix taught that the
+> diagnosis below did not:
+>
+> - **The level gate has to be on BOTH copies, and only one of them can be
+>   reached from a public function.** A power far enough from a station to
+>   remember rather than see it has no sources near it either, so its odds are
+>   zero and `weakness` — the only score term a wall can move — is absent
+>   whatever the proxy says. The test for `ai/score.js`'s gate has to call
+>   `_aiScoreBelievedAt` directly; written through `aiScoreTarget` it could not
+>   fail, and the mutation that removes the gate sailed through it.
+> - **`weakness` saturates**, at `_AI_ODDS_DECISIVE` (3:1) above and at the
+>   power's own `MIN_ODDS × person.minOddsMul` below. Outside that band a
+>   tier-3 fortress correctly moves the score by 0.000 — which looks exactly
+>   like the bug. Any fixture measuring a fort through the scorer has to place
+>   the fight inside the band, and has to ask the scorer where the band is
+>   rather than recomputing it from `BAL.AI.MIN_ODDS` (the personality
+>   multiplier is not in that constant).
+
 `ai/score.js` and `ai/ai.js` both reuse the canonical `stationPower()` by
 building a **one-station proxy state** and handing it over, rather than
 re-deriving power themselves. That is the right instinct and it is #9's rule

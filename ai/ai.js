@@ -476,6 +476,26 @@ function _aiActBelievedUnits(sid, bel) {
 // the two callers that ask "what if this stack were here instead"), and is
 // tested with typeof rather than for truthiness so an override of 0 lands.
 //
+// `development` is carried at LEVEL 2 ONLY — C1b, the fix for known-issue #26,
+// and the twin of the block in ai/score.js. Read that one for why the field was
+// missing, what it cost, and why memory cannot supply it. The short version: a
+// field this proxy omits is a field the sim reads as absent and never complains
+// about, and the omitted one was every fortification on the board.
+//
+// The interaction with `override` is the reason this is not a copy-paste of the
+// other file, and it turns out to be exactly right rather than merely safe.
+// operatingTier divides the built tier by whatever `units` says, and the one
+// caller that passes an override is _aiActGrownDefenderPower — "what will this
+// city be worth once its garrison has finished growing". So the grown garrison
+// raises the fort's OPERATING tier along with the body, which is precisely what
+// happens on the real board: a tier-3 fortress held by a skeleton fights as tier
+// 1 and gets its walls back as it refills. Sizing a staging march against the
+// un-grown tier would under-price the target twice over.
+//
+// The other proxy caller, _aiActStackPower, passes no override and asks
+// stationPower for its OWN side, where _fortBonus is not applied at all — an
+// attacker never gets the defender's walls.
+//
 // READ THE BANNER ABOVE BEFORE PASSING THIS ANYWHERE NEW.
 function _aiActBelievedAt(state, pid, sid, ctx, override) {
   var bel = _aiActBelief(state, pid, sid, ctx);
@@ -486,6 +506,7 @@ function _aiActBelievedAt(state, pid, sid, ctx, override) {
     units: (typeof override === 'number') ? override : _aiActBelievedUnits(sid, bel),
     attackers: (bel.level === 2 && real && real.attackers) ? real.attackers : {},
     connected: bel.connected !== false,
+    development: (bel.level === 2 && real) ? real.development : null,
   };
   return proxy;
 }

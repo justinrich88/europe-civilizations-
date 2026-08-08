@@ -416,6 +416,26 @@ function _aiScoreBelievedUnits(state, sid, bel) {
 // is empty, because memory records a garrison and never records who was
 // besieging it. That matters because stationPower folds the attackers' MIX into
 // the defender's matchup.
+//
+// AND SO IS `development` — C1b, and it was MISSING, which is known-issue #26.
+// Every field this proxy omits is a field the sim reads as absent, silently:
+// fortLevel(sid, state) asks developmentFortLevel, which asks
+// developmentKind(state, sid), which reads state.stations[sid].development off
+// THIS object. With it left out, a tier-3 fortress moved aiScoreTarget by
+// exactly 0.000, and the AI has been blind to every fort on the board — including
+// the ones it has been building itself since B3.
+//
+// LEVEL 2 ONLY, and that is the design rather than a shortcut. state.seen
+// records `{o,u,c,t}` and no development (01-data-schema.md), so a remembered
+// station carries no fort to copy — and inventing one would be worse than
+// omitting it. This makes the AI's information EXACTLY the player's:
+// render/map.js draws the development pips at level 2 and not at level 1, so
+// both sides forget a wall the moment they stop looking at it.
+//
+// The `units` here are the BELIEVED garrison, which is what makes this right
+// rather than merely present: operatingTier divides the built tier by the
+// garrison, so a fortress the AI believes is skeleton-held is planned against as
+// the lower tier it would actually fight at.
 function _aiScoreBelievedAt(state, pid, sid, ctx) {
   var bel = _aiScoreBelief(state, pid, sid, ctx);
   var real = state.stations ? state.stations[sid] : null;
@@ -425,6 +445,7 @@ function _aiScoreBelievedAt(state, pid, sid, ctx) {
     units: _aiScoreBelievedUnits(state, sid, bel),
     attackers: (bel.level === 2 && real && real.attackers) ? real.attackers : {},
     connected: bel.connected !== false,
+    development: (bel.level === 2 && real) ? real.development : null,
   };
   return proxy;
 }
