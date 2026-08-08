@@ -172,7 +172,7 @@ that cost the most time:
 | 23 | `tests-ui.html` result depended on browser localStorage — the guide covered the board on a fresh profile and eleven select tests silently never ran |
 | 24 | `var` inside a function body is not a global — `renderBoard()` threw, `app/main.js` caught it, and the board came up EMPTY with 329 tests green |
 | 25 | `_rdoSet(rec, …)` instead of `_rdoSet(rec.v, …)` writes to a plain object and does nothing, with no error |
-| 26 | A one-station PROXY state answers a different question from the real board — the AI is blind to every fort |
+| 26 | A one-station PROXY state answers a different question from the real board — this one hid every fort from the AI (fixed at C1b; the lesson is proxies, not forts) |
 | 27 | Owner identity at 12,000 ticks is not a valid check for a change that perturbs floats |
 | 28 | Nothing drains while nothing steps — a click on a paused board does nothing, and "and it marched nothing" passes for free |
 

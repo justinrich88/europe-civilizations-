@@ -479,13 +479,13 @@ at 12,000 ticks. A ~700-site rewrite with an exact acceptance test.
 
 ### ~~C1b. The AI cannot see a fortification~~ — SHIPPED 2026-08
 
-`ai/score.js`'s one-station proxy (`_aiScoreBelievedAt`, and its twin
-`_aiActBelievedAt` in `ai/ai.js`) copies `owner`, `units`, `attackers` and
-`connected` — and **not `development`**. `fortLevel()` therefore sees no
-fortification, so the AI's odds gate and target scorer are blind to every fort
-on the board, **including the ones it has built itself since B3**. Measured: a
-tier-3 fort moves `aiScoreTarget` by exactly 0.000, on this tree and on the
-pre-C1 tree alike.
+The diagnosis, kept in the past tense it now belongs in. `ai/score.js`'s
+one-station proxy (`_aiScoreBelievedAt`, and its twin `_aiActBelievedAt` in
+`ai/ai.js`) copied `owner`, `units`, `attackers` and `connected` — and **not
+`development`**. `fortLevel()` therefore saw no fortification, so the AI's odds
+gate and target scorer were blind to every fort on the board, **including the
+ones it had built itself since B3**. Measured: a tier-3 fort moved
+`aiScoreTarget` by exactly 0.000, on that tree and on the pre-C1 tree alike.
 
 **It predates C1 and was deliberately not fixed there**, because fixing it
 changes how the AI plays and would have landed inside a commit whose balance
@@ -526,9 +526,43 @@ games, seeds 100–195, on this tree and on `0fbdb11`:
 
 The spread went the wrong way by 3.1 points and games did not get longer. **On
 96 games neither movement clears the noise** — the standard error on a 74% rate
-is 4.5 points — so the honest reading is *"no measurable effect on who wins"*,
-not *"it made things worse"*. France losing eight points to Germany and Russia is
-the largest single move and is about 1.7σ; suggestive, not established.
+is 4.5 points — so the aggregate reading is *"no measurable effect on who wins"*,
+not *"it made things worse"*.
+
+**But the aggregate table is the weaker instrument here, and the paired one says
+something the table cannot.** Same 96 seeds, both trees, winner and length
+recorded per game:
+
+| | |
+|---|---|
+| games whose length was **identical** | **0 of 96** |
+| games whose **winner** changed | **22 of 96** |
+| France: games won before but not after / after but not before | **10 / 2** |
+| Austria: same | 5 / 8 |
+| developments still standing at the end, mean | 27.09 → **25.10** |
+
+So this is emphatically **not** a change that only shows up in a handful of
+seeds: it touched *every single game*. What it did not do is move who wins, and
+those two facts together are the actual result — the AI now plays a
+measurably different game everywhere and arrives at almost the same distribution
+of victors.
+
+**France is the one lead worth naming, and it is named as a lead.** Its 17.7% →
+9.4% drop is 10 games lost against 2 gained across the discordant pairs; an exact
+paired (McNemar) test on those 12 gives **p ≈ 0.04**. That is a real signal by
+itself — and it is one of seven powers examined with no hypothesis stated in
+advance, so it does not survive a multiple-comparison correction and must not be
+quoted as an established effect. If it is real, the mechanism to look for is that
+France's opening is the one that most depends on taking fortified ground early.
+Re-measure it deliberately before believing it.
+
+**The 0-of-96-identical row is also the method note.** The four-seed board diff
+that `core/exact.js` and B2 were verified with would have been useless here and
+known-issue #27 says why; what replaces it for an AI change is this pair of
+tables — the aggregate for *did the outcome move*, and the per-seed diff for *did
+anything happen at all*. Either one alone is misleading: the aggregate would have
+read as "no effect", and the per-seed count alone would have read as "enormous
+effect".
 
 **Why a correct fix can be balance-neutral, and why it was still worth making.**
 The AI now prices a wall correctly *and everyone's walls are priced correctly*,
