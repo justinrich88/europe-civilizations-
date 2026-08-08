@@ -477,7 +477,7 @@ at 12,000 ticks. A ~700-site rewrite with an exact acceptance test.
 - **Nothing cracks a fortress but mass.** `04-development.md` §7's stalemate
   question is live again.
 
-### C1b. The AI cannot see a fortification — PRE-EXISTING, found at C1
+### ~~C1b. The AI cannot see a fortification~~ — SHIPPED 2026-08
 
 `ai/score.js`'s one-station proxy (`_aiScoreBelievedAt`, and its twin
 `_aiActBelievedAt` in `ai/ai.js`) copies `owner`, `units`, `attackers` and
@@ -497,6 +497,54 @@ The fix is small and has one real decision in it — memory (`state.seen`) recor
 `{o,u,c,t}` and no development, so the proxy can only carry a fort at belief
 level 2, which is what `render/map.js` already does with the pips. Do it as its
 own change, with its own before/after sweep.
+
+**Done exactly that way.** Both proxies carry `development` at level 2 and
+nothing at level 1, so the AI forgets a wall the moment it stops looking at it —
+the same rule the pips give the player. The believed `units` do the rest:
+`operatingTier` divides the built tier by the garrison, so a fortress the AI
+believes is skeleton-held is planned against as the lower tier it would really
+fight at.
+
+| | before | after |
+|---|---|---|
+| believed defender power against a tier-3 fort | 31.500 | **40.500** — the true board |
+| `aiScoreTarget` on that city | **0.0000** | **−0.378** |
+| the same fort, only *remembered* | invisible | still invisible |
+
+**THE BALANCE SWEEP DID NOT IMPROVE ANYTHING, AND THAT IS THE HEADLINE.** 96
+games, seeds 100–195, on this tree and on `0fbdb11`:
+
+| | before | after |
+|---|---|---|
+| Austria-Hungary | 74.0% | **77.1%** |
+| French Republic | 17.7% | **9.4%** |
+| German Empire | 0.0% | 4.2% |
+| Russian Empire | 2.1% | 4.2% |
+| British / Italian / Ottoman | 3.1 / 1.0 / 0.0% | 3.1 / 1.0 / 0.0% |
+| win-rate spread | 74.0 pts | **77.1 pts** |
+| mean game length | 15,706 ticks | 15,568 ticks |
+
+The spread went the wrong way by 3.1 points and games did not get longer. **On
+96 games neither movement clears the noise** — the standard error on a 74% rate
+is 4.5 points — so the honest reading is *"no measurable effect on who wins"*,
+not *"it made things worse"*. France losing eight points to Germany and Russia is
+the largest single move and is about 1.7σ; suggestive, not established.
+
+**Why a correct fix can be balance-neutral, and why it was still worth making.**
+The AI now prices a wall correctly *and everyone's walls are priced correctly*,
+so on a board where every power builds, the change is close to symmetric. What
+it removes is a class of decision that was simply wrong — marching into a
+fortress the attacker could see and had no way to account for — and that matters
+for the **player**, who now faces an opponent that respects the thing the player
+just spent half a city on. A fix whose justification is "the AI was reading a
+field that does not exist" does not need a win-rate improvement to be right; what
+it needed was proof that it did not make the board *worse*, and that is what the
+table above is.
+
+**It also tells Phase D something.** Austria-Hungary sits at 74–77% whether or
+not the AI can see forts, which is another instrument saying the residue is
+positional rather than tactical — the same conclusion B3 reached from the other
+direction.
 
 ### C2. Development — FIRST PROTOTYPE SHIPPED 2026-07, out of order, on request
 
