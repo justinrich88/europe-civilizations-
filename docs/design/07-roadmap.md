@@ -479,7 +479,49 @@ builds, as of B3** — 75–88 builds a game across seeds 100–103, and the has
 moved a very long way. See `04-development.md` §10.3 for the three narrowings and
 what was measured.
 
-### C3. Route state and the standings panel
+### ~~C3. Route state and the standings panel~~ — SHIPPED 2026-08
+
+Two halves, and the first had already landed under another name.
+
+**"Understand if they're actually active"** shipped 2026-07 as the
+flowing / waiting / stuck treatment (commit `2c26f46`) — the entry below still
+describes it as unfixed and is now the stale half of this section. The
+`blocked` reason also already reaches the player in words, per destination, in
+the rail's supply section (`render/readout.js`, pinned by
+`test/scenarios-orderswhy.js`). So §2's *"hover a route → the reason in plain
+words"* did not need a second vocabulary; hovering a route now focuses the city
+that owns it, and the existing explanation answers.
+
+**"Tough to click"** is what actually remained, and §2 required it be *measured
+before it is fixed*. It was, on the shipped page at 800x900 with 14 routes:
+
+| | |
+|---|---|
+| a 12px band around a route overlaps a station symbol | **28.1%** of its area |
+| station centres stolen by a 12px hit stroke | **0 of 44** |
+| route length that becomes reachable | **70.7%** |
+
+Those first two numbers only look compatible once you know why: routes are built
+into `#g-links`, **below** `#g-stations`, so every pixel the two share resolves
+to the station. The safety is structural, not lucky — and if that group is ever
+moved above the stations the hit stroke starts eating the click that commits an
+attack, with no error and no console output.
+
+**The regression this nearly shipped with.** `selTerritoryAt()` read
+`evt.target.closest('[data-territory]')`. The hit stroke is the first thing over
+the board that accepts a pointer, so anywhere a route crossed a country the
+event target was the route and the lookup came back null —
+double-click-to-select-a-country did nothing, silently, on exactly the borders a
+player is most likely to be managing. It now resolves through
+`elementsFromPoint`, written against any overlay rather than against this one.
+
+`test/routehit-tests.js`, 8 tests in `tests-ui.html`, five mutations each
+caught. Two of those tests were written wrong first and their own vacuity guards
+said so: one assumed routes never share a corridor (they do, and
+`elementFromPoint` correctly returns the topmost), and one asserted every route
+point sits over a country (a sea crossing does not).
+
+### ~~C3, as originally written~~ — the stale statement of the problem
 
 `05-command-clarity.md` §2. The data to answer *"is this route running"*
 already exists in `standingOrderNext` and never reaches the screen. **This is

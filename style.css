@@ -2509,6 +2509,35 @@ html, body {
   pointer-events: none;
 }
 
+/* THE ONE THING OVER THE BOARD THAT ACCEPTS A POINTER, and it is allowed to
+   because of where it sits rather than because of what it is: routes are built
+   into #g-links, BELOW #g-stations, so a station always wins the pixels the two
+   share (render/map.js has the measurement — 0 of 44 station centres stolen).
+
+   `stroke`, not `all`. A route that doubles back would enclose an area, and
+   `all` would make that whole region swallow pointers — which is known-issue #5
+   exactly, five occurrences, no error and no console output.
+
+   No fill, no stroke colour: it is a hit target, not a mark. Non-scaling so its
+   grabbable width is 12 CSS px at every zoom, the same reasoning as the line's
+   own weight. */
+.station-orderhit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+}
+
+/* Hovering a route lifts its line, so the thing under the cursor is the thing
+   being described in the rail. Weight only — colour stays ownership's. */
+.station-orderroute.is-hovered .station-orderline {
+  stroke-opacity: 1;
+  stroke-width: 2.6;
+}
+
 .station-orderline {
   stroke-width: 1.8;
   stroke-opacity: 0.85;

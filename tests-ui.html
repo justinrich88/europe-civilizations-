@@ -107,6 +107,10 @@ var TEST_FILES = [
   // ownerEpoch both unmoved. Headless coverage of the rule itself is complete
   // (test/fog-tests.js, `fog / wave vision`) and cannot see this at all.
   'test/wavefog-tests.js',
+  // The supply route as a CLICK TARGET (C3). Entirely about what
+  // elementFromPoint returns on a laid-out board, so the node harness could
+  // never see it.
+  'test/routehit-tests.js',
 ];
 
 // Suite entry points to call, in order. Named rather than discovered so a suite
@@ -119,7 +123,7 @@ var TEST_FILES = [
 // this loop moved on without waiting. Silently, with the totals still adding
 // up. Awaiting a non-promise is free, so the rule is simply: always wait.
 var TEST_SUITES = ['suiteSelect', 'suiteSelectSafety', 'suiteRouteView', 'suiteCamera',
-                   'suiteOrdersWhy', 'suiteDevMark', 'suiteWaveFog'];
+                   'suiteOrdersWhy', 'suiteDevMark', 'suiteWaveFog', 'suiteRouteHit'];
 
 var out = document.getElementById('out');
 var frame = document.getElementById('frame');

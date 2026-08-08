@@ -1222,6 +1222,11 @@ function mapVeil(bel) {
 // screen pixels at 1x through 4x (known-issues #17: a length authored in board
 // units and divided by cameraScale() alone is constant under zoom and NOT under
 // window size — nothing here divides by anything, the counter-scale does it).
+// Width of the transparent hit stroke behind each route, in CSS px (the stroke
+// is non-scaling, like the line it shadows). 12 is what 05-command-clarity.md §2
+// proposed and what the measurement above the builder was taken at.
+const MAP_ORDER_HIT_W = 12;
+
 const MAP_ORDER_CHEV_D = 'M-4.8,-6.3 L3.3,0 L-4.8,6.3 L-7.5,3.9 L-2.1,0 L-7.5,-3.9 Z';
 
 // A bar ACROSS the route, for a line that cannot deliver right now. Authored
@@ -1450,6 +1455,33 @@ function mapOrderRoute(D, state, rec, sid, to) {
   const g = el('g', 'station-orderroute');
   const color = powerColor(D, state.stations[sid].owner) || '#ffffff';
   const d = linkRouteD(geoms);
+
+  // THE HIT STROKE (C3, 05-command-clarity.md §2 "tough to click").
+  //
+  // A transparent copy of the line, MAP_ORDER_HIT_W wide, carrying the route's
+  // SOURCE so render/select.js can focus the city that owns it. First child, so
+  // it paints under the visible line and never tints it.
+  //
+  // §2 demanded this be measured before it was built, because a wide invisible
+  // click target over the board is known-issue #5 and has bitten five times. It
+  // was, on the shipped page at 800x900 with 14 routes drawn:
+  //
+  //   * 0 of 44 station centres were stolen by a 12px stroke
+  //   * 70.7% of route length became reachable — exactly the share not already
+  //     under a station symbol
+  //
+  // and the reason it is safe is STRUCTURAL rather than lucky: routes are built
+  // into `#g-links`, which sits BELOW `#g-stations`, so every pixel where the
+  // two overlap still resolves to the station. That is 28.1% of the band. If
+  // this group is ever moved above the stations, this stroke starts eating the
+  // click that commits an attack and nothing will say so.
+  //
+  // `pointer-events: stroke` (in style.css, not here) is what keeps the INTERIOR
+  // of the path inert — a route that doubles back would otherwise enclose an
+  // area and swallow everything inside it.
+  const hit = el('path', 'station-orderhit', { d: d, 'data-orderfrom': sid });
+  g.appendChild(hit);
+
   const line = el('path', 'station-orderline', { d: d });
   // Written as a STYLE, not an attribute. The colour is computed by this
   // renderer from live state, and a presentation attribute sits at the bottom
@@ -1502,7 +1534,7 @@ function mapOrderRoute(D, state, rec, sid, to) {
 
   layer.appendChild(g);
   return {
-    g: g, line: line, hops: hops, d: d, marks: marks,
+    g: g, line: line, hit: hit, hops: hops, d: d, marks: marks,
     epoch: state.ownerEpoch || 0,
   };
 }
@@ -1518,6 +1550,12 @@ function mapOrderRepath(route) {
   if (d !== route.d) {
     route.d = d;
     setAttr(route.line, 'd', d);
+    // The hit stroke tracks the visible line exactly. Kept in the same branch
+    // rather than beside it: two paths that are supposed to be identical and
+    // are written from different places is how they stop being identical, and a
+    // hit target that has drifted off its line is invisible until somebody
+    // hovers the wrong pixel.
+    if (route.hit) setAttr(route.hit, 'd', d);
   }
   // The marks are not written here: their transforms are rewritten for the new
   // scale by the one pass in mapApplySymbolScale that writes every counter-

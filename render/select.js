@@ -1019,15 +1019,69 @@ function selStationAt(evt) {
   return best;
 }
 
+// DOUBLE-CLICK A COUNTRY, and the reason this does not read `evt.target` alone.
+//
+// It used to, and C3 broke it: the supply-route hit stroke is the first thing
+// over the board that accepts a pointer, so anywhere a route crossed a country
+// the event target was the route and `closest('[data-territory]')` came back
+// null. Double-clicking there selected nothing, silently, on exactly the
+// borders a player is most likely to be managing.
+//
+// `elementsFromPoint` (plural) returns every element under the cursor in paint
+// order, so the territory is found THROUGH whatever is on top of it. Written
+// against any overlay rather than against this one: the next thing painted over
+// the board would otherwise reintroduce the same bug, which is the shape
+// known-issue #5 keeps taking.
 function selTerritoryAt(evt) {
   const sid = selStationAt(evt);
   if (sid && typeof STATIONS !== 'undefined' && STATIONS[sid]) {
     return STATIONS[sid].territory;
   }
   const t = evt.target;
+  if (t && t.closest) {
+    const poly = t.closest('[data-territory]');
+    if (poly) return poly.getAttribute('data-territory');
+  }
+  if (typeof document === 'undefined' || !document.elementsFromPoint) return null;
+  const stack = document.elementsFromPoint(evt.clientX, evt.clientY) || [];
+  for (let i = 0; i < stack.length; i++) {
+    const node = stack[i];
+    if (!node || !node.closest) continue;
+    const hitPoly = node.closest('[data-territory]');
+    if (hitPoly) return hitPoly.getAttribute('data-territory');
+  }
+  return null;
+}
+
+// Lift the hovered route's line, and only that one. Kept as a plain class
+// toggle on the route GROUP rather than a redraw: hover fires constantly, and
+// mapOrderIndex()'s whole design is that routes are rebuilt on a player edit or
+// a capture and never per frame.
+let SEL_ROUTE_HOVER = null;
+
+function selPaintRouteHover(hitNode) {
+  const g = hitNode && hitNode.closest ? hitNode.closest('.station-orderroute') : null;
+  if (g === SEL_ROUTE_HOVER) return;
+  if (SEL_ROUTE_HOVER) SEL_ROUTE_HOVER.classList.remove('is-hovered');
+  if (g) g.classList.add('is-hovered');
+  SEL_ROUTE_HOVER = g;
+}
+
+// The supply route under the pointer, as its SOURCE station id, or null.
+//
+// Returns the source rather than the route because that is what every existing
+// explanation is keyed on: the rail's supply section already says, per
+// destination, what leaves and why it does not (render/readout.js, and
+// test/scenarios-orderswhy.js pins the words). Hovering the line focuses the
+// city that owns it, and the answer the player wanted is already on screen —
+// no second copy of the reason, and no new vocabulary (known-issue #9).
+function selOrderSourceAt(evt) {
+  const t = evt.target;
   if (!t || !t.closest) return null;
-  const poly = t.closest('[data-territory]');
-  return poly ? poly.getAttribute('data-territory') : null;
+  const hit = t.closest('.station-orderhit');
+  if (!hit) return null;
+  const from = hit.getAttribute('data-orderfrom');
+  return (from && typeof STATIONS !== 'undefined' && STATIONS[from]) ? from : null;
 }
 
 // ── selection mutation ──────────────────────────────────────────────────
@@ -1233,7 +1287,12 @@ function selOnMouseMove(evt) {
   // that is not already a source — you cannot volley at yourself.
   if (selPrune()) selRedraw();
   const sid = selStationAt(evt);
-  selSetFocus(sid);
+  // A station always wins. The route only answers for the pixels no station
+  // claims, which is the 70.7% of a route's length that is not already under a
+  // symbol — measured, see render/map.js above the hit stroke.
+  const overRoute = sid ? null : selOrderSourceAt(evt);
+  selSetFocus(sid || overRoute);
+  selPaintRouteHover(overRoute ? evt.target.closest('.station-orderhit') : null);
   const target = (sid && SEL_STATE.selected.size && !SEL_STATE.selected.has(sid)) ? sid : null;
   if (target !== SEL_STATE.hoverTarget) {
     SEL_STATE.hoverTarget = target;
