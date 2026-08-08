@@ -849,3 +849,42 @@ differ (C1 did the latter — see `04-development.md` §9c — and got a bit-ide
 board out of a ~700-site rewrite as a result). The earlier `core/exact.js` and B2
 results stand: both held drift at ~1e-13 *at* 12,000 ticks, which is the case the
 standard is actually valid for.
+
+---
+
+## 28. A click on a PAUSED board now does nothing — commands are scheduled, and nothing drains while nothing steps
+
+Since the A3 retrofit (`07-roadmap.md`) every player command — `send`, `order`
+and `build` alike — goes through `queueCommand`, which puts it in `state.queued`
+for a named tick. `commandsTick` drains it at **phase 1 of the next tick**.
+
+So on a paused board there is no next tick, and the command sits in the queue.
+The gesture is accepted, the receipt says `ok: true`, the selection clears, the
+banner does not appear, and the board does not move — which is
+indistinguishable, from the outside, from a handler that never fired. This is
+the same class of failure as #5 (an overlay eating the click): nothing errors and
+nothing logs.
+
+Players never see it, because A4 took pause out of the player UI. It bites
+exactly two workflows, and both of them are verification:
+
+- **`?dev=1` by hand.** Pause, click, look — and conclude the gesture is broken.
+  Unpause and it fires.
+- **A browser probe.** rAF never fires in a hidden document (#10), so probes
+  drive the sim with `stepTicks(GAME, n)`. A probe that clicks and then reads the
+  board without stepping reads it one tick too early.
+
+**The fix is one line — step a tick after the gesture** — and the trap worth
+naming is the *inverse* assertion. `test/select-tests.js` is full of checks of
+the form *"and it marched nothing"*, and every one of them passes for free
+against a board that simply has not drained yet. Those must step the tick
+**before** they look, or they are testing that time has not passed.
+
+A second-order version of the same thing cost a real failure in that file: a test
+that fires a gesture and deliberately does *not* step — because what it checks is
+pure UI — leaves a live command in `state.queued`. The next test's tick then
+drains two `order` commands against the same group, and `order` is a TOGGLE, so
+the second removes the line the first just added. It reported as
+`cmd+right-click while armed set no supply line`, which reads exactly like a
+broken gesture and is not one. Fixtures that reset a board must now empty
+`state.queued` along with the waves.

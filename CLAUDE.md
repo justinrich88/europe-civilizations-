@@ -56,15 +56,24 @@ drains it through `applyCommand`, which is still the sole mutator. `atTick`
 defaults to `state.tick`, and `state.tick` is **the tick about to run**
 (`stepTick` increments at the end). Shape is validated at queue time and
 everything else at drain time, so a command can be accepted and then legally
-rejected — that is not a bug. `send` and `order` from `render/select.js` are still
-immediate; see `07-roadmap.md` A3 for why and what it costs.
+rejected — that is not a bug.
+
+**All three verbs are scheduled, including the ones a click issues.** `render/`
+never sees a result: `queueCommand` returns a RECEIPT (`{ok, tick, seq}`), and
+the outcome arrives a tick later through `onCommandResult(fn)` — a listener
+channel that is deliberately **not in state** and that the sim never reads, so a
+headless run plays the bit-identical game to a browser. A listener must not
+mutate state. **The trap this introduces is #28**: nothing drains while nothing
+steps, so on a paused board a click does nothing at all, and every assertion of
+the form *"and it marched nothing"* passes for free unless it steps the tick
+first.
 
 ---
 
 ## Running things
 
 ```
-node test/node.js                  the sim suite — 362 tests, 35 suites, headless
+node test/node.js                  the sim suite — 376 tests, 36 suites, headless
 node test/exact-tests.js           the deterministic-maths suite standalone
 node test/queue-tests.js           scheduled commands standalone
 node test/development-tests.js     development standalone
@@ -77,10 +86,10 @@ python3 tools/serve.py             dev server on 8761 — SEE #16 BELOW
 `tests.html` is the browser sim suite. **`tests-ui.html` is the one that
 matters for anything under `render/`** — it loads `index.html` itself in an
 800×900 iframe and injects the test files, so it tests the shipped page rather
-than a copy of its script list. 50 tests, 5 suites, that `node test/node.js`
+than a copy of its script list. 75 tests, 9 suites, that `node test/node.js`
 cannot run. A **SKIP is a FAILURE** on that page, and so is a suite that records zero
 tests — **and so is a suite that records FEWER tests than it has**, which is how
-#23 hid for weeks. `select / armed supply order` must read 11/11; at 0/1 or 1/1
+#23 hid for weeks. `select / armed supply order` must read 13/13; at 0/1 or 1/1
 something is covering the board and the other ten never registered.
 
 Never serve this with `python3 -m http.server` — see #16.
@@ -146,7 +155,7 @@ out of a ~700-site rewrite; `04-development.md` §9c is the worked example.
 
 ## Known issues — read `docs/testing/known-issues.md` before debugging
 
-27 numbered entries, five of which recurred after being written down. The ones
+28 numbered entries, five of which recurred after being written down. The ones
 that cost the most time:
 
 | # | The trap |
@@ -165,6 +174,7 @@ that cost the most time:
 | 25 | `_rdoSet(rec, …)` instead of `_rdoSet(rec.v, …)` writes to a plain object and does nothing, with no error |
 | 26 | A one-station PROXY state answers a different question from the real board — the AI is blind to every fort |
 | 27 | Owner identity at 12,000 ticks is not a valid check for a change that perturbs floats |
+| 28 | Nothing drains while nothing steps — a click on a paused board does nothing, and "and it marched nothing" passes for free |
 
 **macOS only:** files under `~/Downloads` pick up a `com.apple.macl` ACL the
 preview server cannot read, giving silent 404s that look exactly like code bugs

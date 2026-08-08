@@ -264,12 +264,19 @@ Hard rules:
 - `sim/` and `ai/` must never touch `document`.
 - **`ownerEpoch` is an integer counter, never a timestamp.** It counts station ownership changes. Routing is ownership-aware and cached (`routeFor` below), and this is the only thing that tells the cache the board moved. Change a station's owner **only** through `setStationOwner(state, sid, owner)` — a raw write to `state.stations[sid].owner` leaves the epoch behind and the next route may be answered from a search built against the old map. That includes test fixtures.
 
-All mutation flows through one entry point:
+All mutation flows through one entry point, and all *input* is scheduled into it:
 
 ```js
-applyCommand(state, { type:'send',  owner, sources:[…], target, fraction,
-                      standing? })   // `types?` removed at C1
-applyCommand(state, { type:'order', owner, stations:[…], target })
+// what a caller outside the tick issues — a click, and later a packet
+queueCommand(state, cmd, atTick?)  ->  { ok, tick, seq, reason }
+
+// the three command shapes; `owner` is required on all of them
+{ type:'send',  owner, sources:[…],  target, fraction, standing? }   // `types?` removed at C1
+{ type:'order', owner, stations:[…], target }                        // station id toggles, null clears
+{ type:'build', owner, stations:[…], kind? }
+
+// the sole mutator, reached by commandsTick at phase 1 and by aiTick at phase 0
+applyCommand(state, cmd)           ->  { ok, reason, accepted:[…], rejected:[…], waves:[…] }
 ```
 
 which is what makes headless testing and replay free.
@@ -342,6 +349,13 @@ Nor may it call `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `atanh`, `hypot`,
 - **Shape is checked at queue time; the board is checked at drain time.** A command may be accepted and then rejected, because the board at drain time is the only board there is. `state.cmdStats` counts `queued` / `applied` / `rejected`.
 
 `state.queued` and `state.nextCmdSeq` are part of the state and therefore part of `snapshot()` — a command issued but not yet executed is part of the future the snapshot has to determine.
+
+**And the result comes back through `onCommandResult(fn)`, not through a return value.** Scheduling a command takes the outcome away from the caller — a click cannot know what its volley did, because the board that will judge it does not exist yet. `onCommandResult(fn)` registers `fn(cmd, res, { tick, seq })`, called once per drained command with the same `res` object `applyCommand` produced, and returns an unsubscribe function. Match by the `seq` `queueCommand` handed back; matching by recency reports one click's outcome against another's. Four things are contract:
+
+- **Listeners are NOT in state.** A function cannot survive `snapshot()`, and holding the *results* in state would move every balance hash in the project for a value the sim never reads.
+- **The sim never consults one.** A client with no listener — every headless run, every `tools/balance.js` sweep, a future server — plays the bit-identical game to a browser. That is what makes the channel safe under lockstep, and it is pinned by a test that hashes 400 ticks with and without a listener registered.
+- **They fire after the WHOLE drain**, never between two commands. Commands due on the same tick apply back to back, so no listener observes a half-drained tick.
+- **A listener must not mutate state.** It is a notification, not a phase (`07-roadmap.md` A3, known-issue #13). One that mutates runs on the client with a renderer and not on the one without, which is a desync by construction. A listener that throws is caught and logged loudly, for the same reason.
 
 **Wave arrival convention:** a wave is *arrived* when `progress >= 1` on its final hop. Tests drive combat by pushing a wave with `progress: 1` onto `state.waves` and calling `stepTick`. `sim/movement.js` must resolve arrival on the tick it is seen, not defer to the next one.
 
@@ -418,9 +432,13 @@ The preview **must** call these rather than estimating, or the ETAs shown before
 
 **The preview must pass `state` and `PLAYER`.** `commandRoute(from, to)` still answers with geography, and geography is no longer what a send does: a two-argument preview will draw a line straight through an enemy city and the commit will then reject that source with `'no-route'`. A source for which `commandRoute(src, target, GAME, PLAYER)` returns `null` has no legal send and should be drawn as refused rather than as a route.
 
-**Input funnels to `applyCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls `applyCommand(GAME, cmd)` — the same entry point the AI uses. There is no second path by which the board changes, which is what keeps replay and headless testing free.
+**Input funnels to `queueCommand`.** A commit builds `{ type:'send', owner, sources, target, fraction }` and calls **`queueCommand(GAME, cmd)`**, which schedules it for the head of the next tick, where `commandsTick` drains it through `applyCommand` — the same sole mutator the AI reaches. There is no second path by which the board changes, which is what keeps replay and headless testing free.
 
-Nothing in `render/` or `app/` may mutate state directly. Read freely, write only through `applyCommand`.
+**All three verbs are scheduled, as of the A3 retrofit (2026-08), and the consequence is load-bearing for anything written in `render/`:** a click does not change the board. Nothing may issue a command and then read the board on the next line expecting to see the effect; there is a tick in between. `queueCommand`'s return value is a **receipt** — `{ ok, tick, seq }`, where `ok` means *accepted into the queue* — and the outcome arrives later through `onCommandResult`. `render/select.js` keys its pending records by `seq` **and** by command-object identity, because `seq` counts from 1 per state and more than one state exists on a test page.
+
+A visible consequence in `?dev=1`: with the board **paused**, a queued command never drains, so a click appears to do nothing until time moves again. That is the honest reading — the order is *issued* while paused and *executes* when the clock does — and it is known-issue #28.
+
+Nothing in `render/` or `app/` may mutate state directly. Read freely, write only through `queueCommand`.
 
 **What a renderer needs for standing orders.** Four reads and one write, no more:
 
@@ -433,7 +451,7 @@ Nothing in `render/` or `app/` may mutate state directly. Read freely, write onl
 | `standingOrderPlan(state, pid)` | The same, keyed by source id, for every supplying city a power holds, in **one** pass. **Anything wanting more than one station calls this** — `standingOrderNext` plans the whole power in order to answer about one station, so one call per frame is fine and a loop over the board is not. Both are pure (asserted). |
 | `standingOrderSend(state, sid)` | Units this station is **willing** to ship, `0` if none. The source's side only, and **not** what to print: the two stopped being the same number when the headroom ceiling landed, and a panel showing this one advertises a stream a full rally is taking none of. Quote it as the *fraction rule*, never as a forecast. |
 | `state.orderStats` | `{ sweeps, sends, unitsSent, standDowns, unitsLost, fights }`. `fights` is a tripwire that must always read 0. |
-| `applyCommand(GAME, { type:'order', owner:PLAYER, stations:selectedSources(), target:'lei' })` | The **only** way to set a supply line. `target` is a station id to **toggle**, or `null` to clear every line on the selected stations. The add/remove verdict is decided **once for the whole group** in a read-only first pass — if any selected station lacks the target, the whole group adds it — so a mixed selection resolves one way rather than per station. Per-station validation: an unowned station in the list is rejected on its own (`'not-owned'`) and the rest still apply. |
+| `queueCommand(GAME, { type:'order', owner:PLAYER, stations:selectedSources(), target:'lei' })` | The **only** way to set a supply line, and it takes effect on the **next tick**, not on this line. `target` is a station id to **toggle**, or `null` to clear every line on the selected stations. The add/remove verdict is decided **once for the whole group** in a read-only first pass — if any selected station lacks the target, the whole group adds it — so a mixed selection resolves one way rather than per station. Per-station validation: an unowned station in the list is rejected on its own (`'not-owned'`) and the rest still apply. |
 
 Each entry in `result.accepted` is `{ station, target, added, changed }`. **`changed` is the one to report to the player** — `accepted` lists every station the command *applied to*, including no-ops, so a confirmation built on `accepted.length` will claim "3 cities cleared" when none of the three had a line (known-issues #18).
 

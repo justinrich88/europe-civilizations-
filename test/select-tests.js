@@ -27,11 +27,30 @@
 // ── isolation ───────────────────────────────────────────────────────────
 //
 // The suite swaps `window.GAME` for a scratch board for the duration and puts
-// the player's game back afterwards, because these tests fire real
-// applyCommand() calls that really do spend garrisons. It also restores the
-// selection, the armed state and the send fraction. Nothing here steps a tick,
-// so no AI ever runs (known-issue #13) — the scratch board is marked AI-quiet
-// anyway, at creation, for the day someone adds a test that does.
+// the player's game back afterwards, because these tests fire real commands that
+// really do spend garrisons. It also restores the selection, the armed state and
+// the send fraction.
+//
+// ── EVERY GESTURE NOW NEEDS A TICK — the A3 retrofit, 2026-08 ───────────
+//
+// ~~Nothing here steps a tick, so no AI ever runs~~ — every gesture below is
+// followed by _seltStep(), and this is the change that rewrote the file rather
+// than a tidy-up.
+//
+// render/select.js used to call applyCommand() directly, so a click had done its
+// work by the time the handler returned and every assertion could read the board
+// on the next line. All three verbs now go through queueCommand(): the click
+// SCHEDULES, and the board does not move until the drain at the head of the next
+// tick. An assertion written the old way reads the board a tick early and fails
+// on correct code — which is the good failure. The dangerous one is the mirror
+// image, an assertion of the form "nothing happened" that now passes because
+// nothing has happened YET, and it would pass against a file that never queued
+// the command at all. So the ones that assert absence step the tick FIRST and
+// then look.
+//
+// Stepping is safe here for the reason the old comment gave for not stepping:
+// the scratch board is marked AI-quiet at creation (known-issue #13), so no
+// opponent moves between the setup and the assertion.
 //
 // Privates are prefixed `_selt`, by FILE (known-issue #12): `_sel` belongs to
 // render/select.js and `_help` to the guide.
@@ -209,10 +228,37 @@ function _seltFixture() {
   return { me: me, src: src, dst: dst, foe: foe, game: g, prevGame: prevGame };
 }
 
+// ONE TICK, which is exactly what a scheduled command needs and no more.
+//
+// queueCommand defaults to `state.tick` — the tick ABOUT TO RUN — so a command
+// issued between ticks is drained by the very next stepTick, at phase 1, before
+// growth. Two ticks would be a slower test that also lets a wave move; one is
+// the contract.
+//
+// Loud if stepTicks is missing rather than quietly doing nothing: a no-op here
+// makes every "the line was set" assertion below fail in a way that looks like a
+// broken gesture.
+function _seltStep(fx) {
+  if (typeof stepTicks !== 'function') {
+    throw new Error('stepTicks is not loaded — a scheduled command can never drain, ' +
+      'so every gesture in this suite is unobservable');
+  }
+  stepTicks(fx.game, 1);
+}
+
 // Put every gesture back to a known start: scratch board clean of orders and
 // waves, one source selected, order armed.
 function _seltArm(fx) {
   clearSelection();
+  // ANYTHING THE PREVIOUS TEST LEFT IN FLIGHT, DROPPED. This is new with A3 and
+  // it cost a real failure to find: a test that fires a gesture and does NOT
+  // step — 'and leaves the group selected' is one, because what it checks is
+  // pure UI — leaves a live command in state.queued. The next test's tick then
+  // drains two orders against the same group, and since `order` is a TOGGLE the
+  // second one REMOVES the line the first just added. The symptom was
+  // 'cmd+right-click while armed set no supply line', which reads exactly like a
+  // broken gesture and is not one.
+  fx.game.queued.length = 0;
   fx.game.stations[fx.src].supplyTo = [];
   fx.game.waves.length = 0;
   selSet([fx.src]);
@@ -244,8 +290,9 @@ function suiteSelect(d) {
   if (typeof document === 'undefined' || !document.getElementById('board')) {
     return skipSuite(NAME, 'no #board — this suite needs the live game page');
   }
-  if (typeof newGame !== 'function' || typeof applyCommand !== 'function') {
-    return skipSuite(NAME, 'core/state.js or sim/commands.js not loaded');
+  if (typeof newGame !== 'function' || typeof queueCommand !== 'function' ||
+      typeof stepTicks !== 'function') {
+    return skipSuite(NAME, 'core/state.js, sim/commands.js or sim/step.js not loaded');
   }
   if (typeof LINKS === 'undefined' || typeof STATIONS === 'undefined') {
     return skipSuite(NAME, 'data/stations.js not loaded');
@@ -280,20 +327,73 @@ function suiteSelect(d) {
     _seltArm(fx);
     assertEqual(SEL_STATE.armed, 'supply', 'R did not arm — the fixture is wrong, not the code');
     _seltClick(fx.dst, 2);
+    _seltStep(fx);
     var supply = fx.game.stations[fx.src].supplyTo || [];
     assert(supply.indexOf(fx.dst) >= 0,
       'right-clicking ' + fx.dst + ' while armed left ' + fx.src +
       ' supplying [' + supply.join(',') + ']');
   });
 
+  // A3, and it is the reason every test in this file grew a _seltStep. The
+  // gesture must produce a COMMAND, not a mutation — that is what makes the
+  // board reproducible from a seed and a command log, which is what lockstep
+  // multiplayer is.
+  //
+  // Both halves matter. "The queue got one" alone would pass for a file that
+  // queued AND applied; "the board did not move" alone would pass for a file
+  // that dropped the click on the floor.
+  test('the gesture SCHEDULES the order — the board does not move until the tick', function () {
+    _seltArm(fx);
+    fx.game.stations[fx.src].supplyTo = [];
+    var queuedBefore = fx.game.queued.length;
+    _seltClick(fx.dst, 2);
+    assertEqual(fx.game.queued.length, queuedBefore + 1,
+      'the click put ' + (fx.game.queued.length - queuedBefore) + ' commands in the queue');
+    assertEqual((fx.game.stations[fx.src].supplyTo || []).length, 0,
+      'the supply line was written the instant the button went up — render/select.js ' +
+      'is still mutating the board directly, and a second client would never see it');
+    _seltStep(fx);
+    assert((fx.game.stations[fx.src].supplyTo || []).indexOf(fx.dst) >= 0,
+      'one tick later the order still has not been applied');
+    assertEqual(fx.game.queued.length, queuedBefore,
+      'the command is still in the queue after the tick that should have drained it');
+  });
+
+  // THE CONFIRMATION SURVIVED THE CONVERSION. The banner is the only thing this
+  // gesture says out loud, and it used to be drawn from applyCommand's return
+  // value — which a queued command does not have. It now arrives through
+  // sim/commands.js's listener channel, one tick later, and this is the test
+  // that the channel is actually wired up on the shipped page.
+  test('the confirmation arrives when the command RUNS, not when it is issued', function () {
+    _seltArm(fx);
+    fx.game.stations[fx.src].supplyTo = [];
+    _seltClick(fx.dst, 2);
+    var b = _seltBanner();
+    if (!b) return skipTest('the banner', '#send-armed is not in the document');
+    assert(!/SUPPLYING/.test(b.text),
+      'the banner confirmed an order that has not run yet: "' + b.text + '"');
+    _seltStep(fx);
+    var after = _seltBanner();
+    assert(/SUPPLYING/.test(after.text),
+      'the tick drained the order and nothing confirmed it — the listener is not ' +
+      'wired, so every supply order now lands in silence: "' + after.text + '"');
+    assertEqual(after.hidden, false, 'the confirmation was written to a hidden banner');
+  });
+
   test('and marches nothing while doing it', function () {
     _seltArm(fx);
     var before = _seltUnits(fx, fx.src);
     _seltClick(fx.dst, 2);
+    _seltStep(fx);
     assertEqual(fx.game.waves.length, 0,
-      'a supply order created ' + fx.game.waves.length + ' wave(s) on the spot');
-    assertClose(_seltUnits(fx, fx.src), before, 1e-9,
-      'the source paid for a volley it never ordered');
+      'a supply order created ' + fx.game.waves.length + ' wave(s)');
+    // NOT assertClose to `before` any more: the tick that drains the order also
+    // runs growth, so the garrison legitimately moves. What must not happen is
+    // that it went DOWN — a volley takes a quarter of the city at the smallest
+    // fraction the UI offers, and growth adds a fraction of a percent.
+    assert(_seltUnits(fx, fx.src) >= before,
+      'the source went from ' + before + ' to ' + _seltUnits(fx, fx.src) +
+      ' units — it paid for a volley it never ordered');
   });
 
   // Not a nicety. The banner is the only confirmation this gesture has, and the
@@ -314,6 +414,7 @@ function suiteSelect(d) {
   test('CMD+right-click sets the line and does not leave the banner lying', function () {
     _seltArm(fx);
     _seltClick(fx.dst, 2, { meta: true });
+    _seltStep(fx);
     var supply = fx.game.stations[fx.src].supplyTo || [];
     assert(supply.indexOf(fx.dst) >= 0, 'cmd+right-click while armed set no supply line');
     assertEqual(fx.game.waves.length, 0, 'cmd+right-click marched an army instead');
@@ -335,6 +436,9 @@ function suiteSelect(d) {
   test('a right-DRAG is a camera pan: it commits nothing and stays armed', function () {
     _seltArm(fx);
     _seltRightDrag(fx.dst, 40);
+    // Stepped BEFORE the assertions, not after: "nothing was set" is exactly the
+    // shape that now passes for free on a click that merely has not drained yet.
+    _seltStep(fx);
     assertEqual((fx.game.stations[fx.src].supplyTo || []).length, 0,
       'panning the board to find the destination set the line by itself');
     assertEqual(fx.game.waves.length, 0, 'a pan launched a wave');
@@ -354,6 +458,7 @@ function suiteSelect(d) {
     _seltClick(fx.foe, 2);
     assertEqual(SEL_STATE.armed, 'supply',
       'a mis-aimed right press (the button that also pans) cancelled the order');
+    _seltStep(fx);       // see the pan test: absence needs the tick to mean anything
     assertEqual(fx.game.waves.length, 0, 'and attacked ' + fx.foe + ' with it');
   });
 
@@ -362,6 +467,7 @@ function suiteSelect(d) {
     _seltArm(fx);
     _seltClick(fx.foe, 0);
     assertEqual(SEL_STATE.armed, null, 'the left button no longer backs out of an armed order');
+    _seltStep(fx);
     assertEqual(fx.game.waves.length, 0,
       'the cancelling click ALSO fired the volley at ' + fx.foe +
       ' — the click was not consumed');
@@ -412,9 +518,18 @@ function suiteSelect(d) {
     selSet([fx.src]);
     if (typeof setSendFraction === 'function') setSendFraction(0.5);
     var before = _seltUnits(fx, fx.src);
+    // `res` is now the RECEIPT, not the outcome: ok means accepted into the
+    // queue. The outcome is on the board a tick later, which is what the rest of
+    // this test reads.
     var res = selCommit(fx.dst);
     assert(res && res.ok, 'selCommit was refused: ' + (res && res.reason));
+    assertEqual(fx.game.waves.length, 0,
+      'the volley left the city before the tick that was supposed to run it');
+    _seltStep(fx);
     assertEqual(fx.game.waves.length, 1, 'no wave left the city');
+    // Growth runs in the same tick, on the HALF that stayed home, so the
+    // tolerance is not there to hide a rounding error — it is a real and small
+    // number of units the city earned after paying.
     assertClose(_seltUnits(fx, fx.src), before * 0.5, before * 0.02,
       'a 50% send did not take half the garrison');
   });

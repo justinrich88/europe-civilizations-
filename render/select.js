@@ -8,9 +8,18 @@
 //
 // Three rules that shape every function below:
 //
-//   1. This file NEVER mutates GAME. The only write path is applyCommand(),
-//      the same entry point the AI uses (01-data-schema.md, "Input funnels to
-//      applyCommand"). That is what keeps replay and headless testing free.
+//   1. This file NEVER mutates GAME. Every write goes out as a COMMAND, through
+//      queueCommand() — all three verbs, since the A3 retrofit (07-roadmap.md)
+//      — and lands in applyCommand(), the same sole mutator the AI reaches
+//      (01-data-schema.md, "Input funnels to applyCommand"). That is what keeps
+//      replay and headless testing free, and it is what makes this file
+//      lockstep-safe: a click produces a command stamped with the tick it runs
+//      on, so two clients fed the same commands reach the same board.
+//
+//      THE PRICE, AND IT IS PAID EVERYWHERE BELOW: a queued command has no
+//      result yet. Nothing here may read the board immediately after issuing
+//      one and expect to see the effect — the drain happens at the head of the
+//      next tick. Outcomes arrive through _selOnCommandResult.
 //   2. This file owns #g-ui and nothing else. Marquee rectangle, selection
 //      carets, preview lines and ETA labels all live there. #g-stations,
 //      #g-waves and the rest belong to other files and are only ever READ
@@ -1152,15 +1161,15 @@ function selCommit(target) {
   const me = selPlayer();
   const sources = selectedSources();
   if (!g || !me || !sources.length || !target) return null;
-  if (typeof applyCommand !== 'function') {
-    console.warn('[render/select] applyCommand is not loaded — commit dropped');
+  if (typeof queueCommand !== 'function') {
+    console.warn('[render/select] queueCommand is not loaded — commit dropped');
     return null;
   }
 
-  // Snapshot BOTH decisions before applyCommand touches anything: the amount
-  // this volley uses, and whether the group survives it. Reading SEL_MOD after
-  // the send would be reading it a frame later, and the player may already have
-  // let the key go.
+  // Snapshot BOTH decisions before the command goes anywhere: the amount this
+  // volley uses, and whether the group survives it. Reading SEL_MOD after the
+  // send would be reading it a frame later, and the player may already have let
+  // the key go.
   const fraction = selEffectiveFraction();
   const keep = SEL_MOD.meta;
 
@@ -1174,16 +1183,19 @@ function selCommit(target) {
   // No `cmd.types`. The INF/ART/ARM filter is gone from the UI, and omitting the
   // field keeps the command object byte-identical to the ones every existing
   // replay and test already contains.
-  const res = applyCommand(g, cmd);
-
-  if (!res || !res.ok) {
-    console.warn('[render/select] send rejected:', res && res.reason, res && res.rejected);
-  } else if (res.rejected && res.rejected.length) {
-    // Partial success is normal — an unroutable source is greyed in the
-    // preview, so this is a confirmation rather than a surprise.
-    console.log('[render/select] volley sent, ' + res.accepted.length +
-      ' of ' + sources.length + ' sources; rejected:', res.rejected);
+  //
+  // SCHEDULED, NOT APPLIED — 07-roadmap.md A3, and this line is the retrofit it
+  // named. What it costs is that `res` no longer exists here: the volley is
+  // judged against the board at the head of the next tick, which is a board this
+  // click cannot see. So the outcome is claimed by seq and reported when it
+  // arrives (_selOnCommandResult), and what this function returns is the RECEIPT
+  // — `ok` means accepted into the queue and nothing more.
+  const q = queueCommand(g, cmd);
+  if (!q.ok) {
+    console.warn('[render/select] send not queued:', q.reason);
+    return q;
   }
+  _selPend(q.seq, { kind: 'send', cmd: cmd, target: target, sources: sources, keep: keep });
 
   // §8: "Every selected source sends its proportion at once, and selection
   // clears." One-shot, and still the default — a volley normally comes from a
@@ -1195,18 +1207,85 @@ function selCommit(target) {
   // outlive the gesture that asked for it. Firing one massed army at four
   // targets in sequence is then four clicks, not four clicks plus three
   // reselections.
-
+  //
+  // THE SELECTION IS HANDLED NOW, NOT WHEN THE COMMAND DRAINS. It is UI state,
+  // not board state: a group that stayed selected for one more tick because the
+  // sim had not caught up would be a click that visibly did nothing, and the
+  // second click of a two-target volley would arrive into a group that is still
+  // showing the first one.
   if (!keep) {
     clearSelection();
-    return res;
+    return q;
   }
-  // Drop anything that changed hands in the volley, then redraw against the
-  // target still under the cursor — so the payload labels immediately show the
-  // SMALLER second salvo rather than the one that just left.
-  selPrune();
+  // Redraw against the target still under the cursor. The payload labels still
+  // show the pre-send garrison for one tick — the units have not left yet,
+  // because the command has not run yet — and they correct themselves when the
+  // result arrives; see _selOnCommandResult.
   SEL_STATE.hoverTarget = SEL_STATE.selected.has(target) ? null : target;
   selRedraw();
-  return res;
+  return q;
+}
+
+// ── the result, one tick later ──────────────────────────────────────────
+//
+// Every command this file issues is now SCHEDULED (07-roadmap.md A3), so the
+// answer to "did that work" arrives after the click that asked, from
+// sim/commands.js's listener channel. This is the whole of the UI half of that
+// retrofit.
+//
+// Keyed by the `seq` queueCommand handed back rather than by "the last command
+// I sent": a player firing three volleys in a row inside one tick queues three
+// commands that drain together, and matching by recency would report the third
+// one's outcome three times.
+//
+// Entries are DROPPED when they resolve, and there is no expiry. A command in
+// `state.queued` is drained or the game has ended; there is no third outcome,
+// so a pending entry that never resolves would mean the sim stopped, which is a
+// bigger problem than a leaked object.
+//
+// AND THE COMMAND OBJECT IS MATCHED, not just the seq. `seq` counts from 1 per
+// STATE, and more than one state exists: test/select-tests.js swaps window.GAME
+// for a scratch board, so seq 4 on the scratch board and seq 4 on the player's
+// game are two different commands with the same key. Comparing the object
+// identity makes that unmistakable instead of reporting one volley's outcome
+// against another board's click.
+const SEL_PENDING = Object.create(null);
+
+function _selPend(seq, rec) {
+  SEL_PENDING[seq] = rec;
+  return rec;
+}
+
+function _selOnCommandResult(cmd, res, note) {
+  const pend = note && SEL_PENDING[note.seq];
+  // Not ours. The AI queues nothing today, but a listener that assumed every
+  // drained command was its own would start narrating the AI's war the moment
+  // that changes.
+  if (!pend || pend.cmd !== cmd) return;
+  delete SEL_PENDING[note.seq];
+
+  if (pend.kind === 'order') {
+    _selConfirm(res, pend.target);
+    return;
+  }
+
+  if (pend.kind !== 'send') return;
+  const n = pend.sources.length;
+  if (!res || !res.ok) {
+    console.warn('[render/select] send rejected:', res && res.reason, res && res.rejected);
+  } else if (res.rejected && res.rejected.length) {
+    // Partial success is normal — an unroutable source is greyed in the
+    // preview, so this is a confirmation rather than a surprise.
+    console.log('[render/select] volley sent, ' + res.accepted.length +
+      ' of ' + n + ' sources; rejected:', res.rejected);
+  }
+  // Only the CMD-held case has anything left to draw: the group survived the
+  // volley, its cities have just paid for it, and the preview labels are still
+  // quoting the garrison from before. Prune first — a source can have changed
+  // hands in the tick that ran the send.
+  if (!SEL_STATE.selected.size) return;
+  selPrune();
+  selRedraw();
 }
 
 // ── event handlers ──────────────────────────────────────────────────────
@@ -2114,12 +2193,16 @@ function _selApplyOrder(target) {
   const stations = selectedSources().filter(selIsMine);
   if (!stations.length) return null;
 
-  if (typeof applyCommand !== 'function') {
-    console.warn('[render/select] applyCommand is not loaded — order dropped');
+  if (typeof queueCommand !== 'function') {
+    console.warn('[render/select] queueCommand is not loaded — order dropped');
     return null;
   }
 
-  const res = applyCommand(g, {
+  // SCHEDULED, like the volley and the build. The banner is the only
+  // confirmation this gesture has, so the one thing that could not be lost in
+  // the conversion is the banner — it now fires from _selOnCommandResult, off
+  // the same `res` object this line used to receive directly.
+  const cmd = {
     type: 'order',
     owner: me,
     stations: stations,
@@ -2128,22 +2211,27 @@ function _selApplyOrder(target) {
     // question — "which destinations do these cities serve" — answered with
     // one entry or with none.
     target: target || null,
-  });
+  };
+  const q = queueCommand(g, cmd);
 
-  if (!res || !res.ok) {
-    console.warn('[render/select] order rejected:', res && res.reason, res && res.rejected);
+  if (!q.ok) {
+    console.warn('[render/select] order not queued:', q.reason);
+    // A command that never reached the queue has no result coming, so this is
+    // the one refusal that still has to be reported from here or it is reported
+    // nowhere. `game-over` is the live case.
+    _selConfirm({ ok: false, reason: q.reason }, target || null);
+    return q;
   }
-
   // Say what happened, every time, including when nothing happened. See
   // _selConfirm — the old silence made a refused order and a successful one
   // look exactly alike.
-  _selConfirm(res, target || null);
+  _selPend(q.seq, { kind: 'order', cmd: cmd, target: target || null });
   // No selRedraw(). Nothing this file DRAWS depends on an order — the marker is
   // render/map.js's, on the station node, repainted by renderLive every frame
   // (which runs while paused, see app/loop.js), and the rail reads the order
   // live. Redrawing the carets and every preview line here would be work for a
   // picture that is already correct.
-  return res;
+  return q;
 }
 
 // ── pinned API (01-data-schema.md, "Render / app API") ──────────────────
@@ -2214,6 +2302,22 @@ function initSelection() {
       lastK = k;
       if (SEL_STATE.selected.size) selRedraw();
     });
+  }
+
+  // The other end of every command this file issues. Registered HERE rather
+  // than at load, so it is inside the same idempotence guard as the listeners
+  // above: initSelection() is called by app/main.js and by the DOMContentLoaded
+  // self-bootstrap, and two registrations would draw every confirmation twice.
+  //
+  // A LOUD ELSE BRANCH, deliberately (known-issue #22). Without this listener
+  // the board still plays — commands queue and drain exactly as before — and the
+  // only thing that disappears is the banner, which is precisely the failure
+  // this project has twice shipped in silence.
+  if (typeof onCommandResult === 'function') {
+    onCommandResult(_selOnCommandResult);
+  } else {
+    console.error('[render/select] no onCommandResult — sim/commands.js must ' +
+      'load before render/select.js. Orders will apply; nothing will confirm them.');
   }
 
   SEL_STATE.wired = true;

@@ -698,12 +698,11 @@ function _cmdApplyBuild(state, cmd, result) {
 // alarm, and why anything wanting to know the outcome of a specific command has
 // to wait for the tick rather than read a return value.
 //
-// The consequence for the UI is real and is not paid here: render/select.js
+// ~~The consequence for the UI is real and is not paid here: render/select.js
 // still calls applyCommand directly for 'send' and 'order', because it reads the
-// result to draw its own confirmation. Converting those two is the retrofit the
-// roadmap named; what this section buys is that no command written FROM NOW ON
-// has to be retrofitted, and 'build' is the first one that is scheduled by
-// construction.
+// result to draw its own confirmation.~~ **PAID 2026-08.** All three verbs now go
+// through queueCommand, and the confirmation travels forward in time through the
+// listener channel below.
 
 // Command types this sim knows how to drain. Named explicitly rather than
 // probed, so a typo'd type is rejected at the point of issue instead of sitting
@@ -783,11 +782,83 @@ function _cmdDue(state) {
   return due;
 }
 
+// ---------------------------------------------------------------------------
+// WHO HEARS ABOUT A DRAINED COMMAND — the other half of the A3 retrofit
+// ---------------------------------------------------------------------------
+//
+// A command applied immediately hands its result back as a return value, and
+// that is what render/select.js used to draw its confirmation banner: *"SUPPLYING
+// LEIPZIG — 3 cities"*, or the refusal. A SCHEDULED command has no result at the
+// moment it is issued, because the board it will be judged against does not exist
+// yet. So the result has to travel forward in time to whoever asked for it.
+//
+// This is that channel. Three properties, and they are the whole design:
+//
+//   NOT IN STATE.        A listener is a function, and a function in `state`
+//                        cannot survive snapshot() — which is the basis of
+//                        replay and of reconnect. Putting the RESULTS in state
+//                        instead would move every balance hash in the project
+//                        for a value the sim never reads.
+//   NOT READ BY THE SIM. Nothing below this line consults a listener. A client
+//                        with none — every headless run, every balance sweep —
+//                        plays the bit-identical game to a client with one.
+//                        That is what makes this safe under lockstep, where one
+//                        player has a UI and the server has none.
+//   FIRED AFTER THE WHOLE DRAIN, never between two commands. Commands due on
+//                        the same tick apply back to back with nothing running
+//                        in between, so no listener can observe a half-drained
+//                        tick or reorder an applyCommand call by being slow.
+//
+// THE CONTRACT ON A LISTENER IS THAT IT DOES NOT MUTATE STATE. It is a
+// notification, not a phase (known-issue #13 — phases are not added lightly, and
+// this deliberately is not one). A listener that mutates state is a desync by
+// construction: it runs on the client that has a renderer and not on the one
+// that does not.
+//
+// A throwing listener is caught and logged rather than allowed to abort the
+// drain, for exactly the same reason: a renderer that throws must not stop the
+// sim on the one client unlucky enough to be rendering. The catch is LOUD
+// (known-issue #22) — a silent one here would hide the confirmation banner
+// failing and look like a command that never arrived.
+var _cmdListeners = [];
+
+// Register `fn(cmd, res, note)`, called once per drained command with the
+// command, the result applyCommand returned for it, and `{tick, seq}` — the seq
+// queueCommand handed back, which is how a caller matches a result to the click
+// that asked for it. Returns an unsubscribe function.
+function onCommandResult(fn) {
+  if (typeof fn !== 'function') return function () {};
+  _cmdListeners.push(fn);
+  return function () {
+    var at = _cmdListeners.indexOf(fn);
+    if (at >= 0) _cmdListeners.splice(at, 1);
+  };
+}
+
+function _cmdNotify(notes) {
+  if (!_cmdListeners.length || !notes.length) return;
+  // A copy: a listener that unsubscribes itself while being notified must not
+  // shorten the array being walked and skip the listener after it.
+  var ls = _cmdListeners.slice();
+  for (var i = 0; i < notes.length; i++) {
+    for (var j = 0; j < ls.length; j++) {
+      try {
+        ls[j](notes[i].cmd, notes[i].res, { tick: notes[i].tick, seq: notes[i].seq });
+      } catch (e) {
+        if (typeof console !== 'undefined' && console.error) {
+          console.error('[sim/commands] a command listener threw; the drain ' +
+            'continued without it', e);
+        }
+      }
+    }
+  }
+}
+
 // Phase 1 of the tick. Drains every due command through applyCommand.
 //
 // Results are counted, not returned: this is a phase, and phases return nothing
 // (sim/step.js calls them in a loop). Anything that needs a specific command's
-// outcome reads the board, which is the only honest answer anyway.
+// outcome either reads the board or listens — see onCommandResult above.
 function commandsTick(state) {
   if (!state || !Array.isArray(state.queued) || !state.queued.length) return;
 
@@ -804,10 +875,15 @@ function commandsTick(state) {
   }
   state.queued = keep;
 
+  var notes = _cmdListeners.length ? [] : null;
   for (var j = 0; j < due.length; j++) {
     var res = applyCommand(state, due[j].cmd);
+    if (notes) {
+      notes.push({ cmd: due[j].cmd, res: res, tick: due[j].tick, seq: due[j].seq });
+    }
     if (!state.cmdStats) continue;
     if (res && res.ok) state.cmdStats.applied++;
     else state.cmdStats.rejected++;
   }
+  if (notes) _cmdNotify(notes);
 }

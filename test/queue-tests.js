@@ -391,6 +391,155 @@ function suiteQueue() {
     stepTicks(s, 10);
     assertEqual(JSON.stringify(s.queued), before, 'a tick with nothing due rewrote the queue');
   });
+
+  // ── 5. the result gets back to whoever asked ───────────────────────────
+  //
+  // The half of A3 that finished the retrofit. Scheduling a command took the
+  // result away from the caller — render/select.js drew its confirmation banner
+  // out of that return value — so `onCommandResult` carries it forward to the
+  // tick that actually ran it.
+  //
+  // The listener is the ONE piece of this design that could desync a lockstep
+  // game, because it is the one thing a client with a UI has and a headless
+  // client does not. Everything below is about that.
+
+  test('a drained command reports back, with its result and its seq', function () {
+    var b = _qtBoard('ger', 3);
+    var s = b.s;
+    var heard = [];
+    var off = onCommandResult(function (cmd, res, note) {
+      heard.push({ type: cmd.type, ok: !!(res && res.ok), seq: note.seq, tick: note.tick });
+    });
+    try {
+      var q = queueCommand(s, {
+        type: 'send', owner: 'ger', sources: [b.mine[0]], target: b.mine[1], fraction: 0.5,
+      });
+      assert(q.ok, 'the queue refused a legal send: ' + q.reason);
+      assertEqual(heard.length, 0, 'the listener fired at QUEUE time — the whole ' +
+        'point is that the result does not exist yet');
+      stepTicks(s, 1);
+    } finally { off(); }
+
+    assertEqual(heard.length, 1, 'heard ' + heard.length + ' results for one command');
+    assertEqual(heard[0].type, 'send', 'the command handed to the listener is not the one queued');
+    assertEqual(heard[0].ok, true, 'a legal send came back as refused');
+    assertEqual(heard[0].seq, 1, 'the seq does not match the one queueCommand returned — ' +
+      'a caller cannot tell which of its clicks this answers');
+  });
+
+  test('a REJECTED command reports back too', function () {
+    // The silence this replaces is the exact failure the banner exists for: an
+    // order that was refused and one that worked looked identical on screen.
+    var b = _qtBoard('ger', 3);
+    var s = b.s;
+    var heard = [];
+    var off = onCommandResult(function (cmd, res) { heard.push(res); });
+    try {
+      // Legal shape, so it queues; illegal board, so it is refused on the tick.
+      queueCommand(s, { type: 'send', owner: 'ger', sources: ['nowhere'], target: b.mine[1] });
+      stepTicks(s, 1);
+    } finally { off(); }
+    assertEqual(heard.length, 1, 'a refused command told nobody');
+    assertEqual(heard[0].ok, false, 'a send from a station that does not exist came back ok');
+  });
+
+  test('listeners fire AFTER the whole drain, never between two commands', function () {
+    // If a listener could run between two commands due on the same tick, it
+    // would observe a half-drained board — and a listener that redraws would
+    // paint one that never existed. Measured by asking, from inside the
+    // listener, how many waves are on the board: both sends have run.
+    var b = _qtBoard('ger', 4);
+    var s = b.s;
+    var sawWaves = [];
+    var off = onCommandResult(function () { sawWaves.push(_qtWaveCount(s, 'ger')); });
+    try {
+      queueCommand(s, {
+        type: 'send', owner: 'ger', sources: [b.mine[0]], target: b.mine[2], fraction: 0.5,
+      });
+      queueCommand(s, {
+        type: 'send', owner: 'ger', sources: [b.mine[1]], target: b.mine[2], fraction: 0.5,
+      });
+      stepTicks(s, 1);
+    } finally { off(); }
+    assertEqual(sawWaves.length, 2, 'two commands produced ' + sawWaves.length + ' notifications');
+    assertEqual(sawWaves[0], 2,
+      'the first notification saw ' + sawWaves[0] + ' wave(s) — it ran before the ' +
+      'second command, so a renderer would have drawn a half-applied tick');
+    assertEqual(sawWaves[1], 2, 'the second notification saw ' + sawWaves[1] + ' waves');
+  });
+
+  test('a listener that throws does not take the drain or the tick with it', function () {
+    // A renderer that throws must not stop the sim on the one client that has a
+    // renderer — that is a desync, and it is the reason the catch exists.
+    var b = _qtBoard('ger', 3);
+    var s = b.s;
+    var second = 0;
+    var offA = onCommandResult(function () { throw new Error('deliberate'); });
+    var offB = onCommandResult(function () { second++; });
+    var before = _qtWaveCount(s, 'ger');
+    try {
+      queueCommand(s, {
+        type: 'send', owner: 'ger', sources: [b.mine[0]], target: b.mine[1], fraction: 0.5,
+      });
+      stepTicks(s, 2);
+    } finally { offA(); offB(); }
+    assertEqual(second, 1, 'the listener after the throwing one never heard anything');
+    assertEqual(_qtWaveCount(s, 'ger'), before + 1, 'the send did not happen');
+    assertEqual(s.tick, 2, 'the tick did not finish');
+  });
+
+  test('unsubscribing actually stops the notifications', function () {
+    var b = _qtBoard('ger', 3);
+    var s = b.s;
+    var n = 0;
+    var off = onCommandResult(function () { n++; });
+    queueCommand(s, {
+      type: 'send', owner: 'ger', sources: [b.mine[0]], target: b.mine[1], fraction: 0.4,
+    });
+    stepTicks(s, 1);
+    off();
+    queueCommand(s, {
+      type: 'send', owner: 'ger', sources: [b.mine[0]], target: b.mine[1], fraction: 0.4,
+    });
+    stepTicks(s, 1);
+    assertEqual(n, 1, 'the listener heard ' + n + ' results after unsubscribing once');
+  });
+
+  test('A LISTENER CANNOT CHANGE THE GAME — the whole basis of lockstep safety', function () {
+    // The one property that matters. A client with a UI registers a listener; a
+    // headless client, a balance sweep and a server do not. If the presence of a
+    // listener perturbed anything, those two clients would play different games
+    // and the desync would be invisible until the boards visibly disagreed.
+    //
+    // Two identical seeds, identical queued commands, 400 ticks apiece, and one
+    // of them is being listened to by something that reads the board hard.
+    function play(withListener) {
+      var b = _qtBoard('ger', 4);
+      var s = b.s;
+      var off = withListener ? onCommandResult(function (cmd, res) {
+        // Deliberately nosy: reads state, reads the result, allocates.
+        JSON.stringify(res.accepted);
+        _qtWaveCount(s, 'ger');
+      }) : function () {};
+      try {
+        queueCommand(s, {
+          type: 'send', owner: 'ger', sources: [b.mine[0]], target: b.mine[2], fraction: 0.5,
+        }, s.tick + 3);
+        queueCommand(s, {
+          type: 'order', owner: 'ger', stations: [b.mine[1]], target: b.mine[0],
+        }, s.tick + 7);
+        stepTicks(s, 400);
+      } finally { off(); }
+      return JSON.stringify(snapshot(s));
+    }
+    var quiet = play(false);
+    var loud = play(true);
+    assertEqual(loud.length, quiet.length, 'the two boards are not even the same size');
+    assert(loud === quiet,
+      'a registered listener changed the board over 400 ticks — every headless ' +
+      'run and every balance sweep is then a different game from the one played ' +
+      'in a browser');
+  });
 }
 
 // ---------------------------------------------------------------------------

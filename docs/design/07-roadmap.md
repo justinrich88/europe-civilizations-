@@ -108,7 +108,7 @@ by the same power, every power holds the same territory count, worst relative
 drift across all 324 garrison floats is 1.9e-13, and 45–56% of them are still
 bit-identical.** The hashes changed; the wars did not.
 
-### A3. Tick-scheduled commands — MECHANISM SHIPPED 2026-07; two commands still to convert
+### ~~A3. Tick-scheduled commands~~ — MECHANISM SHIPPED 2026-07, RETROFIT COMPLETED 2026-08
 
 `applyCommand(state, cmd)` applied immediately. Lockstep needs commands to
 carry the tick they execute on, queued and drained at a fixed point in
@@ -136,13 +136,55 @@ Shipped:
 
 **`applyCommand` stays the sole mutator** and the drain is one of its callers.
 
-**Still to do, and named rather than glossed:** `render/select.js` continues to
-call `applyCommand` directly for `send` and `order`, because it reads the result
-to draw its own confirmation and a queued command has no result yet. Converting
-those two is the retrofit — it needs the confirmation to come from the board a
-tick later, and it touches the eleven gesture tests in `test/select-tests.js`.
-Until then the game is **not** lockstep-ready; what has been bought is that no
-command written from now on needs retrofitting.
+~~**Still to do, and named rather than glossed:** `render/select.js` continues to
+call `applyCommand` directly for `send` and `order`… Until then the game is
+**not** lockstep-ready.~~ **DONE 2026-08. Every command in the game is now
+scheduled, and nothing outside `sim/` mutates the board.**
+
+The blocker was never the queue; it was that `render/select.js` read
+`applyCommand`'s return value to draw its confirmation banner, and a scheduled
+command has no return value. Three shapes were considered and the reasoning is
+worth keeping, because two of them are the obvious ones:
+
+- **Read the board a tick later instead of the result.** Rejected: the banner
+  distinguishes *"that city is not yours"* from *"no city there"*, and
+  reconstructing those from the board means a second copy of rules
+  `_cmdApplyOrder` already owns — known-issue #9, the defect logged five times.
+- **Keep the results in state, keyed by seq.** Rejected: that puts a value in
+  `snapshot()` that the sim never reads, and moves every balance hash in the
+  project for it.
+- **A listener channel out of state — `onCommandResult(fn)`, shipped.**
+  `commandsTick` notifies after the *whole* drain with `(cmd, res, {tick, seq})`.
+  Not in state, not read by the sim, and the contract is that a listener does not
+  mutate. That last one is the only way this can desync — a listener runs on the
+  client that has a UI and not on the one that does not — so it is pinned by a
+  test that hashes 400 ticks of the same game with and without a listener
+  registered and requires the snapshots to be **byte-identical**.
+
+**The eleven gesture tests were touched, and the reason is the interesting
+part.** Every one of them read the board on the line after the click. Rewritten
+to step one tick first, they still pass — but the dangerous half was the
+assertions of the form *"and it marched nothing"*, which now pass **for free** on
+a click that merely has not drained yet, and would keep passing against a file
+that dropped the click on the floor. Those step the tick *before* they look. Two
+new tests were added for what the retrofit itself claims: that the gesture puts a
+command in `state.queued` and leaves the board alone, and that the confirmation
+arrives on the tick that runs it rather than on the click that issued it. Six
+mutations of `render/select.js` and six of `sim/commands.js`, each caught.
+
+**One behaviour genuinely changed, and it is only visible in `?dev=1`:** with the
+board paused, a click now does nothing until time moves. Nothing drains while
+nothing steps. That is the honest reading of `00-vision.md` §1's *"orders can be
+issued while paused"* — issued then, executed when the clock runs — and it is
+recorded as known-issue #28 because it will otherwise look exactly like a dead
+gesture during the next browser verification.
+
+**The balance hashes did not move, and this is not an appeal to good faith.**
+With no listener registered `commandsTick` takes the identical path it took
+before (`_cmdListeners.length` is 0, so no notes array is even allocated), which
+is why `test/exact-tests.js`'s pinned `snapshot()` hashes at 2,000 ticks on seeds
+100 and 101 are unchanged — the case known-issue #27 says the four-seed board
+diff *is* valid for, since no float is perturbed at all.
 
 **Do this before `04-development.md`**, which adds a `build` command. Written
 after, `build` is scheduled by construction; written before, it is a retrofit.
@@ -560,7 +602,8 @@ questions must be settled first:
 
 ## Phase E — multiplayer
 
-With A2 and A3 done, what remains is only the network:
+With A2 and A3 done — **and A3 is now genuinely done, not just mechanically
+available** — what remains is only the network:
 
 | | |
 |---|---|
