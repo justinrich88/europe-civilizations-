@@ -203,3 +203,102 @@ game exactly as `test/node.js` does:
 **A check that cannot fail is not a check.** Every fix above was accepted only
 after its test was watched failing against the unfixed code — and three times
 on this project a test that looked authoritative turned out to assert nothing.
+
+---
+
+# 2026-08 — the second void, and what the instrument found instead
+
+## 0. §2 above is void, for the same reason §0 voided its predecessor
+
+§2 concluded that **capital link-degree** is the dominant predictor and that
+Vienna's degree of 6 made Austria weak: it won **3 of 48**. Austria now wins
+**74 of 96**. Fog, the passage toll, wave vision, the unit-type collapse, the
+AI's target commitment and the AI's fortification sight all landed in between.
+Do not act on the table in §2.
+
+## 1. The instrument changed first — `--curve`
+
+Win rate is one bit per game. Its standard error on 96 games is 4.5 points, so
+nothing under about ten points is visible, and a sweep is eighteen minutes. C1b
+is the worked example: it moved 74.0 → 77.1 and the only honest verdict was
+"cannot tell".
+
+`tools/balance.js --curve --at 1000,2000,5000` samples **board share** — the
+fraction of the 108 stations held — and reports a mean with a 95% CI, alongside
+the validation that licenses using a proxy at all: *how often the leader at tick
+T went on to win*. That figure is **75% at tick 2,000** against a 14% chance
+baseline, so the opening decides the game far earlier than the 15,700-tick mean
+length suggests. Two-thousand ticks is three sim-minutes.
+
+## 2. Position or agent? — BOTH, and differently per power
+
+`--rotate N` rotates the personality assignment around the seven seats; seven
+runs cover every assignment. 96 games each, share at tick 2,000:
+
+| rotation | ger | fra | gbr | rus | aut | ita | ott |
+|---|---|---|---|---|---|---|---|
+| 0 | 5.7 | 4.6 | 3.8 | 6.0 | **6.2** | 4.0 | 0.9 |
+| 1 | 5.6 | 6.0 | 3.6 | 6.0 | **6.2** | 4.6 | 0.9 |
+| 2 | 4.6 | 5.7 | 3.3 | **6.5** | 3.8 | 4.2 | 0.9 |
+| 3 | 6.3 | 5.2 | 3.2 | **6.4** | 3.4 | 5.0 | 0.9 |
+| 4 | 4.6 | 4.6 | 4.3 | **5.9** | 3.3 | 4.6 | 0.9 |
+| 5 | 4.4 | 5.3 | 3.2 | **6.2** | 6.0 | 3.9 | 0.9 |
+| 6 | 5.9 | 3.4 | 3.8 | **6.5** | 3.8 | 4.5 | 0.9 |
+
+CIs are ±0.0–0.3, so these differences are real. Three separate answers:
+
+- **Austria is an AGENT effect, not a map effect.** It reads 6.0–6.2 in
+  rotations 0, 1 and 5 and 3.3–3.8 in the other four — and rotations 0, 1 and 5
+  are exactly the three in which Austria draws a **turtle**. Perfect separation.
+  Austria's dominance is a *turtle × Vienna interaction*, not a positional one.
+- **Russia is a MAP effect.** 5.9–6.5 under all seven assignments — invariant.
+- **The Ottoman is neither.** 0.9 ± 0.0 in every rotation, which is one station,
+  its capital, and nothing else — in **672 games**.
+
+## 3. The Ottoman never moves, and the cause is a defect
+
+The obvious reading is that Istanbul is too weak to break out. **It is not.**
+Best available odds against the odds floor that power personally demands, mean
+over 8 seeds, measured through the AI's own `aiCandidates`:
+
+| power | floor | t=0 | t=100 | t=250 | t=500 | t=1000 | t=2000 |
+|---|---|---|---|---|---|---|---|
+| aut | 1.89 | 1.76 | 0.16 | 2.67 | 1.44 | 2.44 | 3.10 |
+| ott | 1.89 | 5.00 | 0.42 | 1.12 | 2.30 | 1.67 | **3.64** |
+
+| stations held | t=0 | t=250 | t=500 | t=1000 | t=2000 |
+|---|---|---|---|---|---|
+| every other power | 1.0 | ~2.0 | 3.0 | ~4.0 | 4.0–6.8 |
+| **ott** | 1.0 | **1.0** | **1.0** | **1.0** | **1.0** |
+
+The Ottoman sits on targets at 3.6× the odds it demands and takes none of them.
+`aiDecide` returns `hold: stage-no-feeders` on **400 of 400** consecutive calls.
+
+`_aiActPlanVolley` names it. At tick 600, seed 100:
+
+```
+ank  odds=0.76  route=ist>ank      -> sources ["ist"]
+kir  odds=2.37  route=ist>ode>kir  -> reason "no-sources"     <-- the only
+var  odds=0.88  route=ist>var      -> sources ["ist"]             one over
+dar  odds=0.69  route=ist>dar      -> sources ["ist"]             the floor
+smy  odds=0.98  route=ist>smy      -> sources ["ist"]
+ode  odds=0.75  route=ist>ode      -> sources ["ist"]
+```
+
+Every adjacent option is under the 1.89 floor; the one that clears it is two
+hops away and comes back **`no-sources`** — from a power holding a city with a
+perfectly good route to it. See known-issue #9's 2026-08 entry for the cause:
+`ai/ai.js`'s traversal rule is still the pre-B1 `st.owner === pid` while the sim
+and `ai/score.js` both open passage to everything. **The scorer offers targets
+the planner cannot plan.**
+
+## 4. What this means for the order of work
+
+**D2 must not run until §3 is fixed.** The AI can only attack ground adjacent to
+what it already holds, so any map tuned to give seven powers equal outcomes today
+is tuned to compensate for a planner that cannot march through a neutral city —
+and that compensation gets baked into the map and stays there after the fix.
+
+The same argument applies to the Austria finding. A turtle in Vienna beats a
+non-turtle in Vienna by nearly two to one on early share; until that is
+understood, "Austria is too strong" is not yet a statement about the map.

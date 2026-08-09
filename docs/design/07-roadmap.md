@@ -727,6 +727,44 @@ until the table flattens balances the AI-vs-AI game and breaks the moment a
 **human** takes that seat: the human brings their own personality, the handicap
 evaporates, and the positional advantage is still there, untouched.
 
+### D1.5. FIX THE PLANNER BEFORE TUNING ANYTHING — found by D1, blocks D2
+
+D1 was supposed to answer "position or agent". It answered that (both, and
+differently per power — `03-balance-findings.md` §2, 2026-08) and turned up
+something larger on the way:
+
+**The AI can only attack ground adjacent to what it already holds.** One rule —
+"can a wave cross this station" — has three implementations, and the planner's
+is still the pre-B1 one:
+
+```js
+sim/movement.js  _moveCanTraverse    return !!state.stations[sid];   // anything
+ai/score.js      _aiScoreCanTraverse return true;                    // matches
+ai/ai.js         _aiActCanTraverse   return st.owner === pid;        // pre-B1
+```
+
+So the scorer ranks a target two hops out at 2.37:1 and the planner, unable to
+find a source through the neutral city between, returns `no-sources`. It is
+known-issue #9's **sixth** occurrence, in the one file whose twin carries a
+comment about having already been fixed once for exactly this.
+
+It is why the Ottoman holds precisely one station at every checkpoint of every
+seed under every personality — 672 games — while sitting on targets at 3.6× the
+odds it demands.
+
+**D2 cannot start until this is fixed.** A map tuned to give seven powers equal
+outcomes *today* is a map tuned to compensate for a planner that cannot march
+through a neutral city, and that compensation stays in the data long after the
+planner is fixed. The same caution applies to Austria: a turtle in Vienna beats a
+non-turtle in Vienna by nearly two to one on early share, so "Austria is too
+strong" is not yet a statement about the map.
+
+Fix it by **delegating**, the way `ai/score.js` does, not by copying the sim's
+current rule into a third place — a duplicated rule that has already drifted once
+will drift again. Then re-run D0's curve and D1's rotation before touching any
+map data: both are now baselines taken against a crippled planner and neither
+survives the fix.
+
 ### D2. Then fix it in the map, with the fewest legible levers
 
 In preference order — capital link degree and the chokepoints around it, then

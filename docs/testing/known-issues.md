@@ -218,6 +218,46 @@ Rules that follow:
    but reading a derived value from `core/` is not a layering violation — it is
    the only way to be sure the two agree.
 
+### 2026-08 — occurrence SIX, and it was found by a balance sweep, not a test
+
+**One rule, THREE implementations, two of them wrong in different ways.** "Can a
+wave cross this station?":
+
+```js
+sim/movement.js  _moveCanTraverse    return !!state.stations[sid];   // anything
+ai/score.js      _aiScoreCanTraverse return true;                    // matches
+ai/ai.js         _aiActCanTraverse   return st.owner === pid;        // pre-B1
+```
+
+`ai/score.js`'s copy carries a comment recording that **this exact bug was
+already found and fixed once**: when B1 opened passage, the scorer was left
+planning against a board it could only walk its own ground on. That fix updated
+the scorer and missed the planner. The planner's own comment claims it walks
+"own or neutral", which matches neither its code nor the sim.
+
+**The consequence is invisible from inside either half, because each is
+self-consistent.** The scorer ranks a target two hops out at 2.37:1 odds; the
+planner is handed the same target, cannot find a source through the neutral city
+in between, and returns `no-sources`. Net effect: **the AI can only ever attack
+ground adjacent to what it already holds**, no matter what its scorer says. The
+Ottoman never takes a second city in 672 games because of it
+(`03-balance-findings.md` §3, 2026-08).
+
+Three things to take from occurrence six:
+
+- **A duplicated rule that has already drifted once will drift again**, and the
+  comment warning about it does not prevent that. Delegation does. `ai/score.js`
+  calls the sim's own `movePassageRelation`; `ai/ai.js` re-implements.
+- **The failure surfaced as the wrong reason.** `aiDecide`'s reason-priority
+  table ranks `stage-no-feeders` above `odds-too-low`, so 400 of 400 decisions
+  reported a *staging* problem and the `no-sources` never appeared at all. A
+  diagnostic that reports the highest-priority reason rather than the binding one
+  can hide the binding one completely.
+- **No test could have caught it and none was missing.** Both halves pass their
+  own suites. What caught it was a *behavioural* measurement — one power holding
+  exactly 1.0 stations at every checkpoint across every seed and every
+  personality — which is the argument for `--curve` existing at all.
+
 ---
 
 ## 10. The Browser pane reports `visibilityState: "hidden"`, so `requestAnimationFrame` never fires

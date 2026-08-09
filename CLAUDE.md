@@ -113,7 +113,9 @@ with no error and no console output. Five occurrences. New overlay ⇒
 `pointer-events: none` unless it is genuinely interactive.
 
 **One derivation rule, one implementation.** Two files computing the same thing
-is the single most-repeated defect here (#9, logged five times). If a renderer
+is the single most-repeated defect here (#9, logged SIX times — the latest
+is `ai/ai.js` vs `sim/movement.js` on 'can a wave cross this station', found by a
+balance sweep in 2026-08, not by a test). If a renderer
 needs a number the sim already derives, the sim exports it — do not recompute.
 
 ---
@@ -155,7 +157,7 @@ out of a ~700-site rewrite; `04-development.md` §9c is the worked example.
 
 ## Known issues — read `docs/testing/known-issues.md` before debugging
 
-28 numbered entries, five of which recurred after being written down. The ones
+28 numbered entries, six of which recurred after being written down. The ones
 that cost the most time:
 
 | # | The trap |
