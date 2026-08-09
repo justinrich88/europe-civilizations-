@@ -302,3 +302,51 @@ and that compensation gets baked into the map and stays there after the fix.
 The same argument applies to the Austria finding. A turtle in Vienna beats a
 non-turtle in Vienna by nearly two to one on early share; until that is
 understood, "Austria is too strong" is not yet a statement about the map.
+
+## 5. D1.5 measured — and the two instruments disagree, which is the point
+
+96 games, seeds 100–195, before and after the traversal fix.
+
+**Win rate says "cannot tell".** Spread 77.1 → 71.9 points. On 96 games the
+standard error on a ~74% rate is 4.5 points, so a 5.2-point move is inside the
+noise, exactly as it was for C1b. Read alone, this change is unmeasurable.
+
+**Board share says the opening got substantially fairer, and says it loudly.**
+
+| share spread | t=1000 | t=2000 | t=5000 | t=10000 |
+|---|---|---|---|---|
+| before | 2.8 pts | 5.3 pts | 15.3 pts | 45.5 pts |
+| **after** | **1.2 pts** | **3.9 pts** | **10.8 pts** | **34.9 pts** |
+
+Every checkpoint narrowed, and the CIs on those means are ±0.0–0.3. The t=1000
+move is roughly sixteen standard errors. **This is the case D0 exists for**: the
+binary endpoint could not resolve a real and large effect that the continuous one
+resolves without ambiguity.
+
+Per power, share at t=1000 → t=2000, and wins:
+
+| power | before | after | wins before → after |
+|---|---|---|---|
+| aut | 3.7 → 6.2 | 3.6 → 6.1 | 74 → 69 |
+| fra | 3.5 → 4.6 | 3.5 → 4.8 | 9 → 12 |
+| gbr | 3.1 → 3.8 | 3.2 → 3.8 | **3 → 12** |
+| ger | 3.7 → 5.7 | 3.6 → 5.8 | 4 → 2 |
+| ita | 3.3 → 4.0 | 3.4 → 4.0 | 1 → 0 |
+| **ott** | **0.9 → 0.9** | **2.4 → 2.2** | 0 → 0 |
+| rus | 3.7 → 6.0 | **2.8 → 4.3** | 4 → 1 |
+
+Three things follow, and only the first is unambiguous:
+
+- **The Ottoman is alive.** 0.9 → 2.4 at t=1000 is the fix doing its job. It
+  still wins nothing, so it is now a normal balance problem rather than a frozen
+  one.
+- **Russia lost its opening.** 6.0 → 4.3 share at t=2000 with CIs of ±0.1, and 4
+  wins → 1. Russia was the one power §2 identified as genuinely positional, and
+  the most likely reading is that its isolation was worth less once *everyone
+  else* could reach past a neutral city. Worth confirming before relying on it.
+- **Austria is untouched and still dominant** — 6.1 share at t=2000, 71.9% of
+  games. Whatever Austria has, the planner was not it.
+
+**§2's rotation table is now stale.** It was measured against the crippled
+planner, so the "Austria is a turtle × Vienna interaction" finding has to be
+re-run before D2 acts on it. So does the reference curve in §1.
