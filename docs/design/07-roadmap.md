@@ -673,12 +673,102 @@ Running it earlier means running it twice.
 across seven powers — is measuring an AI failure mode, not map balance. Two
 questions must be settled first:
 
-1. **Is equal win rate even the target?** `00-vision.md` §2 designed the powers
-   to be *unequal* — Germany "must win fast", the Ottomans "nearly untakeable,
-   painfully slow". If that is real, balanced means *every power has a viable
-   path*, not *every power wins 14%*.
+1. ~~**Is equal win rate even the target?**~~ **ANSWERED BY THE OWNER, 2026-08:
+   yes.** *"We'll eventually want an easy / medium / hard style setting for the
+   AI players, so it should be balanced across AIs at the same level — hard
+   France has a roughly equal chance of winning or losing to hard Austria."*
+   Equal win rate at equal difficulty is the target.
+
+   This does **not** contradict `00-vision.md` §6. Nothing there promises equal
+   outcomes; what it promises is that *"geography is destiny at the start"* —
+   Britain behind water, Russia enormous and alone, Germany surrounded. Those
+   are asymmetric **openings**, and asymmetric openings with a symmetric
+   expectation is the normal shape of a well-balanced asymmetric game. The
+   opening stays unequal. The finish does not.
 2. **Instrument mean hops from border to target.** If it is still 1 after B1,
    the passage numbers are wrong and no amount of constant-tuning will show it.
+
+---
+
+### D0. The instrument, before any tuning — SHIPPED 2026-08
+
+**A tuning loop steered by an instrument that cannot see its own step size
+converges to noise**, and win rate is that instrument. A win is one bit per
+game, so its standard error on 96 games is 4.5 points and a *difference* needs
+about 1.4× that; nothing smaller than roughly ten points is visible, and one
+sweep is eighteen minutes. C1b is the worked example — it moved 74.0 → 77.1 and
+the only honest verdict was "cannot tell".
+
+`tools/balance.js --curve` replaces it for steering. Board **share** — fraction
+of the 108 stations held — sampled at fixed ticks, reported as a mean with a 95%
+confidence interval. Continuous instead of binary, so the same games carry far
+more information, and stations rather than territories so the board resolves
+five times finer.
+
+**A proxy must be shown to predict the thing you actually care about**, and the
+table prints that validation next to the proxy every time: the share of games in
+which whoever led at tick T went on to win, against a 14% chance baseline. Never
+read the share row without reading that one.
+
+Win rate is **not** retired. It is the acceptance test at the end of a pass. It
+is simply the wrong thing to steer with.
+
+### D1. Position or agent? — the control that costs no code
+
+Three of the seven powers are already `turtle` (`data/scenario.js`), and they
+finish at **77% / 9% / 0%** — Austria, France, Ottoman. So personality does not
+explain the spread before a single sweep is run. `--rotate N` settles it
+properly: it rotates the personality assignment N places around the sorted power
+list, so seven runs cover every assignment. If the same power leads under all
+seven, the cause is the map and **only map data may be touched**.
+
+That constraint is the point of the control, not pedantry. Tuning a personality
+until the table flattens balances the AI-vs-AI game and breaks the moment a
+**human** takes that seat: the human brings their own personality, the handicap
+evaporates, and the positional advantage is still there, untouched.
+
+### D2. Then fix it in the map, with the fewest legible levers
+
+In preference order — capital link degree and the chokepoints around it, then
+opening garrison and capital capacity, then neutral density in reach of each
+capital. Paired on seeds, before/after, with D0's instrument.
+
+**`03-balance-findings.md` §2 is void and must be re-measured first.** It
+concluded that capital link-degree is the dominant predictor and that Vienna's
+degree of 6 made Austria weak — Austria won 3 of 48. Austria now wins 77 of 96.
+Fog, the passage toll, forts, the unit collapse and the AI's commitment all
+landed in between. Re-run the predictor table before acting on any of it.
+
+### D3. Do not overfit to this AI
+
+A map tuned until seven AI powers win equally is tuned against **this AI's**
+blind spots — C1b is a live reminder that those exist and are invisible. So
+every candidate change is checked under **two** AI configurations, one of them
+held out. Two sweeps instead of one, and the balance has to survive both.
+
+### D4. Only then, the difficulty ladder
+
+Best practice, and the part worth getting right before any of it is built:
+
+- **Balance at ONE reference level and derive the others.** The reference is
+  **Hard** — the AI at full competence with no bonuses. Balancing three levels
+  independently is a combinatorial trap: each one needs its own seven-way sweep,
+  and there is no reason to believe a map balanced at Easy is balanced at Hard.
+- **Easy and Medium are COMPETENCE handicaps, never resource cheats.** Longer
+  `ACTION_INTERVAL_TICKS`, shorter `SOURCE_MAX_HOPS`, fewer sources per volley,
+  a shorter commitment window, no building, no standing orders — and a *lower*
+  `MIN_ODDS` is a good easy setting rather than a higher one, because committing
+  defeat in detail is the mistake `00-vision.md` §8 names as the defining error
+  of this game.
+- **No growth or income bonus at any level sold as fair.** A resource
+  multiplier interacts with position: it amplifies exactly the positional
+  advantage D2 spent its whole budget removing, so it un-balances what was just
+  balanced. If a level above the AI's competence ceiling is ever wanted, label
+  it as a cheating level and do not balance-test at it.
+- **Each level's acceptance test is head-to-head, not seven-way.** "Easy loses
+  about 80% of games to Hard" is one number, measurable in one sweep, and it is
+  a far easier thing to hit than seven-way parity. Seven-way parity is only ever
+  measured at the reference level.
 
 ---
 
