@@ -398,6 +398,24 @@ function suiteExact() {
     // C1 for the full table and for why the REFACTOR half of that change is
     // separately proven to have moved nothing at all.
     //
+    // RE-PINNED at D1.5 (07-roadmap.md), and this one is PURE BEHAVIOUR — the
+    // cleanest opposite of the history-chart re-pin above. No field was added to
+    // the state, no shape changed; one line in ai/ai.js stopped lying about
+    // which ground a wave can cross, so the AI plans different wars.
+    //
+    // The byte count FELL, 137,926 -> 134,721 on seed 100 and 139,716 ->
+    // 132,256 on seed 101: -3,205 and -7,460. Different amounts, which by this
+    // message's own rule means look at the maths — and that is right, because
+    // the maths is exactly what moved. Fewer bytes because a decisive AI ends
+    // the opening land-grab sooner and writes fewer decision-log entries doing
+    // it, not because anything left the schema.
+    //
+    // What was measured instead of asserting good faith is in
+    // 03-balance-findings.md §3: the Ottoman Empire held exactly ONE station at
+    // every checkpoint of every seed under every personality — 672 games — and
+    // now breaks out. That is the fix's whole purpose and it is visible in a
+    // single number.
+    //
     // NOT re-pinned at B2, and that is a MEASURED fact rather than a lucky one.
     // Wave vision changes what a power can see, so a green here looks like
     // evidence the change did nothing. It is not evidence either way, and the
@@ -418,8 +436,8 @@ function suiteExact() {
     var s100 = newGame(100);
     for (var i = 0; i < 2000; i++) stepTick(s100);
     var h100 = _exatStateHash(s100);
-    assertEqual(h100.hash, 3625268610, 'seed 100 diverged after 2000 ticks — state is now ' +
-      h100.bytes + ' bytes of JSON against a pinned 137926. READ THE BYTE COUNT CAREFULLY: ' +
+    assertEqual(h100.hash, 1654294216, 'seed 100 diverged after 2000 ticks — state is now ' +
+      h100.bytes + ' bytes of JSON against a pinned 134721. READ THE BYTE COUNT CAREFULLY: ' +
       'it moves for BOTH kinds of change and cannot tell them apart on its own. A new field ' +
       'on the state moves it by a fixed amount on every seed (A3 moved it +76 on all four); ' +
       'different arithmetic moves it by a different amount on each seed, because a different ' +
@@ -429,8 +447,8 @@ function suiteExact() {
     var s101 = newGame(101);
     for (var j = 0; j < 2000; j++) stepTick(s101);
     var h101 = _exatStateHash(s101);
-    assertEqual(h101.hash, 763870096, 'seed 101 diverged after 2000 ticks — state is now ' +
-      h101.bytes + ' bytes of JSON against a pinned 139716');
+    assertEqual(h101.hash, 3054447028, 'seed 101 diverged after 2000 ticks — state is now ' +
+      h101.bytes + ' bytes of JSON against a pinned 132256');
   });
 
   test('the pin would notice a one-bit change — it is not hashing a constant', function () {

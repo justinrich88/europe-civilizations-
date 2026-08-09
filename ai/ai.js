@@ -594,16 +594,79 @@ function _aiActGrownDefenderPower(state, pid, sid, def, ctx) {
 // A station currently under attack is never a source: stripping a garrison
 // that is presently in a battle loses that station to win somewhere else.
 //
-// The sweep runs outward through PASSABLE ground only (own or neutral — the
+// The sweep runs outward through PASSABLE ground — which since B1 is ALL of it,
+// because passage is open and the toll is what it costs (the
 // routeFor rule in sim/movement.js, read backwards from the target). A station
 // two hops away on the far side of a rival's city cannot deliver, and counting
 // it produces a volley that applyCommand rejects source by source. The target
 // itself is always expanded: attacking INTO enemy ground is the point.
 // ---------------------------------------------------------------------------
 
-// Mirrors _moveCanTraverse in sim/movement.js — see the note on
-// _aiScoreCanTraverse. Only ground this power holds may be marched through.
-function _aiActCanTraverse(state, pid, sid) {
+// DELEGATED to the sim, not mirrored — D1.5, and known-issue #9's sixth
+// occurrence is what this replaces.
+//
+// ~~Only ground this power holds may be marched through.~~ That was the rule
+// before B1 opened passage, and it survived B1 here while its twin
+// `_aiScoreCanTraverse` was updated. The twin's comment already recorded that
+// the same drift had happened once before and had shut the AI's horizon for a
+// whole milestone; it happened again, in the other half, for a whole milestone
+// more, and this is what it cost:
+//
+//   * The SCORER ranks a target two hops out at 2.37:1 odds. The PLANNER, unable
+//     to expand its source search through the neutral city in between, comes back
+//     `no-sources`. Net effect: **the AI could only ever attack ground adjacent
+//     to what it already held**, whatever its scorer said.
+//   * The Ottoman held exactly 1.0 stations at every checkpoint of every seed
+//     under every personality — 672 games — while sitting on targets at 3.64x
+//     the odds it demands. Every one of its five neighbours out-defends a legal
+//     volley from a single city; the only target that cleared its floor was two
+//     hops away (`03-balance-findings.md` §3, 2026-08).
+//   * It reported as the WRONG REASON. aiDecide's reason-priority table ranks
+//     `stage-no-feeders` above `odds-too-low`, so 400 of 400 decisions named a
+//     staging problem and the `no-sources` never surfaced at all.
+//
+// So: ASK THE SIM, exactly as ai/score.js does. Copying sim/movement.js's
+// current rule into a third place is what produced this twice. The guard is
+// there because ai/ must load with sim/movement.js absent, and the fallback is
+// the pre-passage rule because that is the game a build with no movement module
+// is playing.
+//
+// The BFS in _aiActSourcesNear is still bounded by SOURCE_MAX_HOPS, and
+// applyCommand still validates every source's route independently, so opening
+// this cannot produce a volley the sim then refuses — it can only stop hiding
+// the ones it would have accepted.
+//
+// ── AND IT IS TWO FUNCTIONS, NOT ONE. Read this before merging them back. ──
+//
+// The first attempt at this fix opened the single `_aiActCanTraverse` both call
+// sites shared, and the suite came back with Austria marching out of Berlin,
+// Rome and Constantinople. The helper was doing DOUBLE DUTY — traversal gate in
+// one caller, ownership filter in the other — and the staging search leans on
+// the second meaning entirely: it has no `owner !== pid` check of its own,
+// because this function was its owner check.
+//
+// The two callers want genuinely different rules, and the difference is design
+// rather than drift:
+//
+//   _aiActCanMarch   the ATTACK source search. Passage is open since B1, so
+//                    this delegates to the sim. A source three hops away behind
+//                    a neutral city can deliver, and pretending otherwise is
+//                    what shut the AI's horizon.
+//   _aiActIsOwn      the STAGING feeder search. Own ground only, deliberately —
+//                    a staging march is interior movement and must never plan a
+//                    road through somebody else's city. Its own comment says so.
+//
+// So the lesson from occurrence six has a second half: the drifted rule was
+// real, and the helper carrying it was also answering a question that had
+// nothing to do with it. Splitting them is what makes each one checkable.
+function _aiActCanMarch(state, pid, sid) {
+  var st = state.stations[sid];
+  if (!st) return false;
+  if (typeof movePassageRelation !== 'function') return st.owner === pid;
+  return true;                    // passage is open; the toll is what it costs
+}
+
+function _aiActIsOwn(state, pid, sid) {
   var st = state.stations[sid];
   return !!st && st.owner === pid;
 }
@@ -622,7 +685,7 @@ function _aiActSourcesNear(state, pid, target) {
         var sid = nbrs[j];
         if (seen[sid]) continue;
         seen[sid] = true;
-        if (_aiActCanTraverse(state, pid, sid)) next.push(sid);
+        if (_aiActCanMarch(state, pid, sid)) next.push(sid);
         var st = state.stations[sid];
         if (!st || st.owner !== pid) continue;
         if (_aiActUnderAttack(state, sid, pid)) continue;
@@ -909,10 +972,15 @@ function _aiActStageFeeders(state, pid, depot, exclude, maxHops) {
         var sid = nbrs[j];
         if (seen[sid]) continue;
         seen[sid] = true;
-        // Own ground only, both to march through and to draw from: a staging
+        // Own ground only, both to march through and to DRAW FROM: a staging
         // march is an interior movement and must never plan a road through
-        // somebody else's city (the same _moveCanTraverse rule as everywhere).
-        if (!_aiActCanTraverse(state, pid, sid)) continue;
+        // somebody else's city.
+        //
+        // THIS IS ALSO THE OWNERSHIP FILTER — there is no `owner !== pid` check
+        // below, because this line is it. That is why opening the shared helper
+        // for the attack search sent Austria's armies out of Berlin and Rome;
+        // see the block above _aiActCanMarch.
+        if (!_aiActIsOwn(state, pid, sid)) continue;
         next.push(sid);
         if (exclude[sid]) continue;
         if (_aiActUnderAttack(state, sid, pid)) continue;
