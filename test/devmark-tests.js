@@ -189,3 +189,171 @@ function suiteDevMark() {
       'the development mark accepts pointer events');
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// THE RAIL'S DEVELOPMENT ROW — player request, 2026-08
+// ═══════════════════════════════════════════════════════════════════════
+//
+// *"I feel like better visual cues for ports and factories is still missing and
+// a much simpler display (fortified, port, and factory icon in the right nav
+// with a simple readout)."*
+//
+// What was there: an 11px silhouette, a row of pips, and the kind's name only
+// in a `title` tooltip. Three stroke icons at that size are told apart by
+// outline, which works once you know there are three of them and not before —
+// and the one line that DID carry a name was the `b` row, which names what you
+// would BUY ("Fortification 3"), not what is standing there. A city at max tier
+// has no `b` row, so its type was named nowhere on screen at all.
+//
+// The other half matters more. `DEV_LIVE` says the port and the factory are
+// INERT — they cost a capacity and a half and do nothing — and the section's own
+// comment claimed it said so "in words". It did, in a tooltip, on a panel that
+// is glanced at between orders. On screen a Port 2 and a Fortification 2 were
+// the same row with a different silhouette.
+//
+// Privates are `_dmr`, by FILE (known-issue #12) — `_dmk` belongs to the suite
+// above and these must not share state with it.
+
+function _dmrRail() {
+  var s = document.querySelector('[data-rail-section="build"]');
+  if (!s || s.offsetParent === null) return null;   // display:none ancestor
+  return {
+    text: s.innerText.replace(/\s+/g, ' ').trim(),
+    name: (s.querySelector('.rdo-dev-name') || {}).textContent || '',
+    inert: (s.querySelector('.rdo-dev-inert') || {}).textContent || '',
+    icon: s.querySelector('.rdo-ico'),
+  };
+}
+
+function _dmrFocus(sid) {
+  selSetFocus(sid);
+  renderReadout(GAME);
+  return _dmrRail();
+}
+
+function suiteDevRail() {
+  var NAME = 'render / development rail';
+  var w = _dmkWin();
+  var missing = [];
+  if (!w || typeof GAME === 'undefined' || !GAME) missing.push('a live GAME [index.html]');
+  if (!w || typeof PLAYER === 'undefined' || !PLAYER) missing.push('PLAYER [app/main.js]');
+  if (typeof renderReadout !== 'function') missing.push('renderReadout() [render/readout.js]');
+  if (typeof selSetFocus !== 'function') missing.push('selSetFocus() [render/select.js]');
+  if (typeof DEV_LIVE === 'undefined' || typeof DEV_NAMES === 'undefined') {
+    missing.push('DEV_LIVE / DEV_NAMES [sim/development.js]');
+  }
+  if (missing.length) { skipSuite(NAME, 'waiting on ' + missing.join(', ')); return; }
+
+  suite(NAME);
+  var P = _dmkPick();
+
+  // A LIVE kind and an INERT one, read from DEV_LIVE rather than named here.
+  // Hard-coding 'fort' and 'port' would make this suite go quietly wrong on the
+  // day the port is wired up — which is exactly the change it exists to survive.
+  var live = null, inert = null, k;
+  for (k in DEV_LIVE) {
+    if (DEV_LIVE[k] && !live) live = k;
+    if (!DEV_LIVE[k] && !inert) inert = k;
+  }
+
+  test('the fixture has one live kind and one inert kind to compare', function () {
+    assert(!!live, 'DEV_LIVE says nothing is implemented — nothing to contrast');
+    assert(!!inert, 'every development is live now: delete this suite\'s inert half ' +
+      'rather than letting it assert a state that can no longer occur');
+  });
+
+  test('the rail NAMES the development, not just its silhouette', function () {
+    if (!live) return skipTest('a live kind', 'DEV_LIVE has none');
+    var sid = P.plain;
+    _dmkBuild(sid, live, 2, 1.5);
+    var r = _dmrFocus(sid);
+    assert(!!r, 'the build section is not on screen for a city you own and have built');
+    assertEqual(r.name, DEV_NAMES[live],
+      'the row shows "' + r.name + '" where the sim calls it ' + DEV_NAMES[live] +
+      ' — the icon was the only type indicator, and three 11px silhouettes are ' +
+      'not a legend');
+    assert(!!r.icon, 'the icon went away with the name — both were asked for');
+  });
+
+  test('an INERT development says so on screen, not in a tooltip', function () {
+    if (!inert) return skipTest('an inert kind', 'DEV_LIVE has none');
+    // A station where the inert kind is actually legal — 'port' needs a coast
+    // and 'factory' a producer, so picking the wrong one builds nothing and the
+    // assertion below would pass against an empty row.
+    var sid = null;
+    if (typeof developmentOptions === 'function') {
+      var cands = [P.coastal, P.producer, P.plain];
+      for (var i = 0; i < cands.length; i++) {
+        if (cands[i] && developmentOptions(cands[i]).indexOf(inert) >= 0) { sid = cands[i]; break; }
+      }
+    }
+    if (!sid) return skipTest('a station', inert + ' is not legal anywhere in the fixture');
+    _dmkBuild(sid, inert, 2, 1.5);
+    assert(builtTier(GAME, sid) > 0,
+      'the fixture built nothing at ' + sid + ', so the row below is empty and ' +
+      'this test would pass for the wrong reason (known-issue #8)');
+    var r = _dmrFocus(sid);
+    assert(!!r, 'no build section for a developed city you own');
+    assert(/no effect/i.test(r.inert),
+      'a ' + DEV_NAMES[inert] + ' reads "' + r.text + '" — nothing on screen says ' +
+      'it does nothing, and it costs the same capacity and a half a real one does');
+  });
+
+  test('and a LIVE development does NOT carry that warning', function () {
+    // The half that makes the test above mean something. Without it, a row that
+    // printed "no effect yet" unconditionally would pass.
+    if (!live) return skipTest('a live kind', 'DEV_LIVE has none');
+    var sid = P.plain;
+    _dmkBuild(sid, live, 2, 1.5);
+    var r = _dmrFocus(sid);
+    assertEqual(r.inert, '',
+      'a ' + DEV_NAMES[live] + ' is marked as having no effect, and DEV_LIVE says ' +
+      'it does — the rail is warning about the one development that works');
+  });
+
+  test('the kind is named ONCE, not in two adjacent rows', function () {
+    // The request was a SIMPLER display. "Fortification" in the state row and
+    // again in the b row wraps the b row to two lines at 200px, which turns a
+    // three-row section into four — the opposite of what was asked for.
+    if (!live) return skipTest('a live kind', 'DEV_LIVE has none');
+    var sid = P.plain;
+    // RESET FIRST. The tests above leave this station at its MAX tier, and a
+    // maxed city's `b` row reads "maxed" — which contains no kind name and never
+    // could, so counting names on it passed against a mutation that put the name
+    // back. Caught by mutation M4; it is known-issue #8 arriving through test
+    // ORDER rather than through a weak assertion.
+    GAME.stations[sid].development = null;
+    _dmkBuild(sid, live, 1, 1.5);
+    var r = _dmrFocus(sid);
+    // The vacuity guard that makes the count mean something, stated rather than
+    // assumed: there has to BE an offer on screen for a duplicated name to
+    // appear in it.
+    assert(/units →/.test(r.text),
+      'the b row is not offering a build ("' + r.text + '"), so a second copy of ' +
+      'the name has nowhere to appear and this test cannot fail');
+    var name = DEV_NAMES[live];
+    var hits = r.text.split(name).length - 1;
+    assertEqual(hits, 1, 'the section says "' + name + '" ' + hits + ' times: ' + r.text);
+  });
+
+  test('an UNDEVELOPED city still names what b would build', function () {
+    // The other side of the rule above, and the reason it is `built > 0` rather
+    // than "always drop the name": with no state row there is nothing else on
+    // screen saying what the offer is for.
+    var sid = null;
+    for (var i = 0; i < STATION_IDS.length; i++) {
+      var s = STATION_IDS[i];
+      if (GAME.stations[s].owner !== PLAYER) continue;
+      if (builtTier(GAME, s) > 0) continue;
+      if (typeof developmentOptions === 'function' && developmentOptions(s).length !== 1) continue;
+      sid = s; break;
+    }
+    if (!sid) return skipTest('an undeveloped city', 'none owned with exactly one option');
+    GAME.stations[sid].units = STATIONS[sid].capacity * 1.5;
+    var r = _dmrFocus(sid);
+    assert(!!r, 'no build section on an undeveloped city you own');
+    assertEqual(r.name, '', 'a city with nothing built is showing a development name');
+    assert(/Fortification|Port|Factory/.test(r.text),
+      'the b row does not say what it would build: ' + r.text);
+  });
+}

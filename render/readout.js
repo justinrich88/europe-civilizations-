@@ -2636,6 +2636,24 @@ function _rdoBuildBuild(host) {
   n.state = _rdoRow(host, 'rdo-mod rdo-dev-state', '');
   n.stateIco = _rdoIcon('fort');                 // src swapped per kind below
   n.state.k.appendChild(n.stateIco);
+
+  // AND THE KIND IN WORDS, NEXT TO THE ICON — player request, 2026-08:
+  // *"a much simpler display (fortified, port, and factory icon in the right
+  // nav with a simple readout)"*.
+  //
+  // The icon alone was the whole type indicator, and it was not enough. Three
+  // stroke silhouettes at 11px are told apart by outline, which works once you
+  // know there are three of them and not before — and the only place the kind
+  // was ever spelled out was a `title` tooltip on a rail nobody hovers. Worse,
+  // the one line that DID carry a name was the `b` row, which names what you
+  // would BUY next ("Fortification 3"), not what is standing there. A city at
+  // max tier has no `b` row at all, so its type had no name on screen anywhere.
+  //
+  // That is known-issue #18 in miniature: the section answered "what could I
+  // build here" and was read as "what is here".
+  n.stateName = el('span', 'rdo-dev-name');
+  n.state.k.appendChild(n.stateName);
+
   n.pips = el('span', 'rdo-dev-pips');
   n.state.v.appendChild(n.pips);
   n.pipEls = [];
@@ -2646,6 +2664,21 @@ function _rdoBuildBuild(host) {
   }
   n.need = el('span', 'rdo-dev-need');
   n.state.v.appendChild(n.need);
+
+  // "no effect yet", ON SCREEN, for the two kinds DEV_LIVE says are inert.
+  //
+  // The comment at the head of this section has claimed since C2 that "port and
+  // factory say they do nothing yet, in words, from DEV_LIVE". They did — in a
+  // `title` attribute. A tooltip on a panel that is glanced at between orders is
+  // not a thing the player is told; it is a thing the code can point at and say
+  // it told them. On screen, a Port 2 and a Fortification 2 were the same row
+  // with a different silhouette, and one of them is worth a capacity and a half
+  // and the other is worth nothing.
+  //
+  // It reads from DEV_LIVE, not from a list here, so the day the port is wired
+  // up this disappears by itself and cannot be left behind lying the other way.
+  n.inert = el('span', 'rdo-dev-inert');
+  n.state.v.appendChild(n.inert);
 
   // What `b` would buy here. One line, and it is the price — the chooser that `b`
   // opens carries the rest, so repeating it here would be the same words twice.
@@ -2730,6 +2763,11 @@ function _rdoBuildUpdate(state, n) {
     _rdoSetIcon(n.stateIco, kind, 'bldico');
     n.state.k.setAttribute('title', DEV_NAMES[kind] +
       (DEV_LIVE[kind] ? '' : ' — no effect implemented yet'));
+    // The name beside the icon, and the inert marker. Both read from
+    // sim/development.js — DEV_NAMES and DEV_LIVE — rather than from anything
+    // this file knows, so neither can drift from what the sim actually does.
+    _rdoSet(n.stateName, 'bldname', DEV_NAMES[kind] || kind);
+    _rdoSet(n.inert, 'bldinert', DEV_LIVE[kind] ? '' : 'no effect yet');
 
     var op = operatingTier(state, sid);
     // ONE SLOT PER BUILT TIER, FILLED TO THE OPERATING TIER. The empty slots are
@@ -2754,13 +2792,31 @@ function _rdoBuildUpdate(state, n) {
     _rdoShow(n.state, 'bldstate', true);
   } else {
     _rdoShow(n.state, 'bldstate', false);
+    // CLEARED, not merely hidden. _rdoShow puts display:none on the ROW, so the
+    // stale name and marker inside it are invisible — until the day something
+    // shows that row without going through this branch first, and then the rail
+    // confidently labels an undeveloped city with the last city's development.
+    // Costs two writes on a row that is not on screen; removes a class of bug
+    // that would look exactly like #18.
+    _rdoSet(n.stateName, 'bldname', '');
+    _rdoSet(n.inert, 'bldinert', '');
   }
 
   // ── what `b` would buy ──
   var plan = developmentPlan(state, sid, me, null);
   var nextText = null;
   if (plan.ok) {
-    nextText = _rdoNum(plan.cost) + ' units → ' + DEV_NAMES[plan.kind] + ' ' + plan.tier;
+    // DO NOT SAY THE KIND TWICE. The state row directly above already names it,
+    // so on a developed city this reads "72.0 units → tier 3" — and on an
+    // undeveloped one, where there IS no row above, it still has to name what it
+    // is offering. `built > 0` is exactly the condition under which that row is
+    // shown, a few lines up, so the two cannot disagree.
+    //
+    // Not cosmetic: at 200px "72.0 units → Fortification 3" wraps to two lines
+    // and the section goes from three rows to four, which is the opposite of
+    // what was asked for.
+    nextText = _rdoNum(plan.cost) + ' units → ' +
+      (built > 0 ? 'tier ' : (DEV_NAMES[plan.kind] + ' ')) + plan.tier;
   } else if (plan.reason === 'choose-kind') {
     nextText = 'choose';
   } else if (plan.reason === 'at-max-tier') {

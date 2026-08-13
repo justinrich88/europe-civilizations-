@@ -3705,6 +3705,32 @@ kbd.help-key {
   gap: 7px;
 }
 
+/* The kind, in words, beside its icon. The key column is a fixed narrow gutter,
+   so this sits INSIDE it next to the glyph rather than taking a row of its own —
+   the whole point of the request was fewer rows, not more. */
+.rdo-dev-state .rdo-k {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.rdo-dev-name {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ink, #d7dee8);
+  white-space: nowrap;
+}
+
+/* "no effect yet" — dim, not amber. Amber is spent on the shortfall, which is a
+   thing to go and FIX; this is a thing to know and shrug at, and giving them the
+   same colour would make the row shout twice and mean neither. */
+.rdo-dev-inert {
+  font-size: 9px;
+  font-style: italic;
+  color: var(--ink-dim, #8b949e);
+  white-space: nowrap;
+}
+.rdo-dev-inert:empty { display: none; }
+
 .rdo-dev-pips { display: inline-flex; gap: 3px; align-items: center; }
 
 /* One slot per BUILT tier, filled to the OPERATING tier. Same encoding as the

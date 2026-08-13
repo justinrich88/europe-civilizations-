@@ -152,8 +152,49 @@ function suiteVictoryChart() {
       'is repainting the buttons and not the chart');
     assert((doc.querySelector('.vscr-chart-unit') || {}).textContent !== beforeUnit,
       'the unit label did not follow the metric');
-    assert((doc.querySelector('.vscr-chart-y') || {}).textContent !== beforeY,
-      'the y axis did not rescale — territory and development do not share a range');
+    // THE Y AXIS, AND ONLY WHEN THE TWO METRICS ACTUALLY DIFFER.
+    //
+    // This read `!==` unconditionally and went red at D1.5 — not because the
+    // repaint broke, but because a changed AI produced a game in which the
+    // territory peak and the development peak round to the SAME nice maximum.
+    // The assertion was true of the games this suite happened to generate and
+    // was never true by construction, which is a test that fails on correct
+    // code: the tail of known-issue #8, where an assertion asserts a coincidence.
+    //
+    // So the guard stays — a repaint that leaves the axis stale is a real
+    // failure mode — but it is asked only when the data can answer it, and the
+    // vacuous case is reported rather than passed over in silence.
+    var peak = function (key) {
+      var hi = 0, p = GAME.history.p;
+      for (var id in p) {
+        var series = p[id][key] || [];
+        for (var i = 0; i < series.length; i++) if (series[i] > hi) hi = series[i];
+      }
+      return hi;
+    };
+    // AND THE COMPARISON IS ON THE ROUNDED AXIS, NOT THE RAW PEAK. The first
+    // version of this fix compared peaks and went red on a game whose territory
+    // peak was 96 and development peak 61 — different numbers that _vscrNiceMax
+    // correctly rounds to the SAME 100. The axis was right and the test was
+    // wrong, twice in a row, for two different reasons.
+    //
+    // `_vscrNiceMax` is called rather than reproduced. A test that reimplements
+    // the rounding rule agrees with a broken renderer whenever both are wrong
+    // the same way (known-issue #9).
+    var nice = (typeof _vscrNiceMax === 'function') ? _vscrNiceMax : null;
+    var afterY = (doc.querySelector('.vscr-chart-y') || {}).textContent;
+    if (!nice) {
+      skipTest('the y axis', '_vscrNiceMax is not reachable to ask where the axis lands');
+    } else if (nice(peak('terr')) !== nice(peak('dev'))) {
+      assert(afterY !== beforeY,
+        'the y axis did not rescale, and this game\'s two metrics round to ' +
+        nice(peak('terr')) + ' and ' + nice(peak('dev')) + ' — so it should have');
+    } else {
+      assertEqual(afterY, beforeY,
+        'territory and development both round to ' + nice(peak('terr')) + ' on this ' +
+        'game, so the axis must NOT move — a change means the label is not derived ' +
+        'from the data at all');
+    }
     assert(terr.classList.contains('is-on') && !dev.classList.contains('is-on'),
       'the active tab did not move');
 
